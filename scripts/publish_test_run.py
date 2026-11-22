@@ -2,12 +2,17 @@
 
 import json
 import os
+import re
 import sys
 from pathlib import Path, PurePosixPath
 from xml.etree import ElementTree
 
 MAX_FAILURES = 500
 MAX_LABEL = 1000
+_EXCEPTION = re.compile(
+    r"^E[ \t]+(?:[\w]+\.)*([A-Za-z_][A-Za-z_0-9]*(?:Error|Exception))\b",
+    re.MULTILINE,
+)
 
 
 def read_report(path: Path) -> dict:
@@ -27,11 +32,18 @@ def read_report(path: Path) -> dict:
                     if len(normalized) <= MAX_LABEL:
                         source_path = normalized
                 name = ".".join(filter(None, (case.get("classname"), case.get("name"))))
-                failures.append({
+                detail = {
                     "kind": kind,
                     "name": (name or "Unnamed test")[:MAX_LABEL],
                     "source_path": source_path,
-                })
+                }
+                # Keep an exception class only. Pytest can print a chained root cause before
+                # the wrapper exception, so retain the first reported exception.
+                node = case.find(kind)
+                exception = _EXCEPTION.search(node.text or "") if node is not None else None
+                if exception:
+                    detail["exception_type"] = exception[1][:100]
+                failures.append(detail)
         elif case.find("skipped") is not None:
             counts["skipped"] += 1
         else:
