@@ -10,10 +10,10 @@ from app.config.settings import Settings
 
 def test_verify_hs256_token() -> None:
     settings = Settings(
-        _env_file=None, auth_required=False, jwt_secret_key="super-secret",
+        _env_file=None, auth_required=False, jwt_secret_key="super-secret-key-for-testing-only",
         jwt_algorithm="HS256", jwt_audience="MemoryGraphMCP",
     )
-    token = jwt.encode({"sub": "agent-1", "aud": "MemoryGraphMCP"}, "super-secret", algorithm="HS256")
+    token = jwt.encode({"sub": "agent-1", "aud": "MemoryGraphMCP"}, "super-secret-key-for-testing-only", algorithm="HS256")
 
     claims = JWTVerifier(settings).verify(token)
 
