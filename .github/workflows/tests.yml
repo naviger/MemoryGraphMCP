@@ -15,18 +15,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - run: python -m pip install '.[dev]'
+      - name: Build and install
+        id: build
+        shell: bash
+        run: |
+          python -m pip install -v '.[dev]' 2>&1 | tee build.log
+          if [ -f review-ui/package-lock.json ]; then
+            npm ci --prefix review-ui 2>&1 | tee -a build.log
+            npm run build --prefix review-ui 2>&1 | tee -a build.log
+          fi
       - name: Run pytest
         id: pytest
         run: |
           result=0
-          python -m pytest -o junit_family=xunit1 --junitxml=test-results.xml || result=$?
+          python -m pytest -p scripts.publish_test_run -o junit_family=xunit1 --junitxml=test-results.xml || result=$?
           echo "finished_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
           exit "$result"
       - name: Prepare MemoryGraphMCP artifact
         id: test_summary
-        if: ${{ always() && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.pytest.outputs.finished_at != '' }}
+        if: ${{ always() && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.build.outcome != 'skipped' }}
         env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
           TEST_OUTCOME: ${{ steps.pytest.outcome }}
           TEST_FINISHED_AT: ${{ steps.pytest.outputs.finished_at }}
         run: python scripts/publish_test_run.py test-results.xml
