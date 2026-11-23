@@ -4,7 +4,7 @@ import { PreviewLink } from './RecordInspector.jsx';
 
 const TYPES = { Task: 'Tasks', Goal: 'Goals', Risk: 'Risks', Constraint: 'Constraints' };
 const STATES = { open: 'Open', in_progress: 'In progress', done: 'Completed', cancelled: 'Cancelled' };
-const MODES = { PLAN_ONLY: 'Plan', IMPLEMENT: 'Implement', REVIEW: 'Review', FULL_LIFECYCLE: 'Full lifecycle' };
+const MODES = { PLAN_ONLY: 'Plan', IMPLEMENT: 'Implement', REVIEW: 'Review checkout', FULL_LIFECYCLE: 'Full lifecycle' };
 const ACTIVE = ['READY', 'RUNNING', 'BLOCKED', 'CANCEL_REQUESTED'];
 const EMPTY = { name: '', description: '', scope: '', authority: '' };
 const stamp = (date) => date ? new Date(date).toLocaleString() : '—';
@@ -101,10 +101,29 @@ function ExecutionUsage({ job }) {
   </section>;
 }
 
-function TaskExecution({ task, send, agents, close, navigate, canWrite }) {
+const reviewBlocked = (result) => result.review_verdict === 'blocking' ||
+  (!result.review_verdict && /^blocking finding:/i.test(result.summary || ''));
+
+function ReviewResult({ result, navigate }) {
+  const target = result.reviewed_target;
+  if (!target) return reviewBlocked(result) ? <div className="status error">
+    <strong>Changes required — review blocked</strong><p>This older result did not record the reviewed target.</p>
+  </div> : null;
+  return <div className={result.review_verdict === 'blocking' ? 'status error' : 'status'}>
+    <strong>{result.review_verdict === 'blocking' ? 'Changes required — review blocked' : 'Review passed'}</strong>
+    <p>Reviewed {target.kind === 'implementation patch' ? (
+      <>the patch from <PreviewLink destination="entities" entityKey={target.execution_id} navigate={navigate}>
+        execution {target.execution_id.slice(0, 12)}
+      </PreviewLink><br />Base commit <code>{target.base_commit}</code><br />Patch SHA-256 <code>{target.patch_sha256}</code></>
+    ) : <>checkout commit <code>{target.commit}</code></>}</p>
+  </div>;
+}
+
+function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAvailable }) {
   const [jobs, setJobs] = useState(null);
   const [agent, setAgent] = useState(Object.keys(agents)[0] || '');
   const [mode, setMode] = useState('');
+  const [recommendation, setRecommendation] = useState(null);
   const [requested, setRequested] = useState(() => crypto.randomUUID());
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -116,14 +135,29 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite }) {
     return () => window.clearInterval(timer);
   }, [reload]);
   const active = (jobs || []).some((job) => ACTIVE.includes(job.state));
-  const selectedMode = mode || agents[agent]?.[0] || '';
+  const workflows = Object.keys(MODES).filter((value) => Object.values(agents).some((allowed) => allowed.includes(value)));
+  const selectedMode = workflows.includes(mode) ? mode : workflows[0] || '';
+  const eligible = Object.keys(agents).filter((value) => agents[value].includes(selectedMode));
+  const selectedAgent = eligible.includes(agent) ? agent : eligible[0] || '';
+  async function recommend() {
+    setBusy(true); setError(''); setRecommendation(null);
+    try {
+      const choice = await send(`/workspace/tasks/${task.key}/recommend-agent`, { mode: selectedMode });
+      setAgent(choice.agent);
+      setRecommendation(choice);
+    } catch (err) { setError(err.message); }
+    finally { setBusy(false); }
+  }
   async function submit(job, action = 'cancel') {
     setBusy(true);
     setError('');
     try {
-      if (job) await send(`${path}/${job.key}/${action}`, {});
+      if (action === 'review-patch') {
+        await send(path, { request_id: requested, agent: 'codex', mode: 'REVIEW', patch_execution_key: job.key });
+        setRequested(crypto.randomUUID());
+      } else if (job) await send(`${path}/${job.key}/${action}`, {});
       else {
-        await send(path, { request_id: requested, agent, mode: selectedMode });
+        await send(path, { request_id: requested, agent: selectedAgent, mode: selectedMode });
         setRequested(crypto.randomUUID());
       }
       await reload();
@@ -133,21 +167,27 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite }) {
   return <section className="detail workspace-form">
     <div className="workspace-actions"><h3>{task.name}</h3>
       <button className="button outlined" type="button" onClick={close}>Close</button></div>
-    {canWrite && !active && !['done', 'cancelled'].includes(task.status) && (agent ? (
-      <form className="workspace-actions" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-        <label>Agent<select value={agent} onChange={(event) => { setAgent(event.target.value); setMode(''); }}>
-          {Object.keys(agents).map((item) => <option key={item}>{item}</option>)}
-        </select></label>
-        <label>Mode<select value={selectedMode} onChange={(event) => setMode(event.target.value)}>
-          {(agents[agent] || []).map((item) => <option key={item} value={item}>{MODES[item]}</option>)}
-        </select></label>
-        <button className="button primary" disabled={busy || !jobs}>Start execution</button>
+    {canWrite && !active && !['done', 'cancelled'].includes(task.status) && (selectedAgent ? (
+      <form className="workspace-form" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+        <div className="workspace-actions">
+          <label>Workflow<select disabled={busy} value={selectedMode} onChange={(event) => { setMode(event.target.value); setRecommendation(null); }}>
+            {workflows.map((item) => <option key={item} value={item}>{MODES[item]}</option>)}
+          </select></label>
+          <label>Agent<select disabled={busy} value={selectedAgent} onChange={(event) => setAgent(event.target.value)}>
+            {eligible.map((item) => <option key={item}>{item}</option>)}
+          </select></label>
+          {draftAvailable && <button className="button outlined" type="button" disabled={busy} onClick={recommend}>Recommend agent</button>}
+          <button className="button primary" disabled={busy || !jobs}>Start execution</button>
+        </div>
+        <p>Phases: {PHASES[selectedMode]?.join(' → ')}</p>
+        {selectedMode === 'REVIEW' && <p className="muted">This reviews the checkout’s latest commit. For an implementation artifact, choose Review this patch on its execution.</p>}
+        {recommendation && <p role="status"><strong>Ollama recommends {recommendation.agent}.</strong> {recommendation.reason}{selectedAgent !== recommendation.agent ? ' You selected a different agent.' : ''}</p>}
       </form>
     ) : <p>No agent is configured for this project.</p>)}
     {jobs === null && !error && <p role="status">Loading execution history…</p>}
     {jobs?.length === 0 && <p>No executions yet.</p>}
     {jobs?.map((job, index) => <details key={job.key} open={index === 0 ? true : undefined}>
-      <summary>{MODES[job.mode]} · {job.agent} · {job.state} · {stamp(job.created_at)}</summary>
+      <summary>{job.patch_execution_key ? 'Review patch' : MODES[job.mode]} · {job.agent} · {job.state} · {stamp(job.created_at)}{job.results.some(reviewBlocked) && <strong className="status error"> · Changes required</strong>}</summary>
       <p><PreviewLink destination="entities" entityKey={job.key} navigate={navigate}>Open execution in the graph</PreviewLink></p>
       {canWrite && job.state !== 'CANCEL_REQUESTED' && ACTIVE.includes(job.state) && <button className="button outlined" type="button" disabled={busy}
         onClick={() => submit(job)}>Cancel execution</button>}
@@ -156,11 +196,19 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite }) {
       {canWrite && ['BLOCKED', 'FAILED'].includes(job.state) && !['done', 'cancelled'].includes(task.status) &&
         <button className="button primary" type="button"
           disabled={busy || (job.state === 'FAILED' && active)} onClick={() => submit(job, 'retry')}>Retry now</button>}
+      <ol className="workspace-actions" aria-label="Workflow phases">{PHASES[job.mode]?.map((phase, phaseIndex) => (
+        <li key={phase}>{phase} · {phaseIndex < job.phase ? (job.results[phaseIndex]?.review_verdict === 'blocking' ? 'Blocked' : 'Finished') :
+          phaseIndex === job.phase ? job.state : 'Waiting'}</li>
+      ))}</ol>
+      {canWrite && !active && task.status !== 'cancelled' && agents.codex?.includes('REVIEW') &&
+        job.agent === 'codex' && job.results.some((result) => result.artifacts.some((artifact) => artifact.name === 'Local implementation patch')) &&
+        <button className="button primary" type="button" disabled={busy} onClick={() => submit(job, 'review-patch')}>Review this patch</button>}
       <ExecutionUsage job={job} />
       <ol>{job.timeline.map((item, eventIndex) => <li key={eventIndex}>
         {item.action === 'retry' ? 'Retry requested' : item.state} · {stamp(item.timestamp)} · {item.actor}
       </li>)}</ol>
       {job.results.map((result, resultIndex) => <div key={resultIndex}>
+        <ReviewResult result={result} navigate={navigate} />
         <p>{result.summary}</p>
         {result.plan && <p><strong>Plan</strong> {result.plan}</p>}
         {result.pull_request && <p><strong>Pull request</strong> {result.pull_request}</p>}
@@ -236,7 +284,7 @@ export default function ProjectWorkspace({ projectKey, token, navigate, onUnauth
     {editor?.type === 'create' && <WorkEditor kind={kind} send={send} refresh={refresh} draftAvailable={data.draft_available} close={() => setEditor(null)} />}
     {editor?.type === 'state' && <EditTask key={editor.task.key} task={editor.task} send={send} refresh={refresh} close={() => setEditor(null)} />}
     {editor?.type === 'execution' && <TaskExecution key={editor.task.key} task={editor.task} send={send}
-      agents={data.agents} canWrite={data.can_write} navigate={navigate} close={() => { setEditor(null); refresh(); }} />}
+      agents={data.agents} draftAvailable={data.draft_available} canWrite={data.can_write} navigate={navigate} close={() => { setEditor(null); refresh(); }} />}
     {error && <p className="status error" role="alert">{error}</p>}
     {!data && !error && <p role="status">Loading workspace…</p>}
     {data && <div className="table-scroll"><table className="change-table workspace-table">

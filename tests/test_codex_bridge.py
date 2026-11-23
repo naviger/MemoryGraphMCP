@@ -133,3 +133,52 @@ def test_reported_usage_prices_failed_and_successful_turns():
     }
     assert reported_usage(events)["estimated_cost_usd"] is None
     assert reported_usage('{"type":"turn.failed"}') is None
+
+
+def test_review_targets_saved_patch_even_after_checkout_changes(bridge):
+    import hashlib
+
+    source, review = "d" * 64, "e" * 64
+    implementation = bridge.run(
+        source,
+        "execute",
+        json.dumps(
+            {
+                "project_key": "target-project",
+                "mode": "IMPLEMENT",
+            }
+        ),
+    )
+    original = Path(implementation["artifacts"][0]["reference"])
+    result = bridge.run(
+        review,
+        "review",
+        json.dumps(
+            {
+                "project_key": "target-project",
+                "mode": "REVIEW",
+                "patch_execution_key": source,
+            }
+        ),
+    )
+    assert result["review_verdict"] == "passed"
+    assert result["reviewed_target"] == {
+        "kind": "implementation patch",
+        "execution_id": source,
+        "base_commit": git(bridge.repo, "rev-parse", "HEAD").decode().strip(),
+        "patch_sha256": hashlib.sha256(original.read_bytes()).hexdigest(),
+    }
+    assert (bridge.state / review / "repo" / "fixture.txt").read_text() == "changed by adapter\n"
+    original.write_bytes(original.read_bytes() + b"\n")
+    with pytest.raises(BridgeError, match="changed"):
+        bridge.run(
+            "f" * 64,
+            "review",
+            json.dumps(
+                {
+                    "project_key": "target-project",
+                    "mode": "REVIEW",
+                    "patch_execution_key": source,
+                }
+            ),
+        )

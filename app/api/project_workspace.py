@@ -13,7 +13,13 @@ from app.auth.project_access import current_project_access
 from app.domain.capture_checkpoint import CaptureHistoryInput, CaptureStatus
 from app.domain.exceptions import ArchitectureGraphError
 from app.domain.models import MemoryKey
-from app.domain.project_workspace import AssistDraft, StartExecution, TaskUpdate, WorkDraft
+from app.domain.project_workspace import (
+    AssistDraft,
+    RecommendAgent,
+    StartExecution,
+    TaskUpdate,
+    WorkDraft,
+)
 
 
 def build_workspace_router(prefix, workspace, executor, capture):
@@ -76,6 +82,17 @@ def build_workspace_router(prefix, workspace, executor, capture):
     async def update(project: MemoryKey, task: MemoryKey, data: TaskUpdate, request: Request):
         actor = authorize(project, request, write=True)
         return await invoke(workspace.task_update, project, task, data, actor)
+
+    @router.post("/{project}/workspace/tasks/{task}/recommend-agent")
+    async def recommend(
+        project: MemoryKey, task: MemoryKey, data: RecommendAgent, request: Request
+    ):
+        authorize(project, request, write=True)
+        record = await invoke(workspace.task, project, task)
+        try:
+            return await executor.recommend(record, data.mode)
+        except (ArchitectureGraphError, httpx.HTTPError, ValueError, KeyError) as exc:
+            raise HTTPException(503, "Could not obtain an eligible agent recommendation") from exc
 
     @router.get("/{project}/workspace/tasks/{task}/executions")
     async def history(project: MemoryKey, task: MemoryKey, request: Request):

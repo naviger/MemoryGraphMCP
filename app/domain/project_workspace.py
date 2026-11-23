@@ -42,6 +42,7 @@ class StartExecution(BaseModel):
     request_id: MemoryKey
     agent: AgentName
     mode: ExecutionMode
+    patch_execution_key: MemoryKey | None = None
 
 
 class TaskUpdate(BaseModel):
@@ -52,6 +53,7 @@ class TaskUpdate(BaseModel):
 class AgentArtifact(BaseModel):
     name: EntityName
     reference: WorkText
+    sha256: str | None = None
 
 
 class AgentResult(BaseModel):
@@ -67,3 +69,10 @@ class AgentResult(BaseModel):
     related_keys: list[MemoryKey] = Field(default_factory=list, max_length=50)
     completed: bool = False
     usage: ExecutionUsage | None = None
+
+    review_verdict: Literal["passed", "blocking"] | None = None
+    reviewed_target: dict[str, str] | None = None
+
+
+class RecommendAgent(BaseModel):
+    mode: ExecutionMode

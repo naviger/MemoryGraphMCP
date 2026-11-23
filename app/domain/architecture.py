@@ -272,6 +272,7 @@ class Execution(ArchitectureNode):
     entity_type: Literal["Execution"] = "Execution"
     project_key: MemoryKey
     task_key: MemoryKey
+    patch_execution_key: MemoryKey | None = None
     agent: Literal["local", "codex", "claude-code", "openhands"]
     mode: Literal["PLAN_ONLY", "IMPLEMENT", "REVIEW", "FULL_LIFECYCLE"]
     state: Literal[

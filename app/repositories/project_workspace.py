@@ -166,21 +166,53 @@ class ProjectWorkspaceRepository:
             existing = nodes.get(execution_key)
             if existing:
                 execution = Execution.model_validate(existing)
-                if (execution.agent, execution.mode, execution.requested_by) != (
+                if (
+                    execution.agent,
+                    execution.mode,
+                    execution.requested_by,
+                    execution.patch_execution_key,
+                ) != (
                     command.agent,
                     command.mode,
                     actor,
+                    command.patch_execution_key,
                 ):
                     raise ArchitectureGraphError("Execution request ID was already used")
                 return execution
             task = self._task_in_transaction(tx, project, task)
-            if task.metadata.get("active_execution") or task.status in {"done", "cancelled"}:
+            if (
+                task.metadata.get("active_execution")
+                or task.status == "cancelled"
+                or (task.status == "done" and not command.patch_execution_key)
+            ):
                 raise ArchitectureGraphError("Task must be open and have no active execution")
+            if command.patch_execution_key:
+                if command.mode != "REVIEW" or command.agent != "codex":
+                    raise ArchitectureGraphError("Patch review requires the Codex Review workflow")
+                source = Execution.model_validate(
+                    self.graph._require_entity_type(
+                        nodes,
+                        command.patch_execution_key,
+                        "Execution",
+                    )
+                )
+                if (
+                    source.project_key != project
+                    or source.task_key != key
+                    or source.agent != "codex"
+                    or not any(
+                        artifact.get("name") == "Local implementation patch"
+                        for result in source.results
+                        for artifact in result.get("artifacts", [])
+                    )
+                ):
+                    raise ArchitectureGraphError("Execution has no reviewable patch for this task")
             job = Execution(
                 key=execution_key,
                 name=f"{task.name} execution"[:500],
                 project_key=project,
                 task_key=key,
+                patch_execution_key=command.patch_execution_key,
                 requested_by=actor,
                 agent=command.agent,
                 mode=command.mode,
@@ -194,12 +226,14 @@ class ProjectWorkspaceRepository:
                 tx,
                 task.model_copy(
                     update={
-                        "status": "in_progress",
+                        "status": task.status if command.patch_execution_key else "in_progress",
                         "metadata": {**task.metadata, "active_execution": job.key},
                     }
                 ),
             )
             self.link(tx, project, job.key, "defines", now)
+            if job.patch_execution_key:
+                self.link(tx, job.key, job.patch_execution_key, "references", now)
             self.link(tx, project, agent_key, "defines", now)
             self.link(tx, task.key, job.key, "produced", now)
             self.link(tx, job.key, agent_key, "uses", now)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import json
 import math
@@ -178,12 +179,12 @@ class CodexBridge:
             with self.lock:
                 self.running.pop(identity, None)
 
-    def prepare_repo(self, directory):
+    def prepare_repo(self, directory, source=None):
         checkout = directory / "repo"
         if not checkout.exists():
             # A separate local clone keeps writable Git metadata away from the source checkout.
             git(
-                self.repo,
+                source or self.repo,
                 "clone",
                 "--no-hardlinks",
                 "--no-tags",
@@ -199,8 +200,61 @@ class CodexBridge:
     def run_phase(self, identity, phase, mode, prompt):
         directory = self.state / identity
         directory.mkdir(exist_ok=True, mode=0o700)
-        checkout = self.prepare_repo(directory)
-        base = (directory / "base").read_text().strip()
+        context = json.loads(prompt)
+        target = context.get("patch_execution_key") if phase == "review" else None
+        reviewed_target = None
+        if target:
+            if not re.fullmatch(r"[a-f0-9]{64}", target) or mode != "REVIEW":
+                raise BridgeError(400, "Invalid patch execution reference")
+            original = self.state / target
+            patch = original / "implementation.patch"
+            source = original / "repo"
+            with closing(self.database()) as db:
+                recorded = db.execute(
+                    "SELECT result FROM phase_results WHERE id=? AND phase='execute'",
+                    (target,),
+                ).fetchone()
+            if not recorded or not patch.is_file() or not source.is_dir():
+                raise BridgeError(409, "The requested implementation patch is unavailable")
+            checkout = self.prepare_repo(directory, source)
+            base = (original / "base").read_text().strip()
+            git(checkout, "reset", "--hard", base)
+            git(checkout, "clean", "-fdx")
+            captured = directory / "reviewed.patch"
+            contents = patch.read_bytes()
+            digest = hashlib.sha256(contents).hexdigest()
+            for artifact in json.loads(recorded[0]).get("artifacts", []):
+                if artifact.get("name") == "Local implementation patch" and artifact.get("sha256"):
+                    if artifact["sha256"] != digest:
+                        raise BridgeError(
+                            409, "The implementation patch changed after it was saved"
+                        )
+            captured.write_bytes(contents)
+            git(checkout, "apply", "--index", str(captured))
+            reviewed_target = {
+                "kind": "implementation patch",
+                "execution_id": target,
+                "base_commit": base,
+                "patch_sha256": digest,
+            }
+        else:
+            checkout = self.prepare_repo(directory)
+            base = (directory / "base").read_text().strip()
+            if phase == "review":
+                reviewed_target = {"kind": "checkout commit", "commit": base}
+                if mode == "FULL_LIFECYCLE":
+                    patch = directory / "implementation.patch"
+                    if not patch.is_file():
+                        raise BridgeError(409, "The implementation phase did not save a patch")
+                    git(checkout, "reset", "--hard", base)
+                    git(checkout, "clean", "-fdx")
+                    git(checkout, "apply", "--index", str(patch))
+                    reviewed_target = {
+                        "kind": "implementation patch",
+                        "execution_id": identity,
+                        "base_commit": base,
+                        "patch_sha256": hashlib.sha256(patch.read_bytes()).hexdigest(),
+                    }
         writable = phase == "execute"
         checkpoint = directory / "partial-timeout.patch"
         if writable:
@@ -225,7 +279,12 @@ class CodexBridge:
         }[phase]
         if writable and checkpoint.exists():
             instructions += " Resume from the partial implementation in the checkout. Verify it."
-        if phase == "review" and mode == "REVIEW":
+        if phase == "review" and reviewed_target["kind"] == "implementation patch":
+            instructions += (
+                " Review the staged patch shown by git diff --cached HEAD, including new files. "
+                "Evaluate the staged changes against the task. The base commit is context."
+            )
+        if phase == "review" and mode == "REVIEW" and not target:
             instructions += (
                 " Review the current HEAD commit against its parent for this standalone review."
             )
@@ -303,6 +362,8 @@ class CodexBridge:
             result.update(summary="Codex generated a task plan.", plan=summary)
         if phase == "review":
             result["review_comments"] = [summary]
+            result["review_verdict"] = "passed" if response["approved"] is True else "blocking"
+            result["reviewed_target"] = reviewed_target
             result["completed"] = mode == "FULL_LIFECYCLE" and response["approved"] is True
         if writable:
             git(checkout, "add", "--all")
@@ -312,7 +373,11 @@ class CodexBridge:
                 patch = directory / "implementation.patch"
                 patch.write_bytes(changes)
                 result["artifacts"] = [
-                    {"name": "Local implementation patch", "reference": str(patch)}
+                    {
+                        "name": "Local implementation patch",
+                        "reference": str(patch),
+                        "sha256": hashlib.sha256(changes).hexdigest(),
+                    }
                 ]
                 result["files_modified"] = [
                     name.decode(errors="replace")[:8000] for name in files.split(b"\0") if name
