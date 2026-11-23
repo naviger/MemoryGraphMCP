@@ -37,6 +37,7 @@ from app.domain.architecture_events import (
     TrackerActivity,
 )
 from app.domain.context_usage import UsageOutcome, UsageReceipt, UsageScope
+from app.domain.effectiveness import DevelopmentOutcome, OutcomeReceipt
 from app.domain.exceptions import ArchitectureGraphError
 from app.domain.knowledge_capture import CaptureReviewItem
 from app.domain.project_changes import BranchCleanup
@@ -485,7 +486,7 @@ class ArangoArchitectureRepository:
             raise ArchitectureGraphError(f"Event '{event_id}' was not found")
         return GraphEventReceipt.model_validate(row)
 
-    def _task_projects(self, nodes, edges, task_key: str) -> set[str]:
+    def _direct_projects(self, nodes, edges, task_key: str) -> set[str]:
         task_id = f"{self._entities}/{task_key}"
         owners = set()
         for endpoint, other in (("_from", "target_key"), ("_to", "source_key")):
@@ -520,7 +521,7 @@ class ArangoArchitectureRepository:
             task = nodes.get(event.task_key)
             if task is not None and (
                 task["entity_type"] != "Task"
-                or self._task_projects(nodes, edges, event.task_key) != {project_key}
+                or self._direct_projects(nodes, edges, event.task_key) != {project_key}
             ):
                 raise ArchitectureGraphError("Task is not exclusively linked to the tracker project")
 
@@ -1111,6 +1112,133 @@ class ArangoArchitectureRepository:
             RETURN row
         """, bind_vars=bindings)
         return groups, [UsageReceipt.model_validate(row) for row in recent]
+
+    def save_development_outcome(self, outcome: DevelopmentOutcome, actor: str) -> OutcomeReceipt:
+        key = architecture_key("development-outcome", outcome.project_key, outcome.repository_key, outcome.change_id)
+        with self._transaction(with_events=True, read_edges=True) as transaction:
+            journal = transaction.collection(self._events)
+            existing = journal.get(key)
+            if existing is not None:
+                previous = OutcomeReceipt.model_validate(existing)
+                if previous.outcome != outcome:
+                    raise ArchitectureGraphError("A different outcome already exists for this change")
+                return previous
+            nodes = transaction.collection(self._entities)
+            self._require_entity_type(nodes, outcome.project_key, "Project")
+            repo = self._require_entity_type(nodes, outcome.repository_key, "Repository")
+            edges = transaction.collection(self._edges)
+            if repo.get("role") != "source" or outcome.project_key not in self._direct_projects(
+                nodes, edges, outcome.repository_key,
+            ):
+                raise ArchitectureGraphError("Source repository is outside the project")
+            if outcome.task_key:
+                self._require_entity_type(nodes, outcome.task_key, "Task")
+                if self._direct_projects(nodes, edges, outcome.task_key) != {outcome.project_key}:
+                    raise ArchitectureGraphError("Task is outside the project")
+            for rule in outcome.violated_constraints:
+                constraint = self._require_entity_type(nodes, rule, "Constraint")
+                if constraint.get("repository") != repo["name"] and not (
+                    outcome.project_key in self._direct_projects(nodes, edges, rule)
+                    or self._constraint_governs_repository(nodes, edges, rule, repo["name"])
+                ):
+                    raise ArchitectureGraphError("Constraint is outside the project and repository")
+            receipt = OutcomeReceipt(
+                key=key, outcome=outcome, recorded_at=datetime.now(UTC), recorded_by=actor,
+            )
+            journal.insert({
+                "_key": key, "event_type": "development.outcome",
+                "project_key": outcome.project_key,
+                **receipt.model_dump(mode="json"),
+            })
+            return receipt
+
+    def _constraint_governs_repository(self, nodes, edges, rule: str, repository: str) -> bool:
+        handle = f"{self._entities}/{rule}"
+        for edge in edges.find({"_to": handle, "relationship_type": "constrained_by"}):
+            target = nodes.get(edge["source_key"])
+            if target and target.get("repository") == repository and target.get("index_state") != "stale":
+                return True
+        return False
+
+    def effectiveness_graph(
+        self, project: str, allowed: list[str], repositories: list[str], repository: str | None,
+    ) -> dict:
+        rows = self._database().aql.execute(
+            """
+            WITH @@entities
+            LET owned = (
+                FOR node IN @@entities
+                    FILTER node.repository IN @repositories AND node.index_state == "stale"
+                    RETURN node._key
+            )
+            LET seeds = @repository == null ? @allowed : (
+                FOR node IN @@entities
+                    FILTER node._key IN @allowed
+                    FILTER node.repository == @repository OR
+                        (node.entity_type == "Repository" AND node.role == "source" AND node.name == @repository)
+                    RETURN node._key
+            )
+            LET nearby = (
+                FOR key IN seeds
+                    FOR node, edge IN 1..1 ANY CONCAT(@entities_name, "/", key) @@edges
+                        FILTER node.index_state != "stale"
+                        FILTER node.metadata.capture_project == null OR node.metadata.capture_project == @project
+                        FILTER (node._key IN @allowed AND node.entity_type IN
+                                ["ADR", "Constraint", "Goal", "Observation", "Task", "TestSuite"]
+                                AND edge.relationship_type != "uses")
+                            OR (node.entity_type IN ["ADR", "Constraint", "Goal"] AND edge.relationship_type IN
+                                ["implements", "constrained_by", "supports_goal", "validated_by"])
+                        RETURN node._key
+            )
+            LET keys = UNION_DISTINCT(seeds, nearby, @repository == null ? [@project] : [])
+            LET nodes = (
+                FOR key IN keys
+                    LET node = DOCUMENT(@entities_name, key)
+                    FILTER node != null AND node.index_state != "stale"
+                    RETURN {key, type: node.entity_type, kind: node.role, memory_key: node.memory_key,
+                            status: node.status, enforcement: node.enforcement_status,
+                            documented: (IS_STRING(node.rule) AND LENGTH(node.rule) > 0
+                                AND IS_STRING(node.authority) AND LENGTH(node.authority) > 0)
+                                OR (node.entity_type == "Goal" AND LENGTH(node.success_criteria) > 0),
+                            automatic: node.metadata.capture_project == @project AND node.source != "agent_reflection",
+                            suggestions: LENGTH(node.suggestions)}
+            )
+            LET links = (
+                FOR edge IN @@edges
+                    FILTER edge.source_key IN keys AND edge.target_key IN keys
+                    RETURN {source: edge.source_key, target: edge.target_key,
+                        type: edge.relationship_type, inferred: edge.source == "static-analysis" AND edge.confidence < 1}
+            )
+            RETURN {nodes, links, stale: LENGTH(owned)}
+            """,
+            bind_vars={
+                "@entities": self._entities, "@edges": self._edges, "entities_name": self._entities,
+                "project": project, "allowed": allowed, "repositories": repositories, "repository": repository,
+            },
+        )
+        return next(iter(rows))
+
+    def effectiveness_events(
+        self, project: str, repository: str | None, start: str | None, end: str | None,
+    ) -> list[dict]:
+        return list(self._database().aql.execute(
+            """
+            FOR row IN @@events
+                FILTER row.project_key == @project
+                LET outcome = IS_OBJECT(row.outcome) ? row.outcome : {}
+                LET repo = NOT_NULL(outcome.repository_key, row.repository_key, row.payload.repository_key)
+                FILTER @repository == null OR repo == @repository
+                LET day = LEFT(NOT_NULL(outcome.occurred_at, row.occurred_at, row.timestamp, row.payload.finished_at, row.recorded_at), 10)
+                FILTER (@start == null OR day >= @start) AND (@end == null OR day <= @end)
+                FILTER row.event_type IN ["development.outcome", "task.completed", "task.upserted", "retrieval.usage", "test.run.finished"]
+                RETURN KEEP(row, ["event_type", "outcome", "payload", "task_key", "context_tokens", "savings_tokens",
+                    "occurred_at", "recorded_at"])
+            """,
+            bind_vars={
+                "@events": self._events, "project": project, "repository": repository,
+                "start": start, "end": end,
+            },
+        ))
 
     def read_guidance_state(self, project_key: str | None) -> GuidanceState:
         key = _guidance_key(project_key)

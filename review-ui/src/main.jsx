@@ -1,10 +1,11 @@
 import {
-  BarChart3, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, CircleHelp, FolderKanban, GitPullRequest,
+  Activity, BarChart3, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, CircleHelp, FolderKanban, GitPullRequest,
   House, KeyRound, MessageCircleQuestion, Network, RefreshCw, Search, ShieldCheck,
 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ApiError, reviewRequest } from './api.js';
+import { EffectivenessPage } from './EffectivenessPage.jsx';
 import { EntityDetailPage } from './EntityDetailPage.jsx';
 import { HomePage } from './HomePage.jsx';
 import { ProjectsPage } from './ProjectsPage.jsx';
@@ -116,6 +117,7 @@ function detailLocation() {
   if (/^\/help\/?$/.test(window.location.pathname)) return { destination: 'help' };
   if (/^\/global-guidance\/?$/.test(window.location.pathname)) return { destination: 'global-guidance' };
   if (/^\/token-usage\/?$/.test(window.location.pathname)) return { destination: 'token-usage' };
+  if (/^\/effectiveness\/?$/.test(window.location.pathname)) return { destination: 'effectiveness' };
   const review = window.location.pathname.match(/^\/review\/(validations|conflicts)\/?$/);
   if (review) return { destination: 'review', key: review[1] };
   if (/^\/projects\/?$/.test(window.location.pathname)) return { destination: 'projects' };
@@ -431,6 +433,11 @@ function App() {
               onClick={(event) => navigate(event, '/token-usage')}>
               <BarChart3 size={18} aria-hidden="true" /> Token usage
             </a>}
+            {session && <a href="/effectiveness" className={route?.destination === 'effectiveness' ? 'nav-item active' : 'nav-item'}
+              aria-current={route?.destination === 'effectiveness' ? 'page' : undefined}
+              onClick={(event) => navigate(event, '/effectiveness')}>
+              <Activity size={18} aria-hidden="true" /> Effectiveness
+            </a>}
             {session?.role === 'admin' && (
               <a href="/global-guidance" className={route?.destination === 'global-guidance' ? 'nav-item active' : 'nav-item'}
                 aria-current={route?.destination === 'global-guidance' ? 'page' : undefined}
@@ -487,9 +494,13 @@ function App() {
               ? <ProjectGuidance global active token={token} onUnauthorized={expireSession} />
               : <p role="alert">Administrator access is required.</p>}
           </>}
+          {session && projects && route?.destination === 'effectiveness' && <EffectivenessPage
+            key={projectKey} projectKey={projectKey} projects={projects} token={token} onUnauthorized={expireSession} />}
+          {session && !projects && route?.destination === 'effectiveness' && !projectError &&
+            <p role="status">Loading projects…</p>}
           {session && route?.destination === 'token-usage' && <TokenUsagePage projectKey={projectKey}
             token={token} onUnauthorized={expireSession} />}
-          {session && ['ask', 'search', 'graph', 'projects', 'help', 'global-guidance', 'token-usage'].includes(route?.destination)
+          {session && ['ask', 'search', 'graph', 'projects', 'help', 'global-guidance', 'token-usage', 'effectiveness'].includes(route?.destination)
             ? null : session && !isQueueRoute ? (
             <EntityDetailPage key={`${route.destination}/${route.key}`}
               route={route} token={token} navigate={navigate} onUnauthorized={expireSession}

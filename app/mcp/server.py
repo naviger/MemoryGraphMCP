@@ -9,11 +9,13 @@ from app.mcp.tools.adrs import register_adr_tools
 from app.mcp.tools.architecture import register_architecture_tools
 from app.mcp.tools.architecture_events import register_event_tools
 from app.mcp.tools.context_usage import register_context_usage
+from app.mcp.tools.effectiveness import register_effectiveness_tools
 from app.mcp.tools.revalidation import register_revalidation_tool
 from app.mcp.tools.review_queue import register_review_queue_tool
 from app.mcp.tools.search import register_search_tools
 from app.services.architecture_service import ArchitectureService
 from app.services.context_package import ContextPackageService
+from app.services.effectiveness import EffectivenessService
 from app.services.ingestion_service import MemoryIngestionService
 from app.services.knowledge_base import StaticKnowledgeBase
 from app.services.review_queue import ReviewQueueService
@@ -60,6 +62,10 @@ def build_mcp_server(
                 server, ContextPackageService(architecture_service.repository, architecture_service.memory),
                 TokenUsageService(architecture_service.repository),
             )
+        if hasattr(architecture_service.repository, "effectiveness_graph"):
+            register_effectiveness_tools(server, EffectivenessService(
+                architecture_service.repository, architecture_service.memory,
+            ))
     if (
         architecture_service is not None and settings.auth_required
         and settings.graph_event_producer_subject and settings.graph_event_project_key
