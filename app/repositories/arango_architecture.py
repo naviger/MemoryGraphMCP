@@ -38,7 +38,12 @@ from app.domain.architecture_events import (
 )
 from app.domain.exceptions import ArchitectureGraphError
 from app.domain.project_changes import BranchCleanup
-from app.domain.project_guidance import GuidanceScope
+from app.domain.project_guidance import (
+    GuidanceDraft,
+    GuidanceScope,
+    GuidanceState,
+    PublishedGuidance,
+)
 from app.domain.review_details import ProjectScope
 from app.domain.test_drafts import FixWorkflow
 from app.domain.test_runs import (
@@ -952,6 +957,70 @@ class ArangoArchitectureRepository:
             if row["url"] not in cleanups:
                 cleanups[row["url"]] = BranchCleanup.model_validate(row)
         return cleanups
+
+    def read_guidance_state(self, project_key: str) -> GuidanceState:
+        key = architecture_key("project-guidance", project_key)
+        return GuidanceState.model_validate(
+            self._database().collection(self._events).get(key) or {},
+        )
+
+    def list_guidance_versions(
+        self, project_key: str, before: int, limit: int,
+    ) -> list[PublishedGuidance]:
+        rows = self._database().aql.execute(
+            """
+            FOR event IN @@events
+                FILTER event.event_type == "project.guidance.published"
+                FILTER event.project_key == @project AND event.version < @before
+                SORT event.version DESC
+                LIMIT @limit
+                RETURN event
+            """,
+            bind_vars={
+                "@events": self._events, "project": project_key, "before": before, "limit": limit,
+            },
+        )
+        return [PublishedGuidance.model_validate(row) for row in rows]
+
+    def save_guidance_draft(
+        self, project_key: str, revision: int, text: str, actor: str,
+    ) -> None:
+        self._change_guidance(project_key, revision, actor, text=text)
+
+    def approve_guidance(self, project_key: str, revision: int, actor: str) -> None:
+        self._change_guidance(project_key, revision, actor, text=None)
+
+    def _change_guidance(
+        self, project_key: str, revision: int, actor: str, *, text: str | None,
+    ) -> None:
+        key = architecture_key("project-guidance", project_key)
+        with self._transaction(with_events=True) as transaction:
+            self._require_entity_type(transaction.collection(self._entities), project_key, "Project")
+            journal = transaction.collection(self._events)
+            state = GuidanceState.model_validate(journal.get(key) or {})
+            if revision != state.revision:
+                raise ArchitectureGraphError("Guidance changed. Reload it before continuing.")
+            state.revision += 1
+            now = datetime.now(UTC)
+            if text is not None:
+                state.draft = GuidanceDraft(text=text, edited_by=actor, edited_at=now)
+            else:
+                if state.draft is None:
+                    raise ArchitectureGraphError("Save a draft before approving it.")
+                version = (state.published.version if state.published else 0) + 1
+                state.published = PublishedGuidance(
+                    **state.draft.model_dump(), version=version, approved_by=actor, published_at=now,
+                )
+                journal.insert({
+                    "_key": architecture_key("project-guidance-version", project_key, str(version)),
+                    "event_type": "project.guidance.published", "project_key": project_key,
+                    **state.published.model_dump(mode="json"),
+                })
+                state.draft = None
+            journal.insert({
+                "_key": key, "event_type": "project.guidance.state", "project_key": project_key,
+                **state.model_dump(mode="json"),
+            }, overwrite_mode="replace")
 
     def guidance_scope(self, project_key: str) -> GuidanceScope:
         rows = self._database().aql.execute(

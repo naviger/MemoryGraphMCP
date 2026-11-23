@@ -39,7 +39,7 @@ def register_architecture_tools(
 
     @mcp.tool(annotations={"readOnlyHint": True})
     async def get_project_guidance(project_key: MemoryKey) -> ProjectGuidance:
-        """Read the project's current accepted ADRs, active constraints, and validating test keys.
+        """Read published project guidance, current accepted ADRs, and active constraints.
 
         Use the explicit Project key. Follow repository instructions and use these records as
         evidence for project decisions. Read the cited ADR or graph entity for more detail.

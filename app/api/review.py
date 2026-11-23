@@ -34,6 +34,7 @@ from app.domain.models import (
     ReviewQueueQuery,
 )
 from app.domain.project_changes import ChangeView, ProjectChanges
+from app.domain.project_guidance import GuidanceApproval, GuidanceDraftInput, GuidanceEditor
 from app.domain.review_details import (
     ProjectOverview,
     ProjectSummary,
@@ -230,6 +231,49 @@ def build_review_router(
             raise HTTPException(status_code=404, detail="Project not found")
         response.headers["Cache-Control"] = "no-store"
         return summary
+
+    @router.get("/projects/{key}/guidance")
+    async def get_guidance_editor(
+        key: MemoryKey, request: Request, response: Response,
+        before_version: Annotated[int | None, Query(ge=1)] = None,
+    ) -> GuidanceEditor:
+        claims = getattr(request.state, "auth_claims", {})
+        result = await details.get_guidance_editor(
+            key, writer_subject(claims) is not None, access_role(claims) == "admin", before_version,
+        )
+        if result is None:
+            raise HTTPException(404, "Project not found")
+        response.headers["Cache-Control"] = "no-store"
+        return result
+
+    @router.post("/projects/{key}/guidance/draft")
+    async def save_guidance_draft(
+        key: MemoryKey, draft: GuidanceDraftInput, request: Request, response: Response,
+    ) -> GuidanceEditor:
+        actor = _require_writer(request)
+        if await details.get_guidance_editor(key, False, False, None) is None:
+            raise HTTPException(404, "Project not found")
+        try:
+            await details.change_guidance(key, draft.revision, actor, text=draft.text)
+        except ArchitectureGraphError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return await get_guidance_editor(key, request, response)
+
+    @router.post("/projects/{key}/guidance/approve")
+    async def approve_guidance(
+        key: MemoryKey, approval: GuidanceApproval, request: Request, response: Response,
+    ) -> GuidanceEditor:
+        claims = getattr(request.state, "auth_claims", {})
+        actor = _require_writer(request)
+        if access_role(claims) != "admin":
+            raise HTTPException(403, "An administrator must approve project guidance")
+        if await details.get_guidance_editor(key, False, False, None) is None:
+            raise HTTPException(404, "Project not found")
+        try:
+            await details.change_guidance(key, approval.revision, actor)
+        except ArchitectureGraphError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return await get_guidance_editor(key, request, response)
 
     @router.get("/projects/{key}/tracker")
     async def get_tracker_overview(key: MemoryKey, response: Response) -> TrackerOverview:

@@ -485,3 +485,6 @@ select {
   border-bottom: 1px solid var(--line);
 }
 .tracker-activity td code { overflow-wrap: anywhere; }
+
+.guidance-text { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: .75rem; }
+.guidance-editor { display: block; width: 100%; margin: .35rem 0 .6rem; }

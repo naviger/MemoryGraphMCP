@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import jwt
 import pytest
+from fastapi.testclient import TestClient
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -412,3 +415,61 @@ def test_tracker_event_rolls_back_task_and_link_when_receipt_write_fails(
     assert tracker_graph.read_entity("rollback") is None
     assert not repository.database.collection("architecture_edges").documents_by_key
     assert not repository.database.collection("architecture_events").documents_by_key
+
+def test_guidance_approval_publishes_saved_revision_and_preserves_history(repository, monkeypatch):
+    with patch.dict("os.environ", {"MGMCP_AUTH_REQUIRED": "false"}):
+        from app.main import create_application
+
+    graph = repository.architecture
+    graph.ensure_storage_ready()
+    graph.put_entity(Project(key="project", name="Project"))
+
+    class JournalQuery:
+        def execute(self, query, bind_vars):
+            rows = repository.database.collection("architecture_events").documents_by_key.values()
+            versions = [
+                entry for entry in rows
+                if entry["event_type"] == "project.guidance.published"
+                and entry["project_key"] == bind_vars["project"]
+                and entry["version"] < bind_vars["before"]
+            ]
+            return sorted(versions, key=lambda entry: entry["version"],
+                          reverse=True)[:bind_vars["limit"]]
+
+    repository.database.aql = JournalQuery()
+    monkeypatch.setattr("app.main.build_repository", lambda settings: repository)
+    secret = "test-only-guidance-approval-signer-key"
+    client = TestClient(create_application(
+        Settings(_env_file=None, auth_required=True, jwt_secret_key=secret),
+    ))
+    path = "/api/review/projects/project/guidance"
+
+    def auth(role):
+        token = jwt.encode({"sub": role, "roles": [role]}, secret, algorithm="HS256")
+        return {"Authorization": f"Bearer {token}"}
+
+    draft = {"revision": 0, "text": "First guidance"}
+    assert client.get(path).status_code == 401
+    assert client.post(path+"/draft", headers=auth("reader"), json=draft).status_code == 403
+    saved = client.post(path+"/draft", headers=auth("writer"), json=draft)
+    assert saved.status_code == 200 and saved.json()["draft"]["edited_by"] == "writer"
+    assert client.get(path, headers=auth("reader")).json()["draft"] is None
+    approval = {"revision": 1, "approve": True}
+    assert client.post(path+"/approve", headers=auth("writer"), json=approval).status_code == 403
+    assert client.post(
+        path+"/approve", headers=auth("admin"), json={**approval, "approve": False},
+    ).status_code == 422
+    first = client.post(path+"/approve", headers=auth("admin"), json=approval).json()
+    assert first["published"]["version"] == 1 and first["published"]["approved_by"] == "admin"
+    assert first["draft"] is None
+    changed = client.post(path+"/draft", headers=auth("writer"), json={
+        "revision": first["revision"], "text": "Second guidance",
+    }).json()
+    assert client.get(path, headers=auth("reader")).json()["published"]["text"] == "First guidance"
+    assert client.post(path+"/approve", headers=auth("admin"), json=approval).status_code == 409
+    second = client.post(path+"/approve", headers=auth("admin"), json={
+        "revision": changed["revision"], "approve": True,
+    }).json()
+    assert [entry["text"] for entry in second["history"]] == ["Second guidance", "First guidance"]
+    older = client.get(path, headers=auth("reader"), params={"before_version": 2}).json()
+    assert [entry["version"] for entry in older["history"]] == [1]

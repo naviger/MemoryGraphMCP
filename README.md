@@ -336,3 +336,12 @@ Events at or before the last applied time are recorded without changing the task
 Project Overview shows tracker configuration status and the last ten receipts
 in processing order. It links to tasks still associated with the project and
 labels stale events. Readers can inspect activity through the Review UI.
+
+
+### Project Guidance editor
+
+Open **Projects → Guidance** to read the published instructions and earlier
+versions. Writers and admins can save drafts. Admins explicitly approve and
+publish the saved revision. A publication records the author, approving admin,
+timestamps, and version. The MCP tool `get_project_guidance` returns only the
+published instructions, alongside current ADRs and constraints.

@@ -1,3 +1,4 @@
+import ProjectGuidance from './ProjectGuidance.jsx';
 import TrackerOverview from './TrackerOverview.jsx';
 import { InspectorView, PreviewLink } from './RecordInspector.jsx';
 import ProjectChanges from './ProjectChanges.jsx';
@@ -120,7 +121,7 @@ function RepositoryInventory({ items, renderEntity, navigate, searching }) {
   );
 }
 
-const TABS = ['Overview', 'Decisions', 'Code', 'Testing', 'Source Control', 'Memory', 'Review'];
+const TABS = ['Overview', 'Guidance', 'Decisions', 'Code', 'Testing', 'Source Control', 'Memory', 'Review'];
 
 function projectTab(requested) {
   const tab = requested === 'Changes' ? 'Source Control' : requested;
@@ -245,6 +246,8 @@ function Inventory({ project, navigate, searching, tab, setTab, token, asOf, onU
             renderItem={renderEntity} />
         ))}
       </>],
+      ['Guidance', <ProjectGuidance projectKey={project.key} token={token}
+        onUnauthorized={onUnauthorized} active={tab === 'Guidance'} />],
       ['Decisions', <>
         <InventoryGroup title="Awaiting a decision" open
           items={[...proposed, ...documentOnlyDecisions.filter((doc) => doc.status === 'proposed')]}
