@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date as CalendarDate
+from datetime import timedelta
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -84,6 +85,13 @@ class MemoryDocument(MemoryValidity):
     validation_history: list[MemoryValidation] = Field(default_factory=list)
 
 
+def next_review_due(document: MemoryDocument, checked_on: CalendarDate) -> CalendarDate:
+    security_adr = document.kind == "adr" and any(
+        tag.strip().casefold() == "security" for tag in document.tags
+    )
+    return checked_on + timedelta(days=30 if security_adr else 90)
+
+
 ADRStatus = Literal["proposed", "accepted", "superseded", "rejected"]
 
 
@@ -154,6 +162,8 @@ class ADRConflictResolution(ADRResolutionDecision):
     target_key: MemoryKey
     overlap_start: CalendarDate | None
     overlap_end: CalendarDate | None
+    topic: ScopeLabel | None = None
+    namespace: str | None = None
     system: ScopeLabel | None = None
     environment: ScopeLabel | None = None
 

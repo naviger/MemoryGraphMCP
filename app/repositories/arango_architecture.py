@@ -1374,18 +1374,29 @@ class ArangoArchitectureRepository:
                 state.published = PublishedGuidance(
                     **state.draft.model_dump(), version=version, approved_by=actor, published_at=now,
                 )
-                journal.insert({
-                    "_key": _guidance_key(project_key, version),
-                    "event_type": _guidance_event_type(project_key, "published"),
-                    "project_key": project_key,
-                    **state.published.model_dump(mode="json"),
-                })
+                self.insert_guidance_version(journal, project_key, state.published)
                 state.draft = None
-            journal.insert({
-                "_key": key, "event_type": _guidance_event_type(project_key, "state"),
-                "project_key": project_key,
-                **state.model_dump(mode="json"),
-            }, overwrite_mode="replace")
+            self.write_guidance_state(journal, project_key, state)
+
+    @staticmethod
+    def insert_guidance_version(
+        journal, project_key: str | None, published: PublishedGuidance,
+    ) -> None:
+        journal.insert({
+            "_key": _guidance_key(project_key, published.version),
+            "event_type": _guidance_event_type(project_key, "published"),
+            "project_key": project_key,
+            **published.model_dump(mode="json"),
+        })
+
+    @staticmethod
+    def write_guidance_state(journal, project_key: str | None, state: GuidanceState) -> None:
+        journal.insert({
+            "_key": _guidance_key(project_key),
+            "event_type": _guidance_event_type(project_key, "state"),
+            "project_key": project_key,
+            **state.model_dump(mode="json"),
+        }, overwrite_mode="replace")
 
     def guidance_scope(self, project_key: str) -> GuidanceScope:
         rows = self._database().aql.execute(
