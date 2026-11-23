@@ -1291,6 +1291,34 @@ class ArangoArchitectureRepository:
             },
         ))
 
+    def read_agent_registry(self) -> dict:
+        return self._database().collection(self._events).get("agent-registry") or {
+            "revision": 0, "agents": {},
+        }
+
+    def save_agent_registry(self, agent: str, config: dict, revision: int, actor: str) -> None:
+        with self._transaction(with_events=True) as tx:
+            journal = tx.collection(self._events)
+            previous = journal.get("agent-registry") or {"revision": 0, "agents": {}}
+            if previous["revision"] != revision:
+                raise ArchitectureGraphError("Agent settings changed. Reload before saving.")
+            active = tx.aql.execute(
+                """
+                FOR job IN @@entities
+                    FILTER job.entity_type == "Execution" AND job.agent == @agent
+                    FILTER job.state IN ["READY", "RUNNING", "BLOCKED", "CANCEL_REQUESTED"]
+                    LIMIT 1 RETURN true
+                """,
+                bind_vars={"@entities": self._entities, "agent": agent},
+            )
+            if next(iter(active), False):
+                raise ArchitectureGraphError("Wait for active executions for this agent to finish.")
+            journal.insert({
+                "_key": "agent-registry", "event_type": "agent.settings",
+                "revision": revision + 1, "agents": previous["agents"] | {agent: config},
+                "updated_by": actor, "updated_at": datetime.now(UTC).isoformat(),
+            }, overwrite_mode="replace")
+
     def read_guidance_state(self, project_key: str | None) -> GuidanceState:
         key = _guidance_key(project_key)
         return GuidanceState.model_validate(

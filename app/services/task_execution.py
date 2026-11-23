@@ -60,7 +60,7 @@ class BridgeProvider:
         headers = {"Idempotency-Key": f"{execution_key}:{phase}"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token.get_secret_value()}"
-        async with httpx.AsyncClient(timeout=300, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=300, follow_redirects=False, trust_env=False) as client:
             response = await client.post(f"{self.url}/{phase}", json=payload, headers=headers)
             response.raise_for_status()
             return response
@@ -83,7 +83,7 @@ class LocalProvider:
     async def generate(self, instruction, prompt):
         if not self.url:
             raise ArchitectureGraphError("Local writing assistance is unavailable")
-        async with httpx.AsyncClient(timeout=240) as client:
+        async with httpx.AsyncClient(timeout=240, follow_redirects=False, trust_env=False) as client:
             response = await client.post(
                 f"{self.url}/api/chat",
                 json={
@@ -134,8 +134,11 @@ class LocalProvider:
 
 
 class TaskExecutor:
-    def __init__(self, settings, workspace, memory):
+    def __init__(self, settings, workspace, memory, registry=None):
         self.workspace = workspace
+        self.registry = registry
+        self.registry_revision = None
+        self.registered_modes = {}
         self.guidance = ArchitectureService(workspace.graph, memory)
         self.local = LocalProvider(settings)
         self.providers: dict[str, AgentProvider] = {}
@@ -145,7 +148,35 @@ class TaskExecutor:
             if agent in {"local", "codex", "claude-code", "openhands"}:
                 self.providers[agent] = BridgeProvider(endpoint, settings.workspace_agent_token)
 
+    def refresh_agents(self):
+        if self.registry is None:
+            return
+        revision, configs = self.registry.read()
+        if revision == self.registry_revision:
+            return
+        providers = {}
+        modes = {}
+        local = LocalProvider(self.registry.settings)
+        local.url = ""
+        for name, config in configs.items():
+            if not config.url or config.url not in self.registry.allowed:
+                continue
+            if name == "local" and config.model:
+                local.url, local.model = config.url, config.model
+                providers[name] = local
+            else:
+                providers[name] = BridgeProvider(config.url, self.registry.bridge_token(name, config.url))
+            modes[name] = config.modes
+        self.local, self.providers, self.registered_modes = local, providers, modes
+        self.registry_revision = revision
+
+    async def refresh(self):
+        if self.registry is not None:
+            await anyio.to_thread.run_sync(self.refresh_agents)
+
     def modes(self):
+        if self.registry_revision is not None:
+            return self.registered_modes
         return {
             name: [
                 mode
@@ -249,7 +280,9 @@ class TaskExecutor:
     async def run(self):
         while True:
             try:
+                await self.refresh()
                 for job in await anyio.to_thread.run_sync(self.workspace.ready):
+                    await self.refresh()
                     await self.process(job)
             except Exception as exc:
                 logger.warning("task_execution_poll_failed", error_type=type(exc).__name__)

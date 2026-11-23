@@ -347,7 +347,10 @@ def test_workspace_routes_require_project_and_writer_grants():
     workspace = SimpleNamespace(
         entities=lambda project: [], create=lambda project, data, actor: data
     )
-    executor = SimpleNamespace(modes=lambda: {}, local=SimpleNamespace(url=None))
+    async def refresh():
+        return None
+
+    executor = SimpleNamespace(modes=lambda: {}, local=SimpleNamespace(url=None), refresh=refresh)
     app.include_router(build_workspace_router("/api/review", workspace, executor, None))
     api = TestClient(app)
     path = "/api/review/projects/alpha/workspace"

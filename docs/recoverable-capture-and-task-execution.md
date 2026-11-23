@@ -54,3 +54,11 @@ Execution records store actor, timestamps, phase, results, context links, and ou
 The graph adds `Execution`, `Agent`, and `Artifact` discriminators in `architecture_entities`. Relationships use the existing `architecture_edges` collection and inverse relationship definitions. Checkpoints use `capture.checkpoint` rows in `architecture_events`. The migration is additive and on demand. Existing nodes and edges require no data rewrite or expanded runtime permissions. Deploy the API and Review UI together, then open Project Overview. Configure GitHub capture using `docker-compose.capture.yml` as before. Existing installs start with the newest-25 rule and can use Backfill to establish historical coverage.
 
 The isolated ArangoDB test can be enabled with `MGMCP_RECOVERY_TEST_HOST` and `MGMCP_RECOVERY_TEST_PASSWORD` against a disposable database server.
+
+### Agent Settings
+
+Administrators can open **Agent Settings** in the sidebar. Choose Codex, Claude Code, OpenHands, or Ollama, select an approved endpoint, and save. The worker picks up saved changes without a restart. Active executions must finish or be cancelled before their agent can be changed.
+
+Operators approve exact base URLs with `MGMCP_WORKSPACE_AGENT_ALLOWED_URLS` (a JSON array, for example `["http://agent-bridge:8080","http://host.docker.internal:11434"]`). Compose passes this variable through from the deployment environment. Existing environment-configured endpoints are also approved. Server configuration holds any existing bridge token, which is sent only to the exact endpoint configured for that bridge in `MGMCP_WORKSPACE_AGENT_URLS`.
+
+**Test connection** calls a bridge's read-only `GET /capabilities` endpoint. The bridge returns JSON such as `{"modes":["PLAN_ONLY","IMPLEMENT","REVIEW","FULL_LIFECYCLE"]}`. The page loads the advertised modes for the administrator to review and save. Ollama is checked through `GET /api/tags` to confirm the selected model is installed. These settings apply to task execution and drafting from Project Overview.

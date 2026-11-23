@@ -1,3 +1,4 @@
+import AgentSettings from './AgentSettings.jsx';
 import {
   Activity, BarChart3, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, CircleHelp, FolderKanban, GitPullRequest,
   House, KeyRound, MessageCircleQuestion, Network, RefreshCw, Search, ShieldCheck,
@@ -115,6 +116,7 @@ function QueueList({ section, rows, selectedKey, select, offset, setOffset, hasM
 function detailLocation() {
   if (/^\/search\/?$/.test(window.location.pathname)) return { destination: 'search' };
   if (/^\/help\/?$/.test(window.location.pathname)) return { destination: 'help' };
+  if (window.location.pathname.replace(/\/$/, '') === '/agent-settings') return { destination: 'agent-settings' };
   if (/^\/global-guidance\/?$/.test(window.location.pathname)) return { destination: 'global-guidance' };
   if (/^\/token-usage\/?$/.test(window.location.pathname)) return { destination: 'token-usage' };
   if (/^\/effectiveness\/?$/.test(window.location.pathname)) return { destination: 'effectiveness' };
@@ -445,6 +447,12 @@ function App() {
                 <ShieldCheck size={18} aria-hidden="true" /> Global Guidance
               </a>
             )}
+            {session?.role === 'admin' && <a href="/agent-settings"
+              className={route?.destination === 'agent-settings' ? 'nav-item active' : 'nav-item'}
+              aria-current={route?.destination === 'agent-settings' ? 'page' : undefined}
+              onClick={(event) => navigate(event, '/agent-settings')}>
+              <ShieldCheck size={18} aria-hidden="true" /> Agent Settings
+            </a>}
           </nav>
           <div className="rail-footer">
             <nav className="rail-help" aria-label="Help">
@@ -485,6 +493,9 @@ function App() {
             </div>
           )}
           {session && route?.destination === 'help' && <HelpPage token={token} onUnauthorized={expireSession} />}
+          {session && route?.destination === 'agent-settings' && (session.role === 'admin'
+            ? <AgentSettings token={token} onUnauthorized={expireSession} />
+            : <p role="alert">Administrator access is required.</p>)}
           {session && route?.destination === 'global-guidance' && <>
             <header className="page-heading"><div>
               <h1>Global Guidance</h1>
@@ -500,7 +511,7 @@ function App() {
             <p role="status">Loading projects…</p>}
           {session && route?.destination === 'token-usage' && <TokenUsagePage projectKey={projectKey}
             token={token} onUnauthorized={expireSession} />}
-          {session && ['ask', 'search', 'graph', 'projects', 'help', 'global-guidance', 'token-usage', 'effectiveness'].includes(route?.destination)
+          {session && ['ask', 'search', 'graph', 'projects', 'help', 'global-guidance', 'agent-settings', 'token-usage', 'effectiveness'].includes(route?.destination)
             ? null : session && !isQueueRoute ? (
             <EntityDetailPage key={`${route.destination}/${route.key}`}
               route={route} token={token} navigate={navigate} onUnauthorized={expireSession}
