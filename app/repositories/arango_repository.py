@@ -3,15 +3,32 @@ from __future__ import annotations
 import re
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from datetime import UTC, date, timedelta
+from datetime import UTC, date, datetime
 from functools import cached_property
 from hashlib import sha256
+from pathlib import Path
+from uuid import uuid4
 
 from arango import ArangoClient
 from arango.database import StandardDatabase, TransactionDatabase
 from arango.exceptions import ArangoServerError, DocumentInsertError
 
-from app.domain.exceptions import ADRError, RevalidationError
+from app.domain.architecture import (
+    ArchitectureADR,
+    ArchitectureLink,
+    Project,
+    Repository,
+    architecture_key,
+)
+from app.domain.exceptions import ADRError, ArchitectureGraphError, RevalidationError
+from app.domain.knowledge_snapshot import (
+    ADROwnership,
+    CoexistenceDependency,
+    KnowledgeDrift,
+    KnowledgeSnapshot,
+    SnapshotCoexistence,
+    compare_knowledge,
+)
 from app.domain.models import (
     ADRAcceptanceConflictCheck,
     ADRConflict,
@@ -34,10 +51,12 @@ from app.domain.models import (
     OverdueValidation,
     RelatedEntity,
     ResolvedADRConflict,
+    next_review_due,
 )
 from app.domain.project_guidance import GuidanceDecision
 from app.domain.review_details import ProjectDocument, ReviewEntityLink
 from app.repositories.arango_architecture import ArangoArchitectureRepository
+from app.repositories.knowledge_git import verify_checkout
 
 _VALIDITY_FILTER = """
     FILTER @as_of == null OR (
@@ -126,10 +145,16 @@ class ArangoMemoryRepository:
         )
 
     @contextmanager
-    def _memory_transaction(self, *, with_edges: bool = False):
+    def _memory_transaction(self, *, with_edges: bool = False, with_architecture: bool = False):
         collections = [self._config.documents_collection, self._config.vectors_collection]
         if with_edges:
             collections.append(self._config.edges_collection)
+        if with_architecture:
+            collections.extend((
+                self._config.architecture_entities_collection,
+                self._config.architecture_edges_collection,
+                self._config.architecture_events_collection,
+            ))
         transaction = self.database.begin_transaction(
             exclusive=collections, read=None if with_edges else self._config.edges_collection,
         )
@@ -141,11 +166,379 @@ class ArangoMemoryRepository:
                 transaction.abort_transaction()
             raise
 
+    def _snapshot_architecture(self, database):
+        return ArangoArchitectureRepository(
+            lambda: database,
+            self._config.architecture_entities_collection,
+            self._config.architecture_edges_collection,
+            self._config.architecture_events_collection,
+        )
+
+    def _export_knowledge(
+        self, database, project: str, repository: str, revision: str,
+        *, require_review_deadlines: bool = False,
+    ) -> KnowledgeSnapshot:
+        architecture = self._snapshot_architecture(database)
+        documents = database.collection(self._config.documents_collection)
+        nodes = database.collection(self._config.architecture_entities_collection)
+        links = database.collection(self._config.architecture_edges_collection)
+        sources = architecture.project_source_repositories(project)
+        source_keys = {source.key for source in sources}
+        adrs = []
+        ownership = {}
+        for key in architecture.guidance_scope(project).adr_keys:
+            record = self._get_document(documents, key)
+            if isinstance(record, ArchitecturalDecisionRecord) and record.status == "accepted":
+                owners = set()
+                repository_names = set()
+                project_outbound = set()
+                project_inbound = set()
+                for node in nodes.find({"entity_type": "ADR", "memory_key": key}):
+                    if node.get("index_state") == "stale":
+                        continue
+                    if node.get("repository") is not None:
+                        repository_names.add(node["repository"])
+                    owners.update(
+                        link["source_key"] for link in links.find({
+                            "target_key": node["_key"], "relationship_type": "defines",
+                        })
+                        if (owner := nodes.get(link["source_key"])) is not None
+                        and owner["entity_type"] in {"Project", "Repository"}
+                    )
+                    project_outbound.update(
+                        link["relationship_type"] for link in links.find({
+                            "source_key": project, "target_key": node["_key"],
+                        }) if link["relationship_type"] not in {"defines", "uses"}
+                    )
+                    project_inbound.update(
+                        link["relationship_type"] for link in links.find({
+                            "source_key": node["_key"], "target_key": project,
+                        }) if link["relationship_type"] != "uses"
+                    )
+                repository_owners = (owners & source_keys) | {
+                    source.key for source in sources if source.name in repository_names
+                }
+                if repository not in repository_owners:
+                    continue
+                if len(repository_names) > 1:
+                    raise ArchitectureGraphError(f"ADR '{key}' has conflicting repository names")
+                if require_review_deadlines and record.next_review_due is None:
+                    raise ArchitectureGraphError(
+                        f"Accepted ADR '{key}' has no stored next_review_due. "
+                        "Backfill its review deadline before exporting."
+                    )
+                adrs.append(record)
+                ownership[key] = ADROwnership(
+                    defined_by=sorted(owners), repository=next(iter(repository_names), None),
+                    project_outbound=sorted(project_outbound), project_inbound=sorted(project_inbound),
+                )
+        keys = {record.key for record in adrs}
+        document_ids = {self._document_id(key) for key in keys}
+        edges = database.collection(self._config.edges_collection)
+        coexistence = []
+        for edge in edges.find({"relation": "adr_conflict_resolution", "action": "coexist"}):
+            if edge.get("historical") or not document_ids.intersection((edge["_from"], edge["_to"])):
+                continue
+            resolution = ADRConflictResolution.model_validate(edge)
+            if (edge["_from"], edge["_to"]) != (
+                self._document_id(resolution.source_key), self._document_id(resolution.target_key),
+            ):
+                raise ArchitectureGraphError("Coexistence edge does not match its ADR endpoints")
+            external = {resolution.source_key, resolution.target_key} - keys
+            dependency = (
+                self._coexistence_dependency(architecture, documents, external.pop())
+                if external else None
+            )
+            coexistence.append(SnapshotCoexistence(**resolution.model_dump(), dependency=dependency))
+        return KnowledgeSnapshot.from_database(
+            project, repository, revision, adrs, architecture.read_guidance_state(project).published,
+            coexistence, preserve_missing_review_dates=True,
+            adr_ownership=ownership,
+        )
+
+    def _coexistence_dependency(self, architecture, documents, key: str) -> CoexistenceDependency:
+        record = self._get_document(documents, key)
+        if not isinstance(record, ArchitecturalDecisionRecord) or record.key != key:
+            raise ArchitectureGraphError("Coexistence dependency ADR is unavailable")
+        owners = [
+            project for project in architecture.project_access_keys()
+            if key in architecture.guidance_scope(project).adr_keys
+        ]
+        return CoexistenceDependency.from_record(record, owners)
+
+    def _restore_coexistence(
+        self, transaction, architecture, documents, edges, resolution: SnapshotCoexistence,
+        *, restoring_endpoint: bool,
+    ) -> None:
+        dependency = resolution.dependency
+        if dependency is not None and dependency != self._coexistence_dependency(
+            architecture, documents, dependency.adr_key,
+        ):
+            raise ArchitectureGraphError("Coexistence dependency ownership or evidence differs")
+
+        source = self._get_document(documents, resolution.source_key)
+        target = self._get_document(documents, resolution.target_key)
+        if (
+            not isinstance(source, ArchitecturalDecisionRecord)
+            or not isinstance(target, ArchitecturalDecisionRecord)
+            or source.key != resolution.source_key or target.key != resolution.target_key
+        ):
+            raise ArchitectureGraphError("Coexistence requires valid ADR endpoints")
+
+        conflicts = self._find_adr_conflicts(
+            transaction, source, as_of=None, limit=1, competing_key=target.key,
+        ) if source.conflict_scope is not None else []
+        if conflicts:
+            expected = self._describe_adr_resolution(source, target, conflicts[0], resolution)
+            fields = {"overlap_start", "overlap_end", "system", "environment", "topic", "namespace"}
+            if resolution.topic is None and resolution.namespace is None:
+                fields -= {"topic", "namespace"}
+            if resolution.model_dump(include=fields) != expected.model_dump(include=fields):
+                raise ArchitectureGraphError("Cannot import coexistence with unresolved conflicts in the recorded scope")
+        elif not restoring_endpoint:
+            raise ArchitectureGraphError("There is no unresolved conflict between these ADRs")
+
+        self._insert_adr_conflict_resolution(
+            edges, ADRConflictResolution.model_validate(resolution.model_dump(exclude={"dependency"})),
+        )
+
+    @contextmanager
+    def _read_knowledge(self):
+        database = self.database.begin_transaction(read=[
+            self._config.documents_collection,
+            self._config.vectors_collection,
+            self._config.edges_collection,
+            self._config.architecture_entities_collection,
+            self._config.architecture_edges_collection,
+            self._config.architecture_events_collection,
+        ])
+        try:
+            yield database
+        finally:
+            database.abort_transaction()
+
+    @staticmethod
+    def _knowledge_source(
+        architecture: ArangoArchitectureRepository, project: str, repository: str,
+    ) -> Repository:
+        if isinstance(architecture.read_entity(project), Project):
+            for node in architecture.project_source_repositories(project):
+                if node.key == repository:
+                    return node
+        raise ArchitectureGraphError("Select a project and one of its linked source repositories")
+
+    def export_knowledge(
+        self, project: str, repository: str, revision: str, *, root: Path,
+    ) -> KnowledgeSnapshot:
+        with self._read_knowledge() as transaction:
+            source = self._knowledge_source(
+                self._snapshot_architecture(transaction), project, repository,
+            )
+            verify_checkout(root, source.metadata.get("git_checkout"), revision, None)
+            return self._export_knowledge(
+                transaction, project, repository, revision, require_review_deadlines=True,
+            )
+
+    def reconcile_knowledge(
+        self, incoming: KnowledgeSnapshot, git_revision: str, *, root: Path, apply: bool,
+    ) -> tuple[list[KnowledgeDrift], bool]:
+        return self.reconcile_knowledge_batch([(incoming, git_revision, root)], apply=apply)
+
+    def _plan_knowledge_restore(self, transaction, architecture, incoming, git_revision, root):
+        project, repository = incoming.project_key, incoming.repository_key
+        source = self._knowledge_source(architecture, project, repository)
+        verify_checkout(root, source.metadata.get("git_checkout"), git_revision, incoming)
+        current = self._export_knowledge(
+            transaction, project, repository, git_revision,
+        )
+        documents = transaction.collection(self._config.documents_collection)
+        vectors = transaction.collection(self._config.vectors_collection)
+        nodes = transaction.collection(self._config.architecture_entities_collection)
+        occupied = {}
+        current_keys = {record.key for record in current.adrs}
+        for record in incoming.adrs:
+            if record.key in current_keys:
+                continue
+            document = self._get_document(documents, record.key)
+            if document is not None:
+                occupied[f"adr/{record.key}"] = document.model_dump(
+                    mode="json", include={"key", "kind", "title", "status"},
+                )
+            elif nodes.has(architecture_key("memory", "adr", record.key)):
+                occupied[f"adr/{record.key}"] = {"reason": "Architecture entity already exists"}
+            elif vectors.has(record.key):
+                occupied[f"adr/{record.key}"] = {"reason": "Vector document already exists"}
+        state = architecture.read_guidance_state(project)
+        if incoming.guidance and not state.published and (state.revision or state.draft):
+            occupied["guidance"] = {"reason": "Project guidance already has local history"}
+        resolution_edges = transaction.collection(self._config.edges_collection)
+        current_resolutions = {resolution.record_key for resolution in current.coexistence}
+        for resolution in incoming.coexistence:
+            if resolution.record_key in current_resolutions:
+                continue
+            key = self._resolution_edge_key(
+                self._document_id(resolution.source_key), self._document_id(resolution.target_key),
+            )
+            row = resolution_edges.get(key)
+            if row is not None:
+                occupied[resolution.record_key] = ADRConflictResolution.model_validate(row).model_dump(
+                    mode="json",
+                )
+        drift = compare_knowledge(incoming, current, occupied)
+        return source, current, drift
+
+    def _restore_knowledge_adrs(self, transaction, architecture, incoming, source, new_adrs, now):
+        project, repository = incoming.project_key, incoming.repository_key
+        nodes = transaction.collection(self._config.architecture_entities_collection)
+        documents = transaction.collection(self._config.documents_collection)
+        edges = transaction.collection(self._config.architecture_edges_collection)
+        sources = architecture.project_source_repositories(project)
+        allowed_names = {None, *(source.name for source in sources)}
+        for record in new_adrs:
+            ownership = incoming.ownership_for(record.key)
+            if (
+                any(
+                    (owner := nodes.get(key)) is None
+                    or owner["entity_type"] not in {"Project", "Repository"}
+                    for key in ownership.defined_by
+                )
+                or ownership.repository not in allowed_names
+                or (repository not in ownership.defined_by and ownership.repository != source.name)
+            ):
+                raise ArchitectureGraphError(f"ADR '{record.key}' has invalid repository ownership")
+            documents.insert(self._document_payload(record))
+            node = ArchitectureADR(
+                key=architecture_key("memory", "adr", record.key),
+                memory_key=record.key, name=record.title, description=record.content,
+                repository=ownership.repository,
+            )
+            nodes.insert(architecture._entity_payload(node))
+            relationships = [
+                (owner, node.key, "defines") for owner in ownership.defined_by
+            ] + [
+                (project, node.key, relation) for relation in ownership.project_outbound
+            ] + [
+                (node.key, project, relation) for relation in ownership.project_inbound
+            ]
+            for source_key, target_key, relation in relationships:
+                edge = ArchitectureLink(
+                    source_key=source_key, target_key=target_key,
+                    relationship_type=relation, source="git-knowledge",
+                )
+                edges.insert(architecture._edge_payload(edge, now))
+
+    def _verify_knowledge_restore(self, transaction, incoming, git_revision, drift, now):
+        project, repository = incoming.project_key, incoming.repository_key
+        journal = transaction.collection(self._config.architecture_events_collection)
+        stored = self._export_knowledge(
+            transaction, project, repository, git_revision,
+        )
+        if compare_knowledge(incoming, stored, {}):
+            raise ArchitectureGraphError("Imported knowledge failed round-trip verification")
+        journal.insert({
+            "_key": architecture_key("git-knowledge", project, repository, git_revision),
+            "event_type": "project.knowledge.imported",
+            "project_key": project,
+            "repository_key": repository,
+            "git_revision": git_revision,
+            "source_revision": incoming.source_revision,
+            "record_keys": [item.record for item in drift],
+            "imported_at": now,
+        })
+
+    def reconcile_knowledge_batch(
+        self, inputs: list[tuple[KnowledgeSnapshot, str, Path]], *, apply: bool,
+    ) -> tuple[list[KnowledgeDrift], bool]:
+        """Plan every snapshot before writing, then restore all related records atomically."""
+        if not inputs or len({(item.project_key, item.repository_key) for item, _, _ in inputs}) != len(inputs):
+            raise ArchitectureGraphError("Select one or more distinct repository snapshots")
+        scope = (
+            self._memory_transaction(with_edges=True, with_architecture=True)
+            if apply else self._read_knowledge()
+        )
+        with scope as transaction:
+            architecture = self._snapshot_architecture(transaction)
+            plans = [
+                self._plan_knowledge_restore(transaction, architecture, incoming, revision, root)
+                for incoming, revision, root in inputs
+            ]
+            all_drift = [item for _, _, drift in plans for item in drift]
+            if not apply or not all_drift or any(item.status != "git_only" for item in all_drift):
+                return all_drift, False
+
+            now = datetime.now(UTC).isoformat()
+            new_records = {}
+            published = {}
+            pending_resolutions = {}
+            for (incoming, _, _), (source, current, _) in zip(inputs, plans, strict=True):
+                current_keys = {record.key for record in current.adrs}
+                new_adrs = []
+                for record in incoming.adrs:
+                    if record.key in current_keys:
+                        continue
+                    identity = (record, incoming.ownership_for(record.key))
+                    if record.key in new_records:
+                        if new_records[record.key] != identity:
+                            raise ArchitectureGraphError("Snapshots disagree about an ADR or its ownership")
+                    else:
+                        new_records[record.key] = identity
+                        new_adrs.append(record)
+                self._restore_knowledge_adrs(transaction, architecture, incoming, source, new_adrs, now)
+                previous = published.setdefault(incoming.project_key, incoming.guidance)
+                if previous != incoming.guidance:
+                    raise ArchitectureGraphError("Snapshots disagree about published project guidance")
+                current_resolutions = {resolution.record_key for resolution in current.coexistence}
+                for resolution in incoming.coexistence:
+                    if resolution.record_key not in current_resolutions:
+                        pending_resolutions.setdefault(resolution.record_key, []).append(resolution)
+
+            documents = transaction.collection(self._config.documents_collection)
+            edges = transaction.collection(self._config.edges_collection)
+            for copies in pending_resolutions.values():
+                first = copies[0]
+                fields = first.model_dump(exclude={"dependency"})
+                for copy in copies:
+                    if copy.model_dump(exclude={"dependency"}) != fields:
+                        raise ArchitectureGraphError("Snapshots disagree about a coexistence resolution")
+                    if copy.dependency is not None and copy.dependency != self._coexistence_dependency(
+                        architecture, documents, copy.dependency.adr_key,
+                    ):
+                        raise ArchitectureGraphError("Coexistence dependency ownership or evidence differs")
+                self._restore_coexistence(
+                    transaction, architecture, documents, edges, first,
+                    restoring_endpoint=bool(new_records.keys() & {first.source_key, first.target_key}),
+                )
+            for record, _ in new_records.values():
+                check = self._adr_write_result(transaction, record).conflict_check
+                if check is not None and check.conflicts:
+                    raise ArchitectureGraphError(
+                        f"Cannot import ADR '{record.key}' with unresolved conflicts. "
+                        f"{check.model_dump_json()}"
+                    )
+            journal = transaction.collection(self._config.architecture_events_collection)
+            for project, guidance in published.items():
+                state = architecture.read_guidance_state(project)
+                if guidance and not state.published:
+                    state.revision += 1
+                    state.published = guidance
+                    architecture.insert_guidance_version(journal, project, guidance)
+                    architecture.write_guidance_state(journal, project, state)
+            for (incoming, revision, _), (_, _, drift) in zip(inputs, plans, strict=True):
+                if drift:
+                    self._verify_knowledge_restore(transaction, incoming, revision, drift, now)
+                elif compare_knowledge(
+                    incoming, self._export_knowledge(
+                        transaction, incoming.project_key, incoming.repository_key, revision,
+                    ), {},
+                ):
+                    raise ArchitectureGraphError("Imported knowledge changed an unchanged snapshot")
+            return all_drift, True
+
     def create_adr(self, record: ArchitecturalDecisionRecord) -> ADRWriteResult:
         if record.status == "superseded":
             raise ADRError("Set superseded status by linking an accepted replacement")
         payload = self._document_payload(record)
-        payload["next_review_due"] = self._next_review_due(
+        payload["next_review_due"] = next_review_due(
             record, record.last_validated or record.date,
         ).isoformat()
         with self._memory_transaction() as transaction:
@@ -251,6 +644,7 @@ class ArangoMemoryRepository:
         *, key: str | None = None, competing_key: str | None = None,
         document_keys: list[str] | None = None, require_both: bool = False,
     ) -> list[ADRConflict]:
+        # Legacy resolutions recorded the pair, system, environment and overlap.
         query = """
         FOR original IN @@documents
             FILTER @key == null OR original._key == @key
@@ -296,21 +690,33 @@ class ArangoMemoryRepository:
                 )
                 FILTER IS_STRING(doc.decision)
                 FILTER REGEX_REPLACE(LOWER(TRIM(doc.decision)), "[[:space:]]+", " ") != normalized_decision
-                LET resolution = FIRST(
-                    FOR edge IN @@edges
-                        FILTER (edge._from == original._id AND edge._to == doc._id)
-                            OR (edge._from == doc._id AND edge._to == original._id)
-                        FILTER edge.relation == "adr_conflict_resolution"
-                        LIMIT 1
-                        RETURN true
-                )
-                FILTER resolution == null
                 LET overlap_start = original.effective_date == null OR doc.effective_date == null
                     ? NOT_NULL(original.effective_date, doc.effective_date)
                     : MAX([original.effective_date, doc.effective_date])
                 LET overlap_end = original.expiration_date == null OR doc.expiration_date == null
                     ? NOT_NULL(original.expiration_date, doc.expiration_date)
                     : MIN([original.expiration_date, doc.expiration_date])
+                LET resolution = FIRST(
+                    FOR edge IN @@edges
+                        FILTER (edge._from == original._id AND edge._to == doc._id)
+                            OR (edge._from == doc._id AND edge._to == original._id)
+                        FILTER edge.relation == "adr_conflict_resolution" AND edge.historical != true
+                        FILTER edge.action == "supersede" OR (
+                            edge.action == "coexist"
+                            AND (
+                                (edge.topic == null AND edge.namespace == null)
+                                OR (edge.topic == original.conflict_scope.topic
+                                    AND edge.namespace == NOT_NULL(original.namespace, "default"))
+                            )
+                            AND edge.system == NOT_NULL(original_system, system)
+                            AND edge.environment == NOT_NULL(original_environment, environment)
+                            AND edge.overlap_start == overlap_start
+                            AND edge.overlap_end == overlap_end
+                        )
+                        LIMIT 1
+                        RETURN true
+                )
+                FILTER resolution == null
                 SORT overlap_start DESC, original._key, doc._key
                 LIMIT @offset, @limit
                 RETURN {
@@ -450,41 +856,60 @@ class ArangoMemoryRepository:
             edges = transaction.collection(self._config.edges_collection)
             key = self._resolution_edge_key(source_id, target_id)
             stored = edges.get(key)
-            if stored is not None:
-                existing = ADRConflictResolution.model_validate(stored)
-                same_direction = decision.action == "coexist" or existing.source_key == source.key
-                if existing.action == decision.action and existing.rationale == decision.rationale and same_direction:
-                    return existing
-                raise ADRError("A different resolution is already recorded for this ADR pair")
-
             conflicts = self._find_adr_conflicts(
                 transaction, source, as_of=None, limit=1, competing_key=target.key,
-            )
+            ) if source.conflict_scope is not None else []
+            if stored is not None:
+                existing = ADRConflictResolution.model_validate(stored)
+                if not conflicts or existing.action == "supersede":
+                    same_direction = decision.action == "coexist" or existing.source_key == source.key
+                    if existing.action == decision.action and existing.rationale == decision.rationale and same_direction:
+                        return existing
+                    raise ADRError("A different resolution is already recorded for this ADR pair")
+                history = {field: value for field, value in stored.items() if field not in {"_id", "_rev"}}
+                edges.insert({**history, "_key": uuid4().hex, "historical": True})
+                edges.delete(key)
+
             if not conflicts:
+                if source.conflict_scope is None:
+                    raise ADRError("Set a topic and system or environment before checking this ADR")
                 raise ADRError("There is no unresolved conflict between these ADRs")
-            conflict = conflicts[0]
-            source_scope = source.conflict_scope
-            target_scope = target.conflict_scope
-            assert source_scope is not None and target_scope is not None
-            resolution = ADRConflictResolution(
-                **decision.model_dump(),
-                source_key=source.key,
-                target_key=target.key,
-                overlap_start=conflict.overlap_start,
-                overlap_end=conflict.overlap_end,
-                system=source_scope.system or target_scope.system,
-                environment=source_scope.environment or target_scope.environment,
-            )
+            resolution = self._describe_adr_resolution(source, target, conflicts[0], decision)
             if decision.action == "supersede":
                 self._supersede_adr(transaction, source, target)
-            edges.insert({
-                **resolution.model_dump(mode="json"),
-                "_key": key,
-                "_from": source_id,
-                "_to": target_id,
-                "relation": "adr_conflict_resolution",
-            })
+            self._insert_adr_conflict_resolution(edges, resolution)
             return resolution
+
+    @staticmethod
+    def _describe_adr_resolution(
+        source: ArchitecturalDecisionRecord, target: ArchitecturalDecisionRecord,
+        conflict: ADRConflict, decision: ADRResolutionDecision,
+    ) -> ADRConflictResolution:
+        source_scope = source.conflict_scope
+        target_scope = target.conflict_scope
+        assert source_scope is not None and target_scope is not None
+        return ADRConflictResolution(
+            **decision.model_dump(include=set(ADRResolutionDecision.model_fields)),
+            source_key=source.key,
+            target_key=target.key,
+            overlap_start=conflict.overlap_start,
+            overlap_end=conflict.overlap_end,
+            topic=source_scope.topic,
+            namespace=source.namespace if source.namespace is not None else "default",
+            system=source_scope.system or target_scope.system,
+            environment=source_scope.environment or target_scope.environment,
+        )
+
+    def _insert_adr_conflict_resolution(self, edges, resolution: ADRConflictResolution) -> None:
+        source_id = self._document_id(resolution.source_key)
+        target_id = self._document_id(resolution.target_key)
+        edges.insert({
+            **resolution.model_dump(mode="json"),
+            "_key": self._resolution_edge_key(source_id, target_id),
+            "_from": source_id,
+            "_to": target_id,
+            "relation": "adr_conflict_resolution",
+        })
 
     def supersede_adr(self, source_key: str, target_key: str) -> ADRSupersession:
         with self._memory_transaction(with_edges=True) as transaction:
@@ -542,13 +967,6 @@ class ArangoMemoryRepository:
             self._update_document_and_vector(transaction, payload)
         )
 
-    @staticmethod
-    def _next_review_due(document: MemoryDocument, checked_on: date) -> date:
-        security_adr = document.kind == "adr" and any(
-            tag.strip().casefold() == "security" for tag in document.tags
-        )
-        return checked_on + timedelta(days=30 if security_adr else 90)
-
     def revalidate_memory(
         self, key: str, validation: MemoryValidation, confidence: ConfidenceScore | None = None,
     ) -> MemoryRevalidationResult:
@@ -571,7 +989,7 @@ class ArangoMemoryRepository:
                 previous_confidence=document.confidence,
                 new_confidence=document.confidence if confidence is None else confidence,
             )
-            due = self._next_review_due(document, checked_on)
+            due = next_review_due(document, checked_on)
             history = [*document.validation_history, validation]
             payload = {
                 "_key": key,
