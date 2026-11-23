@@ -26,9 +26,11 @@ from app.domain.architecture import (
     Observation,
     Project,
     RelationshipType,
+    Repository,
     architecture_key,
 )
 from app.domain.exceptions import ArchitectureGraphError
+from app.domain.project_changes import BranchCleanup
 from app.domain.project_guidance import GuidanceScope
 from app.domain.review_details import ProjectScope
 from app.domain.test_drafts import FixWorkflow
@@ -759,6 +761,64 @@ class ArangoArchitectureRepository:
             bind_vars={"@entities": self._entities, "key": key},
         )
         return [_ENTITY.validate_python(row) for row in rows]
+
+    def project_source_repositories(self, key: str) -> list[Repository]:
+        rows = self._database().aql.execute(
+            """
+            WITH @@entities
+            FOR node, edge IN 1..1 ANY @seed @@edges
+                FILTER node.entity_type == "Repository" AND node.role == "source"
+                FILTER node.index_state != "stale" AND edge.relationship_type != "uses"
+                SORT LOWER(node.name), node._key
+                RETURN DISTINCT node
+            """,
+            bind_vars={
+                "@entities": self._entities, "@edges": self._edges,
+                "seed": f"{self._entities}/{key}",
+            },
+        )
+        return [Repository.model_validate({**row, "key": row["_key"]}) for row in rows]
+
+    def change_test_runs(
+        self, project: str, repository: str, commits: list[str],
+    ) -> dict[str, TestRun]:
+        rows = self._database().aql.execute(
+            """
+            FOR event IN @@events
+                FILTER event.event_type == "test.run.finished" AND event.project_key == @project
+                FILTER event.payload.repository_key == @repository AND event.payload.commit IN @shas
+                SORT event.occurred_at_us DESC, event._key DESC
+                RETURN event.payload
+            """,
+            bind_vars={
+                "@events": self._events, "project": project,
+                "repository": repository, "shas": commits,
+            },
+        )
+        runs: dict[str, TestRun] = {}
+        for row in rows:
+            if row["commit"] not in runs:
+                runs[row["commit"]] = TestRun.model_validate(row)
+        return runs
+
+    def change_branch_cleanups(self, project: str, urls: list[str]) -> dict[str, BranchCleanup]:
+        rows = self._database().aql.execute(
+            """
+            FOR event IN @@events
+                FILTER event.event_type == "test.fix.workflow" AND event.project_key == @project
+                LET fix = event.payload
+                FILTER fix.publication.url IN @urls AND fix.branch_deleted_at != null
+                SORT fix.branch_deleted_at DESC, event._key DESC
+                RETURN { url: fix.publication.url, branch: fix.fix_branch.branch,
+                         deleted_at: fix.branch_deleted_at }
+            """,
+            bind_vars={"@events": self._events, "project": project, "urls": urls},
+        )
+        cleanups: dict[str, BranchCleanup] = {}
+        for row in rows:
+            if row["url"] not in cleanups:
+                cleanups[row["url"]] = BranchCleanup.model_validate(row)
+        return cleanups
 
     def guidance_scope(self, project_key: str) -> GuidanceScope:
         rows = self._database().aql.execute(

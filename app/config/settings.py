@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     ci_github_repository: str = Field(default="", pattern=r"^(?:[\w.-]+/[\w.-]+)?$")
     ci_github_branch: str = "main"
     ci_github_read_token: SecretStr | None = None
+    github_change_repositories: str = ""
     ci_github_publish_token: SecretStr | None = None
     test_fix_ollama_url: str = ""
     test_fix_ollama_model: str = "qwen3-coder:30b"

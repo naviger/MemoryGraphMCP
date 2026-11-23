@@ -26,6 +26,7 @@ from app.services.github_test_runs import GitHubBranchHead, poll_test_runs
 from app.services.ingestion_service import MemoryIngestionService
 from app.services.knowledge_base import StaticKnowledgeBase
 from app.services.observability import MemoryObservability
+from app.services.project_changes import ProjectChangesService
 from app.services.review_details import ReviewDetailService
 from app.services.review_queue import ReviewQueueService
 from app.services.search_service import MemorySearchService
@@ -130,6 +131,7 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         ci_repository_key=settings.ci_repository_key,
         test_fixes=TestFixService(settings, graph_repository, repository)
         if graph_repository else None,
+        changes=ProjectChangesService(settings, graph_repository) if graph_repository else None,
     ))
     app.include_router(build_test_run_router(settings, graph_repository))
     app.mount(settings.mcp_mount_path, mcp_app)

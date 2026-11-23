@@ -14,7 +14,9 @@ from app.domain.architecture import (
     EntityType,
     Goal,
     Observation,
+    Repository,
 )
+from app.domain.project_changes import BranchCleanup
 from app.domain.project_guidance import GuidanceScope
 from app.domain.review_details import ProjectScope
 from app.domain.test_drafts import FixWorkflow
@@ -25,6 +27,14 @@ class ArchitectureRepository(Protocol):
     def ensure_storage_ready(self) -> None: ...
 
     def project_scope(self, key: str) -> ProjectScope: ...
+
+    def project_source_repositories(self, key: str) -> list[Repository]: ...
+
+    def change_test_runs(
+        self, project: str, repository: str, commits: list[str],
+    ) -> dict[str, TestRun]: ...
+
+    def change_branch_cleanups(self, project: str, urls: list[str]) -> dict[str, BranchCleanup]: ...
 
     def guidance_scope(self, project_key: str) -> GuidanceScope: ...
 
