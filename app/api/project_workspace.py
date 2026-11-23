@@ -42,6 +42,7 @@ def build_workspace_router(prefix, workspace, executor, capture):
             actor and (not access or access.unrestricted or access.grants.get(project) == "write")
         )
         items = await invoke(workspace.entities, project)
+        await executor.refresh()
         return {
             "items": [
                 node for node in items if node.entity_type in {"Task", "Goal", "Risk", "Constraint"}
@@ -60,6 +61,7 @@ def build_workspace_router(prefix, workspace, executor, capture):
     async def draft(project: MemoryKey, data: AssistDraft, request: Request):
         authorize(project, request, write=True)
         try:
+            await executor.refresh()
             return await executor.local.draft(data)
         except (
             ArchitectureGraphError,
@@ -83,6 +85,7 @@ def build_workspace_router(prefix, workspace, executor, capture):
     @router.post("/{project}/workspace/tasks/{task}/executions")
     async def start(project: MemoryKey, task: MemoryKey, command: StartExecution, request: Request):
         actor = authorize(project, request, write=True)
+        await executor.refresh()
         if command.mode not in executor.modes().get(command.agent, []):
             raise HTTPException(422, "This agent does not support the selected mode")
         return await invoke(workspace.start, project, task, command, actor)

@@ -91,6 +91,8 @@ class Settings(BaseSettings):
     test_fix_ollama_url: str = ""
     test_fix_ollama_model: str = "qwen3-coder:30b"
     workspace_agent_urls: dict[str, str] = Field(default_factory=dict)
+    workspace_agent_allowed_urls: list[str] = Field(default_factory=list)
+    workspace_ollama_allowed_urls: list[str] = Field(default_factory=list)
     workspace_agent_token: SecretStr | None = None
     draft_worker_url: str = ""
     draft_worker_token: SecretStr | None = None

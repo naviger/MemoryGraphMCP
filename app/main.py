@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastmcp.utilities.lifespan import combine_lifespans
 
+from app.api.agent_settings import build_agent_settings_router
 from app.api.effectiveness import build_effectiveness_router
 from app.api.project_workspace import build_workspace_router
 from app.api.review import REVIEW_API_PREFIX, build_review_router
@@ -25,6 +26,7 @@ from app.mcp.server import build_mcp_server
 from app.repositories.factory import build_repository
 from app.repositories.project_workspace import ProjectWorkspaceRepository
 from app.repositories.scoped import ScopedRepositories
+from app.services.agent_settings import AgentRegistry
 from app.services.architecture_service import ArchitectureService
 from app.services.ask_graph import AskGraphService
 from app.services.capture_worker import CaptureWorker
@@ -75,7 +77,8 @@ def create_application(settings: Settings | None = None) -> FastAPI:
     mcp_app = mcp.http_app(path="/", stateless_http=True) if scoped else mcp.http_app(path="/")
 
     workspace = ProjectWorkspaceRepository(graph_repository) if hasattr(graph_repository, "_transaction") else None
-    executor = TaskExecutor(settings, workspace, repository) if workspace else None
+    agent_registry = AgentRegistry(settings, graph_repository) if workspace else None
+    executor = TaskExecutor(settings, workspace, repository, agent_registry) if workspace else None
     capture = (CaptureWorker(settings, KnowledgeCaptureService(graph_repository, repository))
                if graph_repository and settings.capture_project_key else None)
 
@@ -173,6 +176,7 @@ def create_application(settings: Settings | None = None) -> FastAPI:
             EffectivenessService(request_graph, request_memory), REVIEW_API_PREFIX,
         ))
     if workspace:
+        app.include_router(build_agent_settings_router(REVIEW_API_PREFIX, agent_registry))
         app.include_router(build_workspace_router(REVIEW_API_PREFIX, workspace, executor, capture))
     app.include_router(build_test_run_router(settings, graph_repository))
     app.mount(settings.mcp_mount_path, mcp_app)
