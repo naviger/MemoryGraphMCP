@@ -16,7 +16,10 @@ from app.config.telemetry import configure_telemetry, instrument_fastapi
 from app.mcp.server import build_mcp_server
 from app.repositories.factory import build_repository
 from app.services.architecture_service import ArchitectureService
+from app.services.embeddings import EmbeddingService
+from app.services.ingestion_service import MemoryIngestionService
 from app.services.knowledge_base import StaticKnowledgeBase
+from app.services.observability import MemoryObservability
 from app.services.search_service import MemorySearchService
 
 logger = structlog.get_logger(__name__)
@@ -28,11 +31,15 @@ def create_application(settings: Settings | None = None) -> FastAPI:
     configure_telemetry(settings)
 
     repository = build_repository(settings)
-    service = MemorySearchService(repository=repository)
+    embedding_service = EmbeddingService.from_settings(settings)
+    observability = MemoryObservability()
+    service = MemorySearchService(repository, embedding_service, observability)
+    ingestion_service = MemoryIngestionService(repository, embedding_service, observability)
     knowledge_base = StaticKnowledgeBase()
     graph = getattr(repository, "architecture", None)
     mcp = build_mcp_server(
         settings=settings, service=service, knowledge_base=knowledge_base,
+        ingestion_service=ingestion_service,
         architecture_service=ArchitectureService(graph, repository) if graph is not None else None,
     )
     mcp_app = mcp.http_app(path="/")
@@ -43,6 +50,13 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         app.state.repository = repository
         app.state.service = service
         app.state.mcp = mcp
+        app.state.ingestion_service = ingestion_service
+        app.state.embedding_service = embedding_service
+        app.state.observability = observability
+        embedding_status = await anyio.to_thread.run_sync(embedding_service.ensure_ready)
+        app.state.embedding_status = embedding_status
+        if embedding_status["status"] == "unavailable" and settings.embed_require_ready:
+            raise RuntimeError(embedding_status["error_summary"] or "Embedding unavailable")
         await anyio.to_thread.run_sync(repository.ensure_storage_ready)
         logger.info(
             "memorygraphmcp_storage_ready",
@@ -72,17 +86,50 @@ def create_application(settings: Settings | None = None) -> FastAPI:
     app.mount(settings.mcp_mount_path, mcp_app)
     instrument_fastapi(app)
 
+    async def get_embedding_status() -> dict[str, object]:
+        status = getattr(app.state, "embedding_status", None)
+        if status is None:
+            return await anyio.to_thread.run_sync(embedding_service.ensure_ready)
+        return status
+
     @app.get("/healthz", include_in_schema=False)
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    async def healthz() -> dict[str, object]:
+        embedding_status = await get_embedding_status()
+        status = "ok" if embedding_status["status"] in {"ready", "degraded"} else "error"
+        payload = {
+            "status": status,
+            "embedding.status": embedding_status["status"],
+            "embedding.model": embedding_status["model"],
+            "embedding.provider_url": embedding_status["provider_url"],
+            "embedding.last_probe_at": embedding_status.get("last_probe_at"),
+            "embedding.error_summary": embedding_status.get("error_summary"),
+        }
+        return payload
 
     @app.get("/readyz", include_in_schema=False)
-    async def readyz() -> dict[str, str]:
+    async def readyz() -> dict[str, object]:
         try:
             await anyio.to_thread.run_sync(repository.ensure_connected)
         except Exception:  # pragma: no cover - readiness should surface infrastructure failures
             raise HTTPException(status_code=503, detail="Not ready")
-        return {"status": "ready"}
+        embedding_status = await get_embedding_status()
+        if embedding_status["status"] == "unavailable" and settings.embed_require_ready:
+            raise HTTPException(status_code=503, detail="Embedding capability unavailable")
+        return {"status": "ready", "embedding.status": embedding_status["status"], "semantic_search_available": embedding_status["status"] in {"ready", "degraded"}}
+
+    @app.get("/capabilities", include_in_schema=False)
+    async def capabilities() -> dict[str, object]:
+        embedding_status = await get_embedding_status()
+        return {
+            "semantic_search_available": embedding_status["status"] in {"ready", "degraded"},
+            "embedding": {
+                "status": embedding_status["status"],
+                "model": embedding_status["model"],
+                "provider_url": embedding_status["provider_url"],
+                "last_probe_at": embedding_status.get("last_probe_at"),
+                "error_summary": embedding_status.get("error_summary"),
+            },
+        }
 
     return app
 

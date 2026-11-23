@@ -48,6 +48,35 @@ class Settings(BaseSettings):
     arango_search_view: str = Field(default="memory_search")
     arango_vector_view: str = Field(default="memory_vectors_view")
 
+    embedding_provider: str = Field(default="deterministic")
+    embedding_model: str = Field(default="deterministic-hash")
+    embedding_dimension: int = Field(default=1536, ge=1)
+    embedding_base_url: str = Field(default="http://localhost:11435")
+    embedding_timeout_seconds: float = Field(default=30.0, ge=1.0)
+    embedding_strict_mode: bool = False
+    embedding_version: str | None = None
+
+    embed_ollama_base_url: str = Field(
+        default="http://localhost:11435",
+        validation_alias=AliasChoices("EMBED_OLLAMA_BASE_URL", "MGMCP_EMBED_OLLAMA_BASE_URL"),
+    )
+    embed_model: str = Field(
+        default="nomic-embed-text",
+        validation_alias=AliasChoices("EMBED_MODEL", "MGMCP_EMBED_MODEL", "EMBEDDING_MODEL", "MGMCP_EMBEDDING_MODEL"),
+    )
+    embed_auto_pull: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("EMBED_AUTO_PULL", "MGMCP_EMBED_AUTO_PULL"),
+    )
+    embed_require_ready: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("EMBED_REQUIRE_READY", "MGMCP_EMBED_REQUIRE_READY"),
+    )
+    embed_timeout_seconds: float = Field(
+        default=30.0,
+        validation_alias=AliasChoices("EMBED_TIMEOUT_SECONDS", "MGMCP_EMBED_TIMEOUT_SECONDS"),
+    )
+
     search_result_limit: int = Field(default=10, ge=1, le=100)
     vector_dimensions: int = Field(default=1536, ge=1)
 

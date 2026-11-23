@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 pytest.importorskip("anyio")
 
-from app.domain.models import GraphTraversalRequest, MemoryDocument, MemorySearchHit, MemorySearchRequest, RelatedEntity
+from app.domain.models import (
+    GraphTraversalRequest,
+    MemoryDocument,
+    MemorySearchHit,
+    MemorySearchRequest,
+    RelatedEntity,
+)
 from app.services.search_service import MemorySearchService
 
 
@@ -59,3 +67,23 @@ async def test_related_entities_delegate_to_repository() -> None:
     assert request.seed_entity_id == "memory-1"
     assert request.depth == 3
     assert request.limit == 7
+
+
+@pytest.mark.asyncio
+async def test_semantic_search_falls_back_when_no_vectors_match_the_query_model():
+    class Repository(FakeRepository):
+        def semantic_search(self, request):
+            assert request.embedding_provider == "deterministic"
+            assert request.embedding_model == "deterministic-hash"
+            assert request.embedding_version == "1"
+            assert request.as_of == date(2026, 11, 21)
+            return []
+
+    repository = Repository()
+    hits = await MemorySearchService(repository).semantic_search("example", as_of=date(2026, 11, 21))
+
+    assert repository.calls[0][0] == "search_documents"
+    assert repository.calls[0][1].as_of == date(2026, 11, 21)
+    assert hits[0].retrieval_mode == "lexical"
+    assert hits[0].fallback_used is True
+    assert hits[0].embedding_provider_used is None
