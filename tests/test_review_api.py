@@ -28,6 +28,7 @@ from app.domain.models import (
     MemorySearchHit,
 )
 from app.domain.review_details import ProjectDocument, ProjectEntity, ProjectScope, ReviewEntityLink
+from app.domain.test_runs import TestRunDetail, TestRunHistory, TestRunSummary
 
 _SECRET = "review-api-test-signing-key-32-bytes"
 _AUDIENCE = "review"
@@ -43,7 +44,8 @@ def auth(subject: str, role: str, **profile: str) -> dict[str, str]:
 
 
 @pytest.fixture
-def review_api(monkeypatch):
+def review_api(monkeypatch, request):
+    with_failed_run = getattr(request, "param", False)
     with patch.dict("os.environ", {"MGMCP_AUTH_REQUIRED": "false"}):
         from app.main import create_application
     adr = ArchitectureADR(key="graph-adr", name="Authentication ADR", memory_key="record")
@@ -66,6 +68,35 @@ def review_api(monkeypatch):
                 "graph-adr": adr, "service": service,
                 "project": Project(key="project", name="Identity"),
             }.get(key)
+
+        def latest_test_run(self, project_key):
+            assert project_key == "project"
+            if with_failed_run:
+                return TestRunDetail(
+                    run_id="101:1", commit="b" * 40, finished_at="2026-11-22T13:00:00Z",
+                    status="failed", passed=2, failed=1, skipped=0,
+                    project_key=project_key, repository_key="repo", failures=[],
+                )
+            return None
+
+        def latest_passing_test_run(self, project_key):
+            return self.read_test_run(project_key, "100:2")
+
+        def read_test_run(self, project_key, run_id):
+            assert project_key == "project"
+            if run_id != "100:2":
+                return None
+            return TestRunDetail(
+                **self.list_test_runs(project_key, 1, None).runs[0].model_dump(),
+                project_key=project_key, repository_key="repo", failures=[],
+            )
+
+        def list_test_runs(self, project_key, limit, cursor):
+            assert (project_key, limit, cursor) == ("project", 1, None)
+            return TestRunHistory(runs=[TestRunSummary(
+                run_id="100:2", commit="a" * 40, finished_at="2026-11-22T12:00:00Z",
+                status="passed", passed=3, failed=0, skipped=0,
+            )], next_cursor="a" * 64)
 
         def project_scope(self, key):
             assert key == "project"
@@ -269,6 +300,8 @@ def review_api(monkeypatch):
                 auth_required=True,
                 jwt_secret_key=_SECRET,
                 jwt_audience=_AUDIENCE,
+                ci_github_repository="example/project" if with_failed_run else "",
+                ci_repository_key="repo" if with_failed_run else "",
             )
         )
     )
@@ -554,3 +587,77 @@ def test_similar_records_use_stored_profile_and_return_minimal_matches(review_ap
         "available": False, "matches": [],
     }
     assert review_api.get(f"{base}/missing/similar", headers=headers).status_code == 404
+
+
+def test_project_testing_requires_reader_and_returns_empty_state(review_api):
+    path = "/api/review/projects/project/testing"
+    assert review_api.get(path).status_code == 401
+    reader = auth("reader", "reader")
+    response = review_api.get(path, headers=reader)
+    assert response.status_code == 200
+    assert response.json() == {
+        "latest_run": None, "run_url": None, "can_suggest_fix": False, "last_passing_run": None,
+        "health": "unknown",
+        "can_draft_fix": False,
+        "can_apply_draft": False,
+        "can_complete_fix": False,
+        "can_publish_fix": False,
+        "can_review_fix": True,
+    }
+    assert response.headers["Cache-Control"] == "no-store"
+    assert review_api.get("/api/review/projects/missing/testing", headers=reader).status_code == 404
+
+
+def test_project_testing_lists_and_opens_past_runs(review_api):
+    path = "/api/review/projects/project/testing"
+    assert review_api.get(f"{path}/history").status_code == 401
+    reader = auth("reader", "reader")
+    history = review_api.get(f"{path}/history?limit=1", headers=reader)
+    assert history.status_code == 200
+    assert history.json()["next_cursor"] == "a" * 64
+    (summary,) = history.json()["runs"]
+    assert summary["run_id"] == "100:2"
+    assert "failures" not in summary
+    run = review_api.get(path, params={"run_id": "100:2"}, headers=reader)
+    assert run.status_code == 200
+    assert run.json()["latest_run"]["passed"] == 3
+    assert review_api.get(path, params={"run_id": "100:3"}, headers=reader).status_code == 404
+
+
+@pytest.mark.parametrize("review_api", [True], indirect=True)
+def test_project_testing_links_to_last_pass_after_latest_failure(review_api):
+    response = review_api.get("/api/review/projects/project/testing", headers=auth("reader", "reader"))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["latest_run"]["run_id"] == "101:1"
+    assert data["last_passing_run"] == {
+        "run_id": "100:2",
+        "finished_at": "2026-11-22T12:00:00Z",
+        "run_url": "https://github.com/example/project/actions/runs/100/attempts/2",
+    }
+
+
+def test_draft_approval_requires_writer_and_explicit_confirmation(review_api):
+    path = "/api/review/projects/project/testing/drafts/" + "a" * 32 + "/apply"
+    issue = {"run_id": "100:2", "failure_index": 0}
+    payload = {**issue, "approve": True}
+    assert review_api.post(path, json=payload).status_code == 401
+    assert review_api.post(path, headers=auth("reader", "reader"), json=payload).status_code == 403
+    for payload in ({}, {"approve": False}):
+        assert review_api.post(
+            path, headers=auth("writer", "writer"), json={**issue, **payload},
+        ).status_code == 422
+
+    for action in ("post-verify-fix", "complete-fix"):
+        endpoint = "/api/review/projects/project/testing/" + action
+        assert review_api.post(endpoint, json=issue).status_code == 401
+        assert review_api.post(endpoint, headers=auth("reader", "reader"), json=issue).status_code == 403
+
+    publish = "/api/review/projects/project/testing/publish-fix"
+    commit = {**issue, "commit": "b" * 40}
+    assert review_api.post(
+        publish, headers=auth("reader", "reader"), json={**commit, "approve": True},
+    ).status_code == 403
+    assert review_api.post(
+        publish, headers=auth("writer", "writer"), json={**commit, "approve": False},
+    ).status_code == 422

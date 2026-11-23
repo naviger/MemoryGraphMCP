@@ -65,6 +65,7 @@ class ArangoRepositoryConfig:
     vector_view: str
     architecture_entities_collection: str = "architecture_entities"
     architecture_edges_collection: str = "architecture_edges"
+    architecture_events_collection: str = "architecture_events"
 
 
 class ArangoMemoryRepository:
@@ -86,6 +87,7 @@ class ArangoMemoryRepository:
             lambda: self.database,
             self._config.architecture_entities_collection,
             self._config.architecture_edges_collection,
+            self._config.architecture_events_collection,
         )
 
     def ensure_connected(self) -> None:

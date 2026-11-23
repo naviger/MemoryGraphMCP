@@ -31,6 +31,17 @@ from app.domain.architecture import (
 from app.domain.exceptions import ArchitectureGraphError
 from app.domain.project_guidance import GuidanceScope
 from app.domain.review_details import ProjectScope
+from app.domain.test_drafts import FixWorkflow
+from app.domain.test_runs import (
+    FailingAttempt,
+    RecurringTestFailure,
+    RecurringTestFailures,
+    TestFailureDetail,
+    TestRun,
+    TestRunDetail,
+    TestRunHistory,
+    TestValidationLink,
+)
 
 _ENTITY = TypeAdapter(ArchitectureEntity)
 _STATIC_SOURCE = "static-analysis"
@@ -47,14 +58,16 @@ class ArangoArchitectureRepository:
         database: Callable[[], StandardDatabase],
         entities_collection: str = "architecture_entities",
         edges_collection: str = "architecture_edges",
+        events_collection: str = "architecture_events",
     ) -> None:
         self._database = database
         self._entities = entities_collection
         self._edges = edges_collection
+        self._events = events_collection
 
     def ensure_storage_ready(self) -> None:
         database = self._database()
-        for name, edge in ((self._entities, False), (self._edges, True)):
+        for name, edge in ((self._entities, False), (self._edges, True), (self._events, False)):
             if not database.has_collection(name):
                 try:
                     database.create_collection(name, edge=edge)
@@ -63,8 +76,12 @@ class ArangoArchitectureRepository:
                         raise
 
     @contextmanager
-    def _transaction(self) -> Iterator[TransactionDatabase]:
-        transaction = self._database().begin_transaction(exclusive=[self._entities, self._edges])
+    def _transaction(
+        self, *, with_events: bool = False, read_edges: bool = False,
+    ) -> Iterator[TransactionDatabase]:
+        collections = [self._entities, self._events if with_events else self._edges]
+        options = {"read": [self._edges]} if read_edges else {}
+        transaction = self._database().begin_transaction(exclusive=collections, **options)
         try:
             yield transaction
             transaction.commit_transaction()
@@ -341,6 +358,238 @@ class ArangoArchitectureRepository:
                 edges.insert(payload)
         for key in previous:
             edges.delete(key)
+
+    def known_test_run_ids(self, repository_key: str, run_ids: list[str]) -> set[str]:
+        if not run_ids:
+            return set()
+        ids_by_key = {
+            architecture_key("test-run", "github-actions", repository_key, run_id): run_id
+            for run_id in run_ids
+        }
+        existing = self._database().aql.execute(
+            """
+            FOR key IN @keys
+                LET event = DOCUMENT(@collection, key)
+                FILTER event.event_type == "test.run.finished"
+                RETURN key
+            """,
+            bind_vars={"collection": self._events, "keys": list(ids_by_key)},
+        )
+        return {ids_by_key[key] for key in existing}
+
+    def put_test_run(self, run: TestRun) -> TestRun:
+        key = architecture_key("test-run", run.source, run.repository_key, run.run_id)
+        payload = run.model_dump(mode="json")
+        with self._transaction(with_events=True, read_edges=True) as transaction:
+            events = transaction.collection(self._events)
+            existing = events.get(key)
+            if existing is not None:
+                previous = TestRun.model_validate(existing["payload"])
+                if previous != run:
+                    raise ArchitectureGraphError("This test run ID already has a different payload")
+                return previous
+            nodes = transaction.collection(self._entities)
+            self._require_entity_type(nodes, run.project_key, "Project")
+            repository = self._require_entity_type(nodes, run.repository_key, "Repository")
+            linked = next(iter(transaction.aql.execute(
+                """
+                WITH @@entities
+                FOR repo, edge IN 1..1 ANY @project @@edges
+                    FILTER repo._key == @repository AND edge.relationship_type != "uses"
+                    LIMIT 1
+                    RETURN true
+                """,
+                bind_vars={
+                    "@entities": self._entities, "@edges": self._edges,
+                    "project": f"{self._entities}/{run.project_key}",
+                    "repository": run.repository_key,
+                },
+            )), False)
+            if repository.get("role") != "source" or not linked:
+                raise ArchitectureGraphError("The source repository must be linked to the project")
+            events.insert({
+                "_key": key,
+                "event_type": "test.run.finished",
+                "source": run.source,
+                "project_key": run.project_key,
+                "occurred_at_us": int(run.finished_at.timestamp() * 1_000_000),
+                "recorded_at": datetime.now(UTC).isoformat(),
+                "affected_entity_keys": [run.project_key, run.repository_key],
+                "payload": payload,
+            })
+        return run
+
+    def read_fix_workflow(
+        self, project_key: str, run_id: str, issue_type: str, issue_index: int,
+    ) -> FixWorkflow | None:
+        key = architecture_key("ci-fix-workflow", project_key, run_id, issue_type, str(issue_index))
+        row = self._database().collection(self._events).get(key)
+        return FixWorkflow.model_validate(row["payload"]) if row else None
+
+    def save_fix_workflow(self, workflow: FixWorkflow) -> FixWorkflow:
+        issue = workflow.issue
+        key = architecture_key(
+            "ci-fix-workflow", workflow.project_key, issue.run_id, issue.issue_type,
+            str(issue.failure_index),
+        )
+        with self._transaction(with_events=True) as transaction:
+            events = transaction.collection(self._events)
+            existing = events.get(key)
+            revision = existing["payload"]["revision"] if existing else 0
+            if revision != workflow.revision:
+                raise ArchitectureGraphError("The saved fix workflow changed. Reopen the issue.")
+            updated = workflow.model_copy(update={"revision": revision + 1})
+            events.insert({
+                "_key": key, "event_type": "test.fix.workflow", "project_key": workflow.project_key,
+                "affected_entity_keys": [workflow.project_key],
+                "payload": updated.model_dump(mode="json"),
+            }, overwrite_mode="replace")
+        return updated
+
+    def latest_test_run(self, project_key: str) -> TestRunDetail | None:
+        return self._read_test_run(project_key, None)
+
+    def latest_passing_test_run(self, project_key: str) -> TestRunDetail | None:
+        return self._read_test_run(project_key, None, passed_only=True)
+
+    def read_test_run(self, project_key: str, run_id: str) -> TestRunDetail | None:
+        return self._read_test_run(project_key, run_id)
+
+    def list_test_runs(
+        self, project_key: str, limit: int, cursor: str | None,
+    ) -> TestRunHistory:
+        rows = list(self._database().aql.execute(
+            """
+            LET boundary = @cursor == null ? null : DOCUMENT(@events, @cursor)
+            FOR event IN @@events
+                FILTER event.event_type == "test.run.finished" AND event.project_key == @key
+                FILTER @cursor == null OR (
+                    boundary != null AND boundary.project_key == @key
+                    AND boundary.event_type == "test.run.finished"
+                    AND (event.occurred_at_us < boundary.occurred_at_us
+                        OR (event.occurred_at_us == boundary.occurred_at_us
+                            AND event._key < boundary._key))
+                )
+                SORT event.occurred_at_us DESC, event._key DESC
+                LIMIT @limit
+                RETURN {cursor: event._key, run: KEEP(event.payload, [
+                    "run_id", "commit", "finished_at", "status", "passed", "failed", "skipped",
+                    "warning_count", "build_status"
+                ])}
+            """,
+            bind_vars={
+                "@events": self._events, "events": self._events, "key": project_key,
+                "cursor": cursor, "limit": limit + 1,
+            },
+        ))
+        return TestRunHistory(
+            runs=[row["run"] for row in rows[:limit]],
+            next_cursor=rows[limit - 1]["cursor"] if len(rows) > limit else None,
+        )
+
+    def recurring_test_failures(self, project_key: str, limit: int) -> RecurringTestFailures:
+        rows = list(self._database().aql.execute(
+            """
+            FOR event IN @@events
+                FILTER event.event_type == "test.run.finished" AND event.project_key == @key
+                SORT event.occurred_at_us DESC, event._key DESC
+                LIMIT @limit
+                RETURN KEEP(event.payload, ["run_id", "finished_at", "failures"])
+            """,
+            bind_vars={"@events": self._events, "key": project_key, "limit": limit},
+        ))
+        groups: dict[tuple[str, str | None], dict[str, FailingAttempt]] = {}
+        for row in rows:
+            attempt = FailingAttempt.model_validate(row)
+            for failure in row["failures"]:
+                key = (failure["name"], failure.get("source_path"))
+                groups.setdefault(key, {})[attempt.run_id] = attempt
+        failures = [
+            RecurringTestFailure(name=name, source_path=path, attempts=list(attempts.values()))
+            for (name, path), attempts in groups.items() if len(attempts) >= 2
+        ]
+        failures.sort(
+            key=lambda failure: (-len(failure.attempts), failure.name, failure.source_path or "")
+        )
+        return RecurringTestFailures(
+            window_size=limit, attempts_examined=len(rows), failures=failures,
+        )
+
+    def read_test_run_for_commit(
+        self, project_key: str, repository_key: str, commit: str,
+    ) -> TestRun | None:
+        rows = self._database().aql.execute(
+            """
+            FOR event IN @@events
+                FILTER event.event_type == "test.run.finished" AND event.project_key == @project
+                FILTER event.payload.repository_key == @repository AND event.payload.commit == @commit
+                SORT event.occurred_at_us DESC, event._key DESC
+                LIMIT 1
+                RETURN event.payload
+            """,
+            bind_vars={
+                "@events": self._events, "project": project_key,
+                "repository": repository_key, "commit": commit,
+            },
+        )
+        row = next(iter(rows), None)
+        return TestRun.model_validate(row) if row else None
+
+    def _read_test_run(
+        self, project_key: str, run_id: str | None, *, passed_only: bool = False,
+    ) -> TestRunDetail | None:
+        database = self._database()
+        payload = next(iter(database.aql.execute(
+            """
+            FOR event IN @@events
+                FILTER event.event_type == "test.run.finished" AND event.project_key == @key
+                FILTER @run_id == null OR event.payload.run_id == @run_id
+                FILTER !@passed_only OR event.payload.status == "passed"
+                SORT event.occurred_at_us DESC, event._key DESC
+                LIMIT 1
+                RETURN event.payload
+            """,
+            bind_vars={
+                "@events": self._events, "key": project_key,
+                "run_id": run_id, "passed_only": passed_only,
+            },
+        )), None)
+        if payload is None:
+            return None
+        run = TestRun.model_validate(payload)
+        paths = sorted({failure.source_path for failure in run.failures if failure.source_path})
+        links: dict[str, list[TestValidationLink]] = {}
+        if paths:
+            rows = database.aql.execute(
+                """
+                WITH @@entities
+                LET repo = DOCUMENT(@repository)
+                FOR suite IN @@entities
+                    FILTER repo != null AND suite.entity_type == "TestSuite"
+                    FILTER suite.repository == repo.name AND suite.source_path IN @paths
+                    FOR target, edge IN 1..1 INBOUND suite._id @@edges
+                        FILTER edge.relationship_type == "validated_by"
+                        FILTER target.entity_type IN ["ADR", "Constraint"]
+                        SORT target.entity_type, target.name, target._key
+                        RETURN DISTINCT {path: suite.source_path, link: {
+                            key: target._key, name: target.name, entity_type: target.entity_type,
+                            memory_key: target.memory_key
+                        }}
+                """,
+                bind_vars={
+                    "@entities": self._entities, "@edges": self._edges,
+                    "repository": f"{self._entities}/{run.repository_key}", "paths": paths,
+                },
+            )
+            for row in rows:
+                links.setdefault(row["path"], []).append(TestValidationLink.model_validate(row["link"]))
+        return TestRunDetail(
+            **run.model_dump(exclude={"failures"}),
+            failures=[
+                TestFailureDetail(**failure.model_dump(), validations=links.get(failure.source_path, []))
+                for failure in run.failures
+            ],
+        )
 
     def put_link(self, link: ArchitectureLink) -> ArchitectureRelationship:
         if link.source == _STATIC_SOURCE:

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { reviewRequest } from './api.js';
 import { formatDate } from './Details.jsx';
+import { ProjectHealth } from './ProjectTesting.jsx';
 
 const COUNT_LIMIT = 100;
 
@@ -58,6 +59,7 @@ function ProjectRow({ project, token, navigate, onUnauthorized, refresh }) {
           onClick={(event) => navigate(event, `${overview}?tab=Overview`, project.key)}>{project.name}</a>
         {project.description && <p className="muted">{project.description}</p>}
       </th>
+      <td><ProjectHealth projectKey={project.key} token={token} compact /></td>
       <td><ProjectDate value={project.created_at} fallback={summary?.earliest_record} /></td>
       <td><ProjectDate value={project.updated_at} fallback={summary?.latest_record} /></td>
       <td>{countLink('Overview', 'open tasks', summary?.open_tasks, summaryError)}</td>
@@ -84,6 +86,7 @@ export function HomePage({ projects, token, navigate, onUnauthorized, refresh })
         <thead>
           <tr>
             <th scope="col">Project</th>
+            <th scope="col">CI health</th>
             <th scope="col">Created</th>
             <th scope="col">Last edited</th>
             <th scope="col">Open tasks</th>

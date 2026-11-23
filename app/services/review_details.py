@@ -14,6 +14,7 @@ from app.domain.architecture import (
     EntityType,
     Project,
 )
+from app.domain.exceptions import ArchitectureGraphError
 from app.domain.models import MemoryDocument, MemorySearchRequest
 from app.domain.review_details import (
     ProjectEntity,
@@ -26,6 +27,13 @@ from app.domain.review_details import (
     SearchEmbeddingDiagnostics,
     SimilarRecord,
     SimilarRecords,
+)
+from app.domain.test_drafts import FixWorkflow
+from app.domain.test_runs import (
+    RecurringTestFailures,
+    TestFixRequest,
+    TestRunDetail,
+    TestRunHistory,
 )
 from app.repositories.architecture_protocol import ArchitectureRepository
 from app.repositories.protocol import MemoryRepository
@@ -72,6 +80,70 @@ class ReviewDetailService:
 
     async def get_project_summary(self, key: str) -> ProjectSummary | None:
         return await anyio.to_thread.run_sync(self._get_project_summary, key)
+
+    async def get_project_testing(
+        self, key: str, run_id: str | None = None,
+    ) -> tuple[bool, TestRunDetail | None]:
+        return await anyio.to_thread.run_sync(self._get_project_testing, key, run_id)
+
+    async def read_fix_workflow(self, key: str, issue: TestFixRequest) -> FixWorkflow:
+        if self.architecture is None:
+            return FixWorkflow(project_key=key, issue=issue)
+        saved = await anyio.to_thread.run_sync(
+            self.architecture.read_fix_workflow, key, issue.run_id, issue.issue_type,
+            issue.failure_index,
+        )
+        return saved or FixWorkflow(project_key=key, issue=issue)
+
+    async def save_fix_workflow(self, workflow: FixWorkflow, **changes) -> FixWorkflow:
+        if self.architecture is None:
+            raise ArchitectureGraphError("Fix workflow storage is unavailable.")
+        return await anyio.to_thread.run_sync(
+            self.architecture.save_fix_workflow, workflow.model_copy(update=changes),
+        )
+
+    def _get_project_testing(
+        self, key: str, run_id: str | None,
+    ) -> tuple[bool, TestRunDetail | None]:
+        if self.architecture is None or not isinstance(self.architecture.read_entity(key), Project):
+            return False, None
+        run = (
+            self.architecture.read_test_run(key, run_id) if run_id
+            else self.architecture.latest_test_run(key)
+        )
+        return True, run
+
+    async def get_test_run_history(
+        self, key: str, limit: int, cursor: str | None,
+    ) -> TestRunHistory | None:
+        return await anyio.to_thread.run_sync(self._get_test_run_history, key, limit, cursor)
+
+    async def get_test_run_for_commit(self, key: str, repo: str, commit: str):
+        if self.architecture is None:
+            return None
+        return await anyio.to_thread.run_sync(
+            self.architecture.read_test_run_for_commit, key, repo, commit,
+        )
+
+    async def latest_passing_test_run(self, key: str) -> TestRunDetail | None:
+        if self.architecture is None:
+            return None
+        return await anyio.to_thread.run_sync(self.architecture.latest_passing_test_run, key)
+
+    async def get_recurring_test_failures(self, key: str) -> RecurringTestFailures | None:
+        return await anyio.to_thread.run_sync(self._get_recurring_test_failures, key)
+
+    def _get_recurring_test_failures(self, key: str) -> RecurringTestFailures | None:
+        if self.architecture is None or not isinstance(self.architecture.read_entity(key), Project):
+            return None
+        return self.architecture.recurring_test_failures(key, 20)
+
+    def _get_test_run_history(
+        self, key: str, limit: int, cursor: str | None,
+    ) -> TestRunHistory | None:
+        if self.architecture is None or not isinstance(self.architecture.read_entity(key), Project):
+            return None
+        return self.architecture.list_test_runs(key, limit, cursor)
 
     def _get_project_summary(self, key: str) -> ProjectSummary | None:
         if self.architecture is None or not isinstance(self.architecture.read_entity(key), Project):

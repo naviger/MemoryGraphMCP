@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastmcp.utilities.lifespan import combine_lifespans
 
 from app.api.review import REVIEW_API_PREFIX, build_review_router
+from app.api.test_runs import build_test_run_router
 from app.auth.browser_oidc import BrowserOIDC
 from app.auth.jwt import JWTVerifier
 from app.auth.middleware import BearerTokenMiddleware
@@ -21,12 +22,14 @@ from app.repositories.factory import build_repository
 from app.services.architecture_service import ArchitectureService
 from app.services.ask_graph import AskGraphService
 from app.services.embeddings import EmbeddingService
+from app.services.github_test_runs import GitHubBranchHead, poll_test_runs
 from app.services.ingestion_service import MemoryIngestionService
 from app.services.knowledge_base import StaticKnowledgeBase
 from app.services.observability import MemoryObservability
 from app.services.review_details import ReviewDetailService
 from app.services.review_queue import ReviewQueueService
 from app.services.search_service import MemorySearchService
+from app.services.test_fix import TestFixService
 
 logger = structlog.get_logger(__name__)
 
@@ -37,16 +40,20 @@ def create_application(settings: Settings | None = None) -> FastAPI:
     configure_telemetry(settings)
 
     repository = build_repository(settings)
-    embedding_service = EmbeddingService.from_settings(settings)
     observability = MemoryObservability()
-    service = MemorySearchService(repository, embedding_service, observability)
-    ingestion_service = MemoryIngestionService(repository, embedding_service, observability)
+    embedding_service = EmbeddingService.from_settings(settings)
+    service = MemorySearchService(repository=repository, embedding_service=embedding_service, observability=observability)
+    ingestion_service = MemoryIngestionService(repository=repository, embedding_service=embedding_service, observability=observability)
     knowledge_base = StaticKnowledgeBase()
-    graph = getattr(repository, "architecture", None)
+    graph_repository = getattr(repository, "architecture", None)
+    ci_head = GitHubBranchHead()
+    architecture_service = ArchitectureService(graph_repository, repository) if graph_repository else None
     mcp = build_mcp_server(
-        settings=settings, service=service, knowledge_base=knowledge_base,
+        settings=settings,
+        service=service,
+        knowledge_base=knowledge_base,
         ingestion_service=ingestion_service,
-        architecture_service=ArchitectureService(graph, repository) if graph is not None else None,
+        architecture_service=architecture_service,
     )
     mcp_app = mcp.http_app(path="/")
 
@@ -55,14 +62,14 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.repository = repository
         app.state.service = service
-        app.state.mcp = mcp
         app.state.ingestion_service = ingestion_service
         app.state.embedding_service = embedding_service
         app.state.observability = observability
+        app.state.mcp = mcp
         embedding_status = await anyio.to_thread.run_sync(embedding_service.ensure_ready)
         app.state.embedding_status = embedding_status
         if embedding_status["status"] == "unavailable" and settings.embed_require_ready:
-            raise RuntimeError(embedding_status["error_summary"] or "Embedding unavailable")
+            raise RuntimeError(embedding_status["error_summary"] or "Embedding capability unavailable")
         await anyio.to_thread.run_sync(repository.ensure_storage_ready)
         logger.info(
             "memorygraphmcp_storage_ready",
@@ -74,8 +81,17 @@ def create_application(settings: Settings | None = None) -> FastAPI:
             search_view=settings.arango_search_view,
             vector_view=settings.arango_vector_view,
         )
-        logger.info("memorygraphmcp_starting", environment=settings.environment)
-        yield
+        logger.info("memorygraphmcp_starting", environment=settings.environment, embedding_status=embedding_status)
+        async with anyio.create_task_group() as background:
+            if graph_repository and all((
+                settings.ci_github_repository, settings.ci_project_key,
+                settings.ci_repository_key,
+            )):
+                background.start_soon(poll_test_runs, settings, graph_repository, ci_head)
+            try:
+                yield
+            finally:
+                background.cancel_scope.cancel()
         logger.info("memorygraphmcp_stopping")
 
     app = FastAPI(
@@ -88,21 +104,34 @@ def create_application(settings: Settings | None = None) -> FastAPI:
     app.include_router(browser_oidc.router())
     if settings.auth_required:
         app.add_middleware(
-            BearerTokenMiddleware, verifier=verifier, protected_prefix=settings.mcp_mount_path,
-            additional_prefixes=(REVIEW_API_PREFIX,), browser=browser_oidc,
+            BearerTokenMiddleware,
+            verifier=verifier,
+            protected_prefix=settings.mcp_mount_path,
+            additional_prefixes=(REVIEW_API_PREFIX,),
+            browser=browser_oidc,
         )
     provider = embedding_service.primary_provider
     review_details = ReviewDetailService(
-        repository, graph,
+        repository,
+        graph_repository,
         SearchEmbeddingDiagnostics(
-            provider=provider.name, model=provider.model, dimension=provider.dimension,
+            provider=provider.name,
+            model=provider.model,
+            dimension=provider.dimension,
             version=getattr(provider, "version", None),
         ),
     )
     app.include_router(build_review_router(
         ReviewQueueService(repository), review_details,
         AskGraphService(repository, review_details), settings.auth_required, service,
+        ci_github_repository=settings.ci_github_repository,
+        ci_project_key=settings.ci_project_key,
+        ci_head=ci_head.current,
+        ci_repository_key=settings.ci_repository_key,
+        test_fixes=TestFixService(settings, graph_repository, repository)
+        if graph_repository else None,
     ))
+    app.include_router(build_test_run_router(settings, graph_repository))
     app.mount(settings.mcp_mount_path, mcp_app)
     instrument_fastapi(app)
 
