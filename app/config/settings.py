@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     oidc_browser_discovery_url: str = ""
     oidc_browser_scopes: str = ""
     oidc_browser_audience: str = ""
+    oidc_browser_session_db: str = ""
+    oidc_browser_session_key: SecretStr | None = None
     oidc_browser_idle_seconds: int = Field(default=1800, ge=60, le=86400)
     oidc_browser_max_seconds: int = Field(default=28800, ge=60, le=604800)
     oidc_browser_token_auth: Literal["client_secret_basic", "client_secret_post"] = "client_secret_basic"

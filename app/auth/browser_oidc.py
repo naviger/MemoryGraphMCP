@@ -1,7 +1,9 @@
 from base64 import urlsafe_b64encode
 from dataclasses import dataclass, field
+from functools import partial
 from hashlib import sha256
 from secrets import compare_digest, token_urlsafe
+from sqlite3 import Error as SQLiteError
 from time import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -10,6 +12,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 
+from app.auth.browser_session_store import BrowserSessionStore
 from app.auth.jwt import JWTVerifier, profile_name
 from app.config.settings import Settings
 from app.domain.exceptions import AuthenticationError
@@ -67,6 +70,71 @@ class BrowserOIDC:
         self.secure = self.origin.startswith("https://")
         self.flows: dict[str, LoginFlow] = {}
         self.sessions: dict[str, BrowserSession] = {}
+        self.store = None
+        self.store_lock = anyio.Lock()
+        if self.enabled and settings.oidc_browser_session_db:
+            key = settings.oidc_browser_session_key
+            if not key or not key.get_secret_value():
+                raise ValueError(
+                    "A session encryption key is required for persistent browser sessions"
+                )
+            self.store = BrowserSessionStore(
+                settings.oidc_browser_session_db,
+                key.get_secret_value(),
+                f"{settings.effective_jwt_issuer}:{self.client_id}:{self.origin}",
+            )
+
+    async def storage(self, operation, *args):
+        try:
+            return await anyio.to_thread.run_sync(partial(operation, *args))
+        except SQLiteError as exc:
+            raise HTTPException(503, "Browser session storage is temporarily unavailable") from exc
+
+    async def get_session(self, session_id: str | None) -> BrowserSession | None:
+        if session_id is None:
+            return None
+        if session_id in self.sessions:
+            return self.sessions[session_id]
+        if self.store is None:
+            return None
+        async with self.store_lock:
+            if session_id in self.sessions:
+                return self.sessions[session_id]
+            data = await self.storage(self.store.read, session_id, time())
+            if data:
+                session = BrowserSession(**data)
+                self.sessions[session_id] = session
+                return session
+        return None
+
+    async def persist(self, session_id, session, now):
+        if self.store is None:
+            return
+        values = {name: value for name, value in vars(session).items() if name != "lock"}
+        deadline = min(
+            session.absolute_expires,
+            session.last_activity + self.settings.oidc_browser_idle_seconds,
+        )
+        if not session.refresh_token:
+            deadline = min(deadline, session.access_expires)
+        await self.storage(self.store.write, session_id, values, deadline, now)
+
+    async def discard(self, session_id):
+        if session_id is None:
+            return
+        if self.store:
+            async with self.store_lock:
+                await self.storage(self.store.delete, session_id)
+                self.sessions.pop(session_id, None)
+        else:
+            self.sessions.pop(session_id, None)
+
+    async def end_session(self, session_id):
+        session = await self.get_session(session_id)
+        if session:
+            async with session.lock:
+                await self.discard(session_id)
+        return session
 
     def require_origin(self, origin: str | None) -> None:
         if not self.enabled or origin != self.origin:
@@ -82,14 +150,15 @@ class BrowserOIDC:
     async def claims(self, session_id: str | None, *, active: bool = False) -> dict | None:
         if session_id is None:
             return None
-        session = self.sessions.get(session_id)
+        session = await self.get_session(session_id)
         if session is None:
             return None
         async with session.lock:
             now = time()
             if self.sessions.get(session_id) is not session or not self.session_alive(session, now):
-                self.sessions.pop(session_id, None)
+                await self.discard(session_id)
                 return None
+            changed = False
             if (
                 session.refresh_token
                 and session.access_expires - now <= 30
@@ -123,13 +192,14 @@ class BrowserOIDC:
                         "display_name": profile_name(access.raw) or session.claims["display_name"],
                     }
                     session.next_refresh_at = 0
+                    changed = True
                 except (httpx.TransportError, httpx.HTTPStatusError) as exc:
                     if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 500:
-                        self.sessions.pop(session_id, None)
+                        await self.discard(session_id)
                         return None
                     session.next_refresh_at = time() + 5
                 except (AuthenticationError, KeyError, TypeError, ValueError):
-                    self.sessions.pop(session_id, None)
+                    await self.discard(session_id)
                     return None
             now = time()
             if self.sessions.get(session_id) is not session or not self.session_alive(session, now):
@@ -138,6 +208,8 @@ class BrowserOIDC:
                 raise HTTPException(503, "Session refresh is temporarily unavailable")
             if active:
                 session.last_activity = now
+            if active or changed:
+                await self.persist(session_id, session, now)
             return session.claims
 
     async def _exchange(self, client, endpoint, form):
@@ -329,9 +401,9 @@ class BrowserOIDC:
             self._cleanup()
             if len(self.sessions) >= 4096:
                 raise HTTPException(503, "Too many browser sessions")
-            self.sessions.pop(request.cookies.get(SESSION_COOKIE), None)
+            await self.end_session(request.cookies.get(SESSION_COOKIE))
             session_id = token_urlsafe(32)
-            self.sessions[session_id] = BrowserSession(
+            session = BrowserSession(
                 {
                     **access.model_dump(mode="json"),
                     "display_name": profile_name(identity.raw) or profile_name(access.raw),
@@ -344,13 +416,15 @@ class BrowserOIDC:
                 token_endpoint=endpoint,
                 refresh_token=refresh,
             )
+            await self.persist(session_id, session, now)
+            self.sessions[session_id] = session
             self._cookie(response, SESSION_COOKIE, session_id, max(0, int(expires - time())))
             return response
 
         @router.post("/logout")
         async def logout(request: Request, response: Response) -> dict[str, str]:
             self.require_origin(request.headers.get("origin"))
-            session = self.sessions.pop(request.cookies.get(SESSION_COOKIE), None)
+            session = await self.end_session(request.cookies.get(SESSION_COOKIE))
             response.delete_cookie(
                 SESSION_COOKIE, secure=self.secure, httponly=True, samesite="lax"
             )
