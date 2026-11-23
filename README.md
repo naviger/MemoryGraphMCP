@@ -298,6 +298,9 @@ docker compose -f docker-compose.yml -f docker-compose.local-auth.yml \
 
 Open `http://127.0.0.1:3200` and select **Sign in**. Keycloak listens on `127.0.0.1:8180` by default. Its local realm is imported on first startup and persisted in the Keycloak volume. The local realm uses a public PKCE client and the distinct `memorygraphmcp-api` access-token audience. Use the same Compose files on subsequent restarts to retain the local authentication settings.
 
+For a single API instance, set `MGMCP_OIDC_BROWSER_SESSION_DB=/var/lib/memorygraphmcp/sessions/browser.sqlite` and supply a stable Fernet key as `MGMCP_OIDC_BROWSER_SESSION_KEY`. The Compose session volume preserves encrypted sessions across API container restarts. Keep the key in private deployment configuration and reuse it on restart. Rotating the key invalidates existing stored sessions. The store is intended for a single API process.
+
+
 The `mgmcp-admin` account has the application admin role. Keycloak's administration console signs in to the separate `master` realm. Set `MGMCP_LOCAL_KEYCLOAK_ADMIN_USERNAME` and `MGMCP_LOCAL_KEYCLOAK_ADMIN_PASSWORD` before first startup to bootstrap a temporary Keycloak administrator. For an existing local database, use the same Compose configuration and stop Keycloak before recovery:
 
 ```sh
@@ -321,6 +324,8 @@ For a shared deployment, run the base Compose file with authentication enabled a
 | `MGMCP_OIDC_BROWSER_ORIGIN` | Public HTTPS origin of the review UI |
 | `MGMCP_OIDC_BROWSER_CLIENT_ID` | OIDC browser client |
 | `MGMCP_OIDC_BROWSER_CLIENT_SECRET` | Secret for a confidential client, if applicable |
+| `MGMCP_OIDC_BROWSER_SESSION_DB` | Optional path to a private SQLite session file on a persistent volume |
+| `MGMCP_OIDC_BROWSER_SESSION_KEY` | Stable Fernet encryption key for the browser session file |
 | `MGMCP_OIDC_BROWSER_TOKEN_AUTH` | `client_secret_basic` or `client_secret_post` |
 | `MGMCP_OIDC_BROWSER_SCOPES` | Additional access-token scopes, when required |
 | `MGMCP_OIDC_BROWSER_AUDIENCE` | Optional audience parameter for providers that require one |
