@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { reviewRequest } from './api.js';
 import { PreviewLink } from './RecordInspector.jsx';
-import { PHASES, elapsedRuntime, executionSteps, reviewBlocked } from './executionSteps.js';
+import { PHASES, elapsedRuntime, executionSteps, patchProgress, reviewBlocked } from './executionSteps.js';
 
 const TYPES = { Task: 'Tasks', Goal: 'Goals', Risk: 'Risks', Constraint: 'Constraints' };
 const STATES = { open: 'Open', in_progress: 'In progress', done: 'Completed', cancelled: 'Cancelled' };
@@ -132,7 +132,7 @@ function StepTimes({ step, now, compact = false }) {
   </dl>;
 }
 
-function StepDetails({ step, now, navigate }) {
+function StepDetails({ step, now, navigate, children }) {
   const { job, result } = step;
   return <section className="execution-inspector" aria-label="Selected phase">
     <header>
@@ -159,6 +159,7 @@ function StepDetails({ step, now, navigate }) {
       </section>)}
       {result.logs.length > 0 && <details><summary>Execution log</summary><pre>{result.logs.join('\n')}</pre></details>}
     </section>}
+    {children}
     <ExecutionUsage job={job} phaseIndex={step.index} />
     {step.events.length > 0 && <section>
       <h5>Phase activity</h5>
@@ -200,6 +201,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
     return () => window.clearInterval(clock);
   }, [active]);
   const steps = executionSteps(jobs || []);
+  const progress = patchProgress(jobs || []);
   const selected = steps.find((step) => step.key === selection) || steps[0];
   const workflows = Object.keys(MODES).filter((value) => Object.values(agents).some((allowed) => allowed.includes(value)));
   const selectedMode = workflows.includes(mode) ? mode : workflows[0] || '';
@@ -276,18 +278,6 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
         {recommendation && <p role="status"><strong>Ollama recommends {recommendation.agent}.</strong> {recommendation.reason}{selectedAgent !== recommendation.agent ? ' You selected a different agent.' : ''}</p>}
       </form>
     ) : <p>No agent is configured for this project.</p>)}
-    {repair && <form className="detail workspace-form" onSubmit={startRepair}>
-      <h4>Fix review findings</h4>
-      <p><strong>Recommended agent and model</strong> · Codex · {repair.model}</p>
-      <p>{repair.reason} The new patch will return to Review.</p>
-      <p>Source patch SHA-256 <code>{repair.patch_sha256}</code></p>
-      <label>Repair prompt<textarea ref={repairPrompt} rows={8} maxLength={8000} required disabled={busy}
-        value={repair.prompt} onChange={(event) => setRepair({ ...repair, prompt: event.target.value })} /></label>
-      <div className="workspace-actions">
-        <button className="button primary" disabled={busy || active || !repair.prompt.trim()}>Start repair</button>
-        <button className="button outlined" type="button" disabled={busy} onClick={() => setRepair(null)}>Close</button>
-      </div>
-    </form>}
     {jobs === null && !error && <p role="status">Loading execution history…</p>}
     {jobs?.length === 0 && <p>No executions yet.</p>}
     {steps.length > 0 && <div className="execution-layout">
@@ -298,14 +288,19 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
           const mayCancel = mayChange && current && job.state !== 'CANCEL_REQUESTED' && ACTIVE.includes(job.state);
           const mayRetry = mayChange && current && ['BLOCKED', 'FAILED'].includes(job.state) && task.status !== 'done';
           const mayReview = mayChange && !active && agents.codex?.includes('REVIEW') &&
-            job.agent === 'codex' && result?.artifacts.some((item) => item.name === 'Local implementation patch');
+            job.agent === 'codex' && !progress.reviewed.has(job.key) && !progress.superseded.has(job.key) &&
+            result?.artifacts.some((item) => item.name === 'Local implementation patch');
           const mayRepair = mayChange && !active && agents.codex?.includes('IMPLEMENT') &&
-            result?.review_verdict === 'blocking' && result.reviewed_target?.kind === 'implementation patch';
+            result?.review_verdict === 'blocking' && result.reviewed_target?.kind === 'implementation patch' &&
+            !progress.superseded.has(result.reviewed_target.execution_id) &&
+            progress.latestReview.get(result.reviewed_target.execution_id) === job.key;
           return <li key={step.key} className="execution-step" data-selected={selected?.key === step.key}>
             <button type="button" className="execution-step-select" aria-pressed={selected?.key === step.key}
               onClick={() => setSelection(step.key)}>
               <span className="execution-step-heading"><strong>{stepTitle(step)}</strong>
                 <span className={step.attention ? 'execution-badge attention' : 'execution-badge'}>{step.state}</span></span>
+              {(progress.superseded.has(job.key) || progress.superseded.has(result?.reviewed_target?.execution_id)) &&
+                <span className="muted">Superseded by a revised patch</span>}
               <span className="muted">{job.agent} · {MODES[job.mode]}{step.attempts.length > 0 ?
                 ` · ${step.attempts.length} ${step.attempts.length === 1 ? 'attempt' : 'attempts'}` : ''}</span>
               <StepTimes step={step} now={now} compact />
@@ -318,12 +313,25 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
               {mayReview && <button type="button" className="button outlined" disabled={busy}
                 onClick={() => submit(job, 'review-patch')}>Review this patch</button>}
               {mayRepair && <button type="button" className="button primary" disabled={busy}
-                onClick={() => { setSelection(step.key); prepareRepair(job); }}>Fix review findings</button>}
+                onClick={() => { setSelection(step.key); prepareRepair(job); }}>Revise patch</button>}
             </div>}
           </li>;
         })}
       </ol>
-      {selected && <StepDetails step={selected} now={now} navigate={navigate} />}
+      {selected && <StepDetails step={selected} now={now} navigate={navigate}>
+    {repair?.review === selected.job.key && <form className="detail workspace-form" onSubmit={startRepair}>
+      <h5>Revise this patch</h5>
+      <p><strong>Recommended agent and model</strong> · Codex · {repair.model}</p>
+      <p>{repair.reason} The new patch will return to Review.</p>
+      <p>Source patch SHA-256 <code>{repair.patch_sha256}</code></p>
+      <label>Repair prompt<textarea ref={repairPrompt} rows={8} maxLength={8000} required disabled={busy}
+        value={repair.prompt} onChange={(event) => setRepair({ ...repair, prompt: event.target.value })} /></label>
+      <div className="workspace-actions">
+        <button className="button primary" disabled={busy || active || !repair.prompt.trim()}>Generate revised patch</button>
+        <button className="button outlined" type="button" disabled={busy} onClick={() => setRepair(null)}>Close</button>
+      </div>
+    </form>}
+      </StepDetails>}
     </div>}
     {error && <p className="status error" role="alert">{error}</p>}
   </section>;

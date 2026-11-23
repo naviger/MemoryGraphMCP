@@ -45,3 +45,19 @@ test('does not display a review phase that never ran after implementation stoppe
   })]);
   assert.deepEqual(steps.map((step) => step.phase), ['Implement', 'Plan']);
 });
+
+test('a revised patch retires actions on the superseded review', async () => {
+  const { patchProgress } = await import('../src/executionSteps.js');
+  const reviewed = (patch) => ({ review_verdict: 'blocking',
+    reviewed_target: { kind: 'implementation patch', execution_id: patch } });
+  const jobs = [
+    run({ key: 'old-review', results: [reviewed('original')], created_at: stamp(1) }),
+    run({ key: 'revision', patch_execution_key: 'original', repair_review_key: 'old-review',
+      results: [{ artifacts: [{ name: 'Local implementation patch' }] }], created_at: stamp(2) }),
+    run({ key: 'new-review', results: [reviewed('revision')], created_at: stamp(3) }),
+  ];
+  const progress = patchProgress(jobs);
+  assert.deepEqual([...progress.superseded], ['original']);
+  assert.equal(progress.latestReview.get('revision'), 'new-review');
+  assert.ok(progress.reviewed.has('revision'));
+});

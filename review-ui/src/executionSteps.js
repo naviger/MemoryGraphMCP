@@ -56,3 +56,26 @@ export function elapsedRuntime(step, now) {
   const minutes = Math.floor((seconds % 3600) / 60);
   return [hours ? `${hours}h` : '', hours || minutes ? `${minutes}m` : '', `${seconds % 60}s`].filter(Boolean).join(' ');
 }
+
+
+export function patchProgress(jobs) {
+  const superseded = new Set();
+  const reviewed = new Set();
+  const latestReview = new Map();
+  const newestFirst = [...jobs].sort((left, right) =>
+    Date.parse(right.created_at) - Date.parse(left.created_at));
+  for (const job of newestFirst) {
+    const hasPatch = job.results.some((result) =>
+      result.artifacts?.some((artifact) => artifact.name === 'Local implementation patch'));
+    if (job.repair_review_key && job.patch_execution_key && hasPatch) {
+      superseded.add(job.patch_execution_key);
+    }
+    for (const result of job.results) {
+      if (result.reviewed_target?.kind !== 'implementation patch' || !result.review_verdict) continue;
+      const patch = result.reviewed_target.execution_id;
+      reviewed.add(patch);
+      if (!latestReview.has(patch)) latestReview.set(patch, job.key);
+    }
+  }
+  return { superseded, reviewed, latestReview };
+}
