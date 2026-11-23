@@ -1,3 +1,4 @@
+import TrackerOverview from './TrackerOverview.jsx';
 import { InspectorView, PreviewLink } from './RecordInspector.jsx';
 import ProjectChanges from './ProjectChanges.jsx';
 import { ProjectHealth, ProjectTesting } from './ProjectTesting.jsx';
@@ -236,6 +237,8 @@ function Inventory({ project, navigate, searching, tab, setTab, token, asOf, onU
             }}>{name} <strong>{count}</strong></button></li>
           ))}
         </ul>
+        <TrackerOverview projectKey={project.key} token={token} active={tab === 'Overview'}
+          navigate={navigate} onUnauthorized={onUnauthorized} />
         <InventoryGroup title="Open work" items={openWork} renderItem={renderEntity} open />
         {GROUPS.map(([title, types]) => (
           <InventoryGroup key={title} title={title} items={project.entities.filter((item) => types.includes(item.entity_type))}

@@ -16,7 +16,7 @@ from app.domain.architecture import (
     Observation,
     Repository,
 )
-from app.domain.architecture_events import GraphEvent, GraphEventReceipt
+from app.domain.architecture_events import GraphEvent, GraphEventReceipt, TrackerActivity
 from app.domain.project_changes import BranchCleanup
 from app.domain.project_guidance import GuidanceScope
 from app.domain.review_details import ProjectScope
@@ -52,6 +52,8 @@ class ArchitectureRepository(Protocol):
     def add_conversation_summary(
         self, conversation: ConversationSummary
     ) -> ConversationSummary: ...
+
+    def recent_tracker_activity(self, project_key: str, limit: int) -> list[TrackerActivity]: ...
 
     def get_event(self, source: str, project_key: str, event_id: str) -> GraphEventReceipt: ...
 

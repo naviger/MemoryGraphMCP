@@ -14,6 +14,7 @@ from app.domain.architecture import (
     EntityType,
     Project,
 )
+from app.domain.architecture_events import TrackerOverview
 from app.domain.exceptions import ArchitectureGraphError
 from app.domain.models import MemoryDocument, MemorySearchRequest
 from app.domain.review_details import (
@@ -80,6 +81,16 @@ class ReviewDetailService:
 
     async def get_project_summary(self, key: str) -> ProjectSummary | None:
         return await anyio.to_thread.run_sync(self._get_project_summary, key)
+
+    async def get_tracker_overview(
+        self, key: str, configured_project: str | None,
+    ) -> TrackerOverview | None:
+        if self.architecture is None:
+            return None
+        if not isinstance(await anyio.to_thread.run_sync(self.architecture.read_entity, key), Project):
+            return None
+        events = await anyio.to_thread.run_sync(self.architecture.recent_tracker_activity, key, 10)
+        return TrackerOverview(configured=key == configured_project, recent_events=events)
 
     async def get_project_testing(
         self, key: str, run_id: str | None = None,
