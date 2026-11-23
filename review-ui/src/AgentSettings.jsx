@@ -11,6 +11,9 @@ function AgentForm({ agent, data, request, onSave }) {
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState(null);
   const local = agent === 'local';
+  const approved = data.allowed_urls[agent] || [];
+  const endpoint = config.url.trim().replace(/\/+$/, '');
+  const allowed = approved.includes(endpoint);
 
   function change(fields) {
     setConfig({ ...config, ...fields });
@@ -38,13 +41,16 @@ function AgentForm({ agent, data, request, onSave }) {
 
   return <form className="detail workspace-form" onSubmit={(event) => { event.preventDefault(); submit(false); }}>
     <h2>{AGENTS[agent]}</h2>
-    <label>Endpoint
-      <select value={config.url} onChange={(event) => change({ url: event.target.value })} disabled={!!busy}>
-        <option value="">Disabled</option>
-        {config.url && !data.allowed_urls.includes(config.url) && <option value={config.url}>{config.url} (unapproved)</option>}
-        {data.allowed_urls.map((url) => <option key={url}>{url}</option>)}
-      </select>
+    <label>{local ? 'Ollama endpoint' : 'Bridge endpoint'}
+      <input type="url" value={config.url} onChange={(event) => change({ url: event.target.value })}
+        list={`agent-endpoints-${agent}`} disabled={!!busy}
+        placeholder={local ? 'http://ollama:11434' : 'http://agent-bridge:8080'} />
+      <datalist id={`agent-endpoints-${agent}`}>
+        {approved.map((url) => <option key={url} value={url} />)}
+      </datalist>
     </label>
+    {!local && !approved.length && <p>No bridge endpoint is approved for {AGENTS[agent]} yet. Start a compatible bridge and add its URL to <code>MGMCP_WORKSPACE_AGENT_ALLOWED_URLS</code>.</p>}
+    {endpoint && !allowed && <p role="status">This URL needs server approval for {AGENTS[agent]} before you can test or save it.</p>}
     {local && <label>Model
       <input value={config.model} maxLength={300} onChange={(event) => change({ model: event.target.value })}
         disabled={!!busy || !config.url} required={!!config.url} />
@@ -58,8 +64,8 @@ function AgentForm({ agent, data, request, onSave }) {
         </label>)}
     </fieldset>
     <div className="workspace-actions">
-      <button className="button primary" disabled={!!busy}>Save</button>
-      <button type="button" className="button outlined" disabled={!!busy || !config.url || (local && !config.model.trim())}
+      <button className="button primary" disabled={!!busy || (!!endpoint && !allowed)}>Save</button>
+      <button type="button" className="button outlined" disabled={!!busy || !allowed || (local && !config.model.trim())}
         onClick={() => submit(true)}>Test connection</button>
     </div>
     {busy && <p role="status">{busy}</p>}
@@ -89,7 +95,6 @@ export default function AgentSettings({ token, onUnauthorized }) {
     {!data && !error && <p role="status">Loading agent settings…</p>}
     {data && <>
       <p>Endpoints are approved in the server configuration. Testing a connection does not start an execution.</p>
-      {!data.allowed_urls.length && <p>No endpoints have been approved. Set <code>MGMCP_WORKSPACE_AGENT_ALLOWED_URLS</code> in the server configuration.</p>}
       <div className="project-tabs" role="group" aria-label="Agents">
         {Object.entries(AGENTS).map(([key, label]) => <button key={key} type="button"
           aria-pressed={agent === key} onClick={() => setAgent(key)}>{label}</button>)}

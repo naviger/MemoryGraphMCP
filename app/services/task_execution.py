@@ -159,7 +159,7 @@ class TaskExecutor:
         local = LocalProvider(self.registry.settings)
         local.url = ""
         for name, config in configs.items():
-            if not config.url or config.url not in self.registry.allowed:
+            if not config.url or not self.registry.permits_execution(name, config):
                 continue
             if name == "local" and config.model:
                 local.url, local.model = config.url, config.model

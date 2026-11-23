@@ -47,10 +47,27 @@ class AgentRegistry:
                 model=settings.test_fix_ollama_model,
                 modes=OLLAMA_MODES,
             )
-        self.allowed = {value.rstrip("/") for value in settings.workspace_agent_allowed_urls}
-        self.allowed.update(value.url for value in self.defaults.values())
+        bridge_urls = {value.rstrip("/") for value in settings.workspace_agent_allowed_urls}
+        ollama_urls = {value.rstrip("/") for value in settings.workspace_ollama_allowed_urls}
         if settings.test_fix_ollama_url:
-            self.allowed.add(settings.test_fix_ollama_url.rstrip("/"))
+            ollama_urls.add(settings.test_fix_ollama_url.rstrip("/"))
+        self.allowed = {
+            name: (
+                ollama_urls
+                if name == "local"
+                else (bridge_urls | {settings.workspace_agent_urls.get(name, "").rstrip("/")})
+                - ollama_urls
+                - {""}
+            )
+            for name in AGENTS
+        }
+        # Preserve the legacy environment-only local coding adapter.
+        self.local_bridge_url = settings.workspace_agent_urls.get("local", "").rstrip("/")
+
+    def permits_execution(self, name, config):
+        if name == "local" and not config.model:
+            return bool(config.url and config.url == self.local_bridge_url)
+        return config.url in self.allowed[name]
 
     def read(self):
         row = self.graph.read_agent_registry()
@@ -72,9 +89,11 @@ class AgentRegistry:
             or parts.password
             or parts.query
             or parts.fragment
-            or url not in self.allowed
+            or url not in self.allowed[edit.agent]
         ):
-            raise ArchitectureGraphError("Endpoint must match an approved server URL")
+            raise ArchitectureGraphError(
+                "This endpoint has not been approved for the selected agent"
+            )
         if edit.agent == "local":
             if not config.model.strip():
                 raise ArchitectureGraphError("An installed Ollama model is required")

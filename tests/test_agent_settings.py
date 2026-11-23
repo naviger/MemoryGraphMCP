@@ -32,7 +32,8 @@ def make_registry():
         _env_file=None,
         auth_required=False,
         workspace_agent_urls={"codex": "http://bridge:8080"},
-        workspace_agent_allowed_urls=["http://ollama:11434", "http://new-bridge:8080"],
+        workspace_agent_allowed_urls=["http://new-bridge:8080"],
+        workspace_ollama_allowed_urls=["http://ollama:11434"],
         workspace_agent_token="configured-token",
     )
     return AgentRegistry(settings, Store())
@@ -63,7 +64,13 @@ def test_admin_only_and_runtime_reload():
         assert client.post(path, headers=headers, json=request).status_code == 403
         assert client.post(path + "/test", headers=headers, json=request).status_code == 403
     admin = {"role": "admin"}
-    assert "configured-token" not in client.get(path, headers=admin).text
+    view = client.get(path, headers=admin)
+    assert "configured-token" not in view.text
+    assert view.json()["allowed_urls"]["local"] == ["http://ollama:11434"]
+    assert "http://ollama:11434" not in view.json()["allowed_urls"]["codex"]
+    wrong_provider = {**request, "config": {"url": "http://ollama:11434", "modes": ["PLAN_ONLY"]}}
+    assert client.post(path, headers=admin, json=wrong_provider).status_code == 409
+    assert client.post(path + "/test", headers=admin, json=wrong_provider).status_code == 422
     invalid = {**request, "config": {"url": "http://169.254.169.254", "modes": ["PLAN_ONLY"]}}
     assert client.post(path, headers=admin, json=invalid).status_code == 409
     assert client.post(path + "/test", headers=admin, json=invalid).status_code == 422

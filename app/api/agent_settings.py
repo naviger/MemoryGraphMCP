@@ -21,7 +21,11 @@ def build_agent_settings_router(prefix, registry):
     async def read(request: Request):
         admin(request)
         revision, agents = await anyio.to_thread.run_sync(registry.read)
-        return {"revision": revision, "agents": agents, "allowed_urls": sorted(registry.allowed)}
+        return {
+            "revision": revision,
+            "agents": agents,
+            "allowed_urls": {agent: sorted(urls) for agent, urls in registry.allowed.items()},
+        }
 
     @router.post("")
     async def save(edit: AgentEdit, request: Request):
