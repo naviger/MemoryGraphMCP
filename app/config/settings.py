@@ -40,6 +40,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("ARANGO_PASSWORD", "MGMCP_ARANGO_PASSWORD"),
     )
     arango_root_password: str = Field(default="")
+    arango_architecture_entities_collection: str = "architecture_entities"
+    arango_architecture_edges_collection: str = "architecture_edges"
     arango_documents_collection: str = Field(default="memory_documents")
     arango_edges_collection: str = Field(default="memory_edges")
     arango_vectors_collection: str = Field(default="memory_vectors")

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from functools import cached_property
 
 from arango import ArangoClient
 from arango.database import StandardDatabase
 
 from app.domain.models import GraphTraversalRequest, MemoryDocument, MemorySearchHit, MemorySearchRequest, RelatedEntity
+
+from app.domain.project_guidance import GuidanceDecision
+from app.repositories.arango_architecture import ArangoArchitectureRepository
 
 
 @dataclass(frozen=True)
@@ -20,6 +24,8 @@ class ArangoRepositoryConfig:
     vectors_collection: str
     search_view: str
     vector_view: str
+    architecture_entities_collection: str = "architecture_entities"
+    architecture_edges_collection: str = "architecture_edges"
 
 
 class ArangoMemoryRepository:
@@ -33,6 +39,14 @@ class ArangoMemoryRepository:
             name=self._config.database,
             username=self._config.username,
             password=self._config.password,
+        )
+
+    @cached_property
+    def architecture(self) -> ArangoArchitectureRepository:
+        return ArangoArchitectureRepository(
+            lambda: self.database,
+            self._config.architecture_entities_collection,
+            self._config.architecture_edges_collection,
         )
 
     def ensure_connected(self) -> None:
@@ -51,6 +65,37 @@ class ArangoMemoryRepository:
         for view_name in (self._config.search_view, self._config.vector_view):
             if not self.database.has_view(view_name):
                 raise RuntimeError(f"ArangoDB view is missing: {view_name}")
+
+        self.architecture.ensure_storage_ready()
+
+    def read_guidance_decisions(self, keys: list[str], as_of: date) -> list[GuidanceDecision]:
+        if not keys:
+            return []
+        rows = self.database.aql.execute(
+            """
+            FOR doc IN @@documents
+                FILTER doc._key IN @keys AND doc.kind == "adr" AND doc.status == "accepted"
+                FILTER IS_STRING(doc.decision) AND IS_STRING(doc.rationale)
+                FILTER doc.effective_date == null OR doc.effective_date <= @as_of
+                FILTER doc.expiration_date == null OR @as_of < doc.expiration_date
+                LET validation = FIRST(
+                    FOR item IN NOT_NULL(doc.validation_history, [])
+                        SORT DATE_TIMESTAMP(item.checked_at) DESC
+                        LIMIT 1
+                        RETURN item
+                )
+                SORT doc._key
+                RETURN MERGE(KEEP(doc, ["title", "decision", "rationale", "effective_date",
+                    "expiration_date", "last_validated", "source", "source_id"]), {
+                    record_key: doc._key, evidence: NOT_NULL(validation.evidence, [])
+                })
+            """,
+            bind_vars={
+                "@documents": self._config.documents_collection, "keys": keys,
+                "as_of": as_of.isoformat(),
+            },
+        )
+        return [GuidanceDecision.model_validate(row) for row in rows]
 
     def write_document(self, document: MemoryDocument) -> MemoryDocument:
         collection = self.database.collection(self._config.documents_collection)
