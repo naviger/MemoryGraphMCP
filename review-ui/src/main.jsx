@@ -1,6 +1,6 @@
 import {
   BarChart3, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, CircleHelp, FolderKanban, GitPullRequest,
-  House, KeyRound, LogOut, MessageCircleQuestion, Network, RefreshCw, Search, ShieldCheck,
+  House, KeyRound, MessageCircleQuestion, Network, RefreshCw, Search, ShieldCheck,
 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -8,6 +8,7 @@ import { ApiError, reviewRequest } from './api.js';
 import { EntityDetailPage } from './EntityDetailPage.jsx';
 import { HomePage } from './HomePage.jsx';
 import { ProjectsPage } from './ProjectsPage.jsx';
+import { SidebarAccount } from './SidebarAccount.jsx';
 import { TokenUsagePage } from './TokenUsagePage.jsx';
 import { HelpPage } from './HelpPage.jsx';
 import ProjectGuidance from './ProjectGuidance.jsx';
@@ -395,16 +396,6 @@ function App() {
                 {projects?.map((item) => <option key={item.key} value={item.key}>{item.name}</option>)}
               </select>
             </label>
-            <span className="access"><ShieldCheck size={16} aria-hidden="true" />
-              {session.role === 'admin' ? 'Admin access' : session.can_write ? 'Writer access' : 'Read-only'}</span>
-            {signedIn && session.display_name && (
-              <span className="subject" title={session.display_name}>{session.display_name}</span>
-            )}
-            {signedIn && <button className="button top-button"
-              onClick={session.browser_session ? signOut : () => changeToken('')}>
-              <LogOut size={16} aria-hidden="true" /> {session.browser_session ? 'Sign out' : 'Disconnect'}
-            </button>}
-            {session && authError && <span role="alert">{authError}</span>}
           </div>
         )}
       </header>
@@ -448,13 +439,17 @@ function App() {
               </a>
             )}
           </nav>
-          <nav className="rail-help" aria-label="Help">
-            <a href="/help" className={route?.destination === 'help' ? 'nav-item active' : 'nav-item'}
-              aria-current={route?.destination === 'help' ? 'page' : undefined}
-              onClick={(event) => navigate(event, '/help')}>
-              <CircleHelp size={18} aria-hidden="true" /> Help
-            </a>
-          </nav>
+          <div className="rail-footer">
+            <nav className="rail-help" aria-label="Help">
+              <a href="/help" className={route?.destination === 'help' ? 'nav-item active' : 'nav-item'}
+                aria-current={route?.destination === 'help' ? 'page' : undefined}
+                onClick={(event) => navigate(event, '/help')}>
+                <CircleHelp size={18} aria-hidden="true" /> Help
+              </a>
+            </nav>
+            {signedIn && <SidebarAccount key={session.subject} session={session} error={authError}
+              onSignOut={session.browser_session ? signOut : () => changeToken('')} />}
+          </div>
         </aside>
         <main className={session && route?.destination === 'graph' ? 'graph-main' : undefined}>
           {session && projectError && <p role="alert" className="status error">{projectError}</p>}

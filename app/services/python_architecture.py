@@ -4,12 +4,15 @@ import ast
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
+from pydantic import ValidationError
+
 from app.domain.architecture import (
     ApiEndpoint,
     ArchitectureEntity,
     ArchitectureIndex,
     ArchitectureLink,
     Class,
+    Constraint,
     DatabaseCollection,
     Function,
     Module,
@@ -213,6 +216,8 @@ class _Declarations(ast.NodeVisitor):
                 )
 
     def visit_Call(self, node: ast.Call) -> None:
+        if (_dotted(node.func) or "").split(".")[-1] == "ConstraintInput":
+            self._record_constraint(node)
         if isinstance(node.func, ast.Attribute) and node.func.attr == "collection":
             receiver = _dotted(node.func.value)
             name = _literal_string(
@@ -223,6 +228,26 @@ class _Declarations(ast.NodeVisitor):
             if receiver and receiver.split(".")[-1] in {"db", "database"} and name and name.strip():
                 self._link_collection(name, node.lineno)
         self.generic_visit(node)
+
+    def _record_constraint(self, node: ast.Call) -> None:
+        fields = {item.arg: _literal_string(item.value) for item in node.keywords}
+        required = ("key", "name", "rule", "scope", "authority")
+        if node.args or not all(fields.get(field) for field in required):
+            return
+        try:
+            entity = Constraint(
+                key=architecture_key(self.index.repository, self.file.path, "constraint", fields["key"]),
+                name=fields["name"], rule=fields["rule"], scope=fields["scope"],
+                authority=fields["authority"], enforcement_status="proposed",
+                source_path=self.file.path,
+                metadata={
+                    "line": node.lineno, "declared_key": fields["key"],
+                    "declared_enforcement_status": fields.get("enforcement_status"),
+                },
+            )
+        except ValidationError:
+            return
+        self.index.link(self.scope.owner, self.index.add(entity), "defines")
 
     def _link_collection(self, name: str, line: int) -> None:
         for length in range(len(self.scope.parents), 0, -1):

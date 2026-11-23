@@ -21,11 +21,13 @@ from app.mcp.server import build_mcp_server
 from app.repositories.factory import build_repository
 from app.services.architecture_service import ArchitectureService
 from app.services.ask_graph import AskGraphService
+from app.services.capture_worker import CaptureWorker
 from app.services.context_package import ContextPackageService
 from app.services.embeddings import EmbeddingService
 from app.services.github_test_runs import GitHubBranchHead, poll_test_runs
 from app.services.ingestion_service import MemoryIngestionService
 from app.services.knowledge_base import StaticKnowledgeBase
+from app.services.knowledge_capture import KnowledgeCaptureService
 from app.services.observability import MemoryObservability
 from app.services.project_changes import ProjectChangesService
 from app.services.review_details import ReviewDetailService
@@ -91,6 +93,9 @@ def create_application(settings: Settings | None = None) -> FastAPI:
                 settings.ci_repository_key,
             )):
                 background.start_soon(poll_test_runs, settings, graph_repository, ci_head)
+            if graph_repository and settings.capture_project_key:
+                worker = CaptureWorker(settings, KnowledgeCaptureService(graph_repository, repository))
+                background.start_soon(worker.run)
             try:
                 yield
             finally:
