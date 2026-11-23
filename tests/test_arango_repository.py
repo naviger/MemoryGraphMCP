@@ -30,12 +30,17 @@ class FakeDatabase:
         }
         self.views = {"memory_search": True, "memory_vectors_view": True}
         self.ping_count = 0
+        self.created_collections: list[tuple[str, bool]] = []
 
     def ping(self) -> None:
         self.ping_count += 1
 
     def has_collection(self, name: str) -> bool:
         return name in self.collections
+
+    def create_collection(self, name: str, edge: bool = False):
+        self.created_collections.append((name, edge))
+        self.collections[name] = FakeCollection()
 
     def has_view(self, name: str) -> bool:
         return name in self.views
@@ -67,6 +72,9 @@ def test_ensure_storage_ready_checks_collections_and_views(repository: ArangoMem
     repository.ensure_storage_ready()
 
     assert repository.database.ping_count == 1
+    assert repository.database.created_collections == [
+        ("architecture_entities", False), ("architecture_edges", True),
+    ]
 
 
 def test_write_then_read_document(repository: ArangoMemoryRepository) -> None:

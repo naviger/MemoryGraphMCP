@@ -98,3 +98,9 @@ A Dockerfile is included for containerized deployment. The mounted FastAPI app s
 - `generate_fastapi_service`
 - `generate_react_component`
 - `generate_arangodb_repository`
+
+
+## Architecture graph and project guidance
+
+Use the [architecture metamodel](docs/architecture-metamodel.md) for the graph
+schema, code indexer, and the read-only MCP tool `get_project_guidance`.

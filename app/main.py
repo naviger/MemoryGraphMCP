@@ -15,6 +15,7 @@ from app.config.settings import Settings, get_settings
 from app.config.telemetry import configure_telemetry, instrument_fastapi
 from app.mcp.server import build_mcp_server
 from app.repositories.factory import build_repository
+from app.services.architecture_service import ArchitectureService
 from app.services.knowledge_base import StaticKnowledgeBase
 from app.services.search_service import MemorySearchService
 
@@ -29,7 +30,11 @@ def create_application(settings: Settings | None = None) -> FastAPI:
     repository = build_repository(settings)
     service = MemorySearchService(repository=repository)
     knowledge_base = StaticKnowledgeBase()
-    mcp = build_mcp_server(settings=settings, service=service, knowledge_base=knowledge_base)
+    graph = getattr(repository, "architecture", None)
+    mcp = build_mcp_server(
+        settings=settings, service=service, knowledge_base=knowledge_base,
+        architecture_service=ArchitectureService(graph, repository) if graph is not None else None,
+    )
     mcp_app = mcp.http_app(path="/")
 
     @asynccontextmanager

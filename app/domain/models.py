@@ -1,11 +1,20 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 MemoryKind = Literal["memory", "architecture", "adr", "design-language", "domain-concept"]
 SearchMode = Literal["lexical", "semantic", "hybrid"]
+
+
+MemoryKey = Annotated[
+    str,
+    Field(min_length=1, max_length=254, pattern=r"^[A-Za-z0-9_\-.$+!*'(),;=@%:]+$"),
+]
+
+
+EvidenceCitation = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class MemoryDocument(BaseModel):

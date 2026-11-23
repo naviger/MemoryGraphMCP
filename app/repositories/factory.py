@@ -8,6 +8,8 @@ def build_repository(settings: Settings) -> ArangoMemoryRepository:
     password = settings.arango_password or settings.arango_root_password
     return ArangoMemoryRepository(
         ArangoRepositoryConfig(
+            architecture_entities_collection=settings.arango_architecture_entities_collection,
+            architecture_edges_collection=settings.arango_architecture_edges_collection,
             url=settings.arango_url,
             database=settings.arango_database,
             username=settings.arango_username,
