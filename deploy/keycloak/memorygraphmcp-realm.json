@@ -1,0 +1,52 @@
+{
+  "realm": "memorygraphmcp",
+  "enabled": true,
+  "registrationAllowed": false,
+  "accessTokenLifespan": 900,
+  "roles": {"realm": [{"name": "reader"}, {"name": "writer"}, {"name": "admin"}]},
+  "clients": [
+    {
+      "clientId": "memorygraphmcp",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "redirectUris": ["${MGMCP_LOCAL_UI_ORIGIN}/api/auth/callback"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "${MGMCP_LOCAL_UI_ORIGIN}/"
+      },
+      "protocolMappers": [
+        {
+          "name": "MemoryGraphMCP access token audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "memorygraphmcp-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "mgmcp-reader", "enabled": true, "realmRoles": ["reader"],
+      "firstName": "Local", "lastName": "Reader", "email": "reader@example.invalid",
+      "credentials": [{"type": "password", "value": "${MGMCP_LOCAL_READER_PASSWORD}", "temporary": false}]
+    },
+    {
+      "username": "mgmcp-writer", "enabled": true, "realmRoles": ["writer"],
+      "firstName": "Local", "lastName": "Writer", "email": "writer@example.invalid",
+      "credentials": [{"type": "password", "value": "${MGMCP_LOCAL_WRITER_PASSWORD}", "temporary": false}]
+    },
+    {
+      "username": "mgmcp-admin", "enabled": true, "realmRoles": ["admin"],
+      "firstName": "Local", "lastName": "Admin", "email": "admin@example.invalid",
+      "credentials": [{"type": "password", "value": "${MGMCP_LOCAL_ADMIN_PASSWORD}", "temporary": false}]
+    }
+  ]
+}

@@ -30,6 +30,7 @@ from app.domain.architecture import (
 )
 from app.domain.exceptions import ArchitectureGraphError
 from app.domain.project_guidance import GuidanceScope
+from app.domain.review_details import ProjectScope
 
 _ENTITY = TypeAdapter(ArchitectureEntity)
 _STATIC_SOURCE = "static-analysis"
@@ -575,6 +576,128 @@ class ArangoArchitectureRepository:
             bind_vars={"@entities": self._entities, "@edges": self._edges, "keys": scoped_keys},
         )
         return [Constraint.model_validate(row) for row in rows]
+
+    def project_scope(self, key: str) -> ProjectScope:
+        rows = self._database().aql.execute(
+            """
+            WITH @@entities
+            LET direct = (
+                FOR node, edge IN 1..1 ANY @seed @@edges
+                    FILTER node.index_state != "stale" AND node.entity_type != "Project"
+                    FILTER edge.relationship_type != "uses"
+                    RETURN DISTINCT node._key
+            )
+            LET repositories = (
+                FOR key IN direct
+                    LET node = DOCUMENT(@entities, key)
+                    FILTER node.entity_type == "Repository" AND node.role == "source"
+                    RETURN node
+            )
+            LET repository_names = UNIQUE(repositories[*].name)
+            LET defined = (
+                FOR repo IN repositories
+                    FOR node, edge IN 1..1 OUTBOUND repo._id @@edges
+                        FILTER edge.relationship_type == "defines" AND node.index_state != "stale"
+                        RETURN DISTINCT node._key
+            )
+            LET owned = (
+                FOR node IN @@entities
+                    FILTER node.repository IN repository_names AND node.index_state != "stale"
+                    RETURN node._key
+            )
+            LET scoped = UNION_DISTINCT(direct, defined, owned)
+            LET project_keys = APPEND(scoped, @key)
+            LET record_dates = (
+                FOR key IN project_keys
+                    LET node = DOCUMENT(@entities, key)
+                    FOR value IN [node.created_at, node.updated_at, node.timestamp,
+                                  node.last_indexed_at]
+                        FILTER IS_STRING(value)
+                        RETURN LEFT(value, 10)
+            )
+            LET edge_dates = (
+                FOR key IN project_keys
+                    LET node = DOCUMENT(@entities, key)
+                    FOR target, edge IN 1..1 OUTBOUND node._id @@edges
+                        FILTER target._key IN project_keys
+                        RETURN {created: LEFT(edge.created_at, 10),
+                                updated: LEFT(edge.updated_at, 10),
+                                index_repo: edge.source == @static ? edge.index_repository : null}
+            )
+            LET index_dates = (
+                FOR repo IN repositories
+                    RETURN repo.last_indexed_at != null ? LEFT(repo.last_indexed_at, 10) : MAX(
+                        FOR edge IN edge_dates
+                            FILTER edge.index_repo == repo.name
+                            RETURN edge.updated
+                    )
+            )
+            LET entities = (
+                FOR key IN scoped
+                    LET node = DOCUMENT(@entities, key)
+                    LET decision_links = (
+                        FOR adr IN (node.entity_type == "ADR" ? [node] : [])
+                        FOR related, edge IN 1..1 ANY adr._id @@edges
+                            FILTER related.index_state != "stale"
+                            FILTER (edge.relationship_type == "implements" AND edge._to == adr._id)
+                                OR (edge.relationship_type == "validated_by"
+                                    AND edge._from == adr._id)
+                            RETURN DISTINCT {
+                                key: related._key, name: related.name,
+                                relationship: edge.relationship_type == "implements"
+                                    ? "implemented_by" : "validated_by"
+                            }
+                    )
+                    LET parent_key = FIRST(
+                        FOR symbol IN (node.entity_type IN ["Class", "Function"] ? [node] : [])
+                        FOR parent, edge IN 1..1 INBOUND symbol._id @@edges
+                            FILTER edge.relationship_type == "defines" AND edge.source == @static
+                            FILTER parent.entity_type IN ["Class", "Function"]
+                            FILTER parent._key IN scoped
+                                AND parent.source_path == symbol.source_path
+                            SORT parent._key
+                            LIMIT 1
+                            RETURN parent._key
+                    )
+                    SORT node.entity_type, LOWER(node.name), key
+                    RETURN MERGE(KEEP(node, [
+                        "name", "entity_type", "source_path", "memory_key",
+                        "repository", "role", "qualified_name", "status"
+                    ]), {
+                        key, decision_links, parent_key,
+                        reason: key IN direct ? "Linked to project"
+                            : key IN defined ? "Defined in a linked repository"
+                            : CONCAT("Indexed in ", node.repository)
+                    })
+            )
+            LET dependencies = (
+                FOR key IN APPEND(scoped, @key)
+                    LET owner = DOCUMENT(@entities, key)
+                    FOR target, link IN 1..1 OUTBOUND owner._id @@edges
+                        FILTER link.relationship_type == "uses" AND target.index_state != "stale"
+                        FILTER target._key NOT IN scoped AND target._key != @key
+                        FILTER target.repository != null
+                            OR target.entity_type IN ["Project", "Repository"]
+                        COLLECT target_key = target._key
+                        LET node = DOCUMENT(@entities, target_key)
+                        SORT LOWER(node.name), target_key
+                        RETURN MERGE(
+                            KEEP(node, ["name", "entity_type", "source_path", "memory_key"]),
+                            {key: target_key, reason: "Used by a project entity"}
+                        )
+            )
+            LET dates = APPEND(record_dates, APPEND(edge_dates[*].created, edge_dates[*].updated))
+            RETURN {entities, dependencies, repository_names,
+                    earliest_record: MIN(dates), latest_record: MAX(dates),
+                    last_index_date: MAX(index_dates)}
+            """,
+            bind_vars={
+                "@entities": self._entities, "@edges": self._edges,
+                "entities": self._entities, "seed": f"{self._entities}/{key}", "key": key,
+                "static": _STATIC_SOURCE,
+            },
+        )
+        return ProjectScope.model_validate(next(iter(rows)))
 
     def count_by_entity_type(
         self, *, source_repositories_only: bool = False

@@ -1,6 +1,8 @@
 from functools import lru_cache
+from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,8 +25,30 @@ class Settings(BaseSettings):
     jwt_public_key: str | None = None
     jwt_algorithm: str = Field(default="HS256")
 
+    keycloak_url: str | None = Field(
+        default=None, validation_alias=AliasChoices("MGMCP_KEYCLOAK_URL", "KEYCLOAK_URL", "keycloak_url")
+    )
+    keycloak_realm: str | None = Field(
+        default=None, validation_alias=AliasChoices("MGMCP_KEYCLOAK_REALM", "KEYCLOAK_REALM", "keycloak_realm")
+    )
+    keycloak_client_id: str | None = Field(
+        default=None, validation_alias=AliasChoices("MGMCP_KEYCLOAK_CLIENT_ID", "KEYCLOAK_CLIENT_ID", "keycloak_client_id")
+    )
+    oidc_issuer: str | None = None
+    oidc_audience: str | None = None
+    oidc_jwks_uri: str | None = None
+    oidc_browser_origin: str = ""
+    oidc_browser_client_id: str = ""
+    oidc_browser_client_secret: SecretStr | None = None
+    oidc_browser_token_endpoint: str = ""
+    oidc_browser_discovery_url: str = ""
+    oidc_browser_scopes: str = ""
+    oidc_browser_audience: str = ""
+    oidc_browser_token_auth: Literal["client_secret_basic", "client_secret_post"] = "client_secret_basic"
+    oidc_role_claim: str = "roles"
+
     arango_url: str = Field(
-        default="http://localhost:8529",
+        default="http://localhost:8530",
         validation_alias=AliasChoices("ARANGO_HOST", "MGMCP_ARANGO_URL"),
     )
     arango_database: str = Field(
@@ -91,10 +115,45 @@ class Settings(BaseSettings):
             path = f"/{path}"
         return path.rstrip("/") or "/"
 
+    @property
+    def keycloak_issuer(self) -> str | None:
+        if self.keycloak_url and self.keycloak_realm:
+            return f"{self.keycloak_url.rstrip('/')}/realms/{self.keycloak_realm}"
+        return None
+
+    @property
+    def effective_jwt_issuer(self) -> str | None:
+        return self.jwt_issuer or self.oidc_issuer or self.keycloak_issuer
+
+    @property
+    def effective_jwt_audience(self) -> str | None:
+        return self.jwt_audience or self.oidc_audience or self.keycloak_client_id
+
+    @property
+    def keycloak_jwks_uri(self) -> str | None:
+        issuer = self.oidc_issuer or self.keycloak_issuer
+        return self.oidc_jwks_uri or (
+            f"{issuer.rstrip('/')}/protocol/openid-connect/certs" if issuer else None
+        )
+
     @model_validator(mode="after")
     def validate_auth_configuration(self) -> "Settings":
         if self.auth_required and not (self.jwt_secret_key or self.jwt_public_key):
-            raise ValueError("JWT authentication is enabled but no signing key was configured")
+            if not (self.keycloak_jwks_uri and self.effective_jwt_issuer and self.effective_jwt_audience):
+                raise ValueError("JWT authentication requires a signing key or an OIDC issuer, audience, and JWKS URI")
+        if self.auth_required and (self.oidc_browser_origin or self.oidc_browser_client_id):
+            origin = urlsplit(self.oidc_browser_origin)
+            if (
+                not origin.hostname or origin.username or origin.password
+                or origin.path not in {"", "/"} or origin.query or origin.fragment
+                or (origin.scheme != "https" and (
+                    origin.scheme != "http" or origin.hostname not in {"localhost", "127.0.0.1", "::1"}
+                ))
+                or not self.oidc_browser_client_id or not self.effective_jwt_issuer
+                or not self.effective_jwt_audience or not self.keycloak_jwks_uri
+                or self.jwt_secret_key or self.jwt_public_key
+            ):
+                raise ValueError("Browser OIDC requires a UI origin, client ID, issuer, audience and JWKS")
         return self
 
 

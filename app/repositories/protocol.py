@@ -26,6 +26,7 @@ from app.domain.models import (
     ResolvedADRConflict,
 )
 from app.domain.project_guidance import GuidanceDecision
+from app.domain.review_details import ProjectDocument, ReviewEntityLink
 
 
 class MemoryRepository(Protocol):
@@ -33,6 +34,9 @@ class MemoryRepository(Protocol):
         ...
 
     def read_document(self, document_key: str) -> MemoryDocument | None:
+        ...
+
+    def list_adr_supersession_links(self, key: str) -> list[ReviewEntityLink]:
         ...
 
     def create_adr(self, record: ArchitecturalDecisionRecord) -> ADRWriteResult:
@@ -85,7 +89,18 @@ class MemoryRepository(Protocol):
 
     def read_guidance_decisions(self, keys: list[str], as_of: date) -> list[GuidanceDecision]: ...
 
+    def project_documents(
+        self, project_key: str, repository_names: list[str], linked_keys: list[str],
+        query: str, as_of: date | None,
+    ) -> list[ProjectDocument]:
+        ...
+
     def list_documents(self) -> list[MemoryDocument]:
+        ...
+
+    def search_question_documents(
+        self, terms: str, as_of: date, limit: int, *, document_keys: list[str] | None = None,
+    ) -> list[MemoryDocument]:
         ...
 
     def search_documents(self, request: MemorySearchRequest) -> list[MemorySearchHit]:

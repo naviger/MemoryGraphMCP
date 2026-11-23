@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, date, timedelta
@@ -35,6 +36,7 @@ from app.domain.models import (
     ResolvedADRConflict,
 )
 from app.domain.project_guidance import GuidanceDecision
+from app.domain.review_details import ProjectDocument, ReviewEntityLink
 from app.repositories.arango_architecture import ArangoArchitectureRepository
 
 _VALIDITY_FILTER = """
@@ -666,6 +668,51 @@ class ArangoMemoryRepository:
         result = collection.update(payload, return_new=True, merge=True)
         return self._parse_document(result["new"])
 
+    def project_documents(
+        self, project_key: str, repository_names: list[str], linked_keys: list[str],
+        query: str, as_of: date | None,
+    ) -> list[ProjectDocument]:
+        aql = """
+        FOR doc IN @@documents
+            FILTER doc._key IN @linked_keys OR doc.metadata.project_key == @project_key
+                OR doc.metadata.repo IN @repository_names
+        """ + _VALIDITY_FILTER + """
+            FILTER @query == "" OR CONTAINS(LOWER(NOT_NULL(doc.title, "")), @query)
+                OR CONTAINS(LOWER(NOT_NULL(doc.content, "")), @query)
+            SORT doc.kind, LOWER(doc.title), doc._key
+            LET recorded = NOT_NULL(doc.created_at, doc.date, doc.effective_date)
+            LET updated = MAX([doc.updated_at, doc.last_validated])
+            RETURN MERGE(KEEP(doc, [
+                "title", "kind", "source", "status", "effective_date", "expiration_date"
+            ]), {
+                key: doc._key,
+                recorded_date: recorded == null ? null : LEFT(recorded, 10),
+                last_recorded_update: updated == null ? null : LEFT(updated, 10),
+                header: doc.kind == "adr" AND doc.status == null ? LEFT(doc.content, 1024) : "",
+                reason: doc._key IN @linked_keys ? "Linked graph record"
+                    : doc.metadata.project_key == @project_key ? "Project source metadata"
+                    : CONCAT("Source repository: ", doc.metadata.repo)
+            })
+        """
+        rows = self.database.aql.execute(aql, bind_vars={
+            "@documents": self._config.documents_collection,
+            "project_key": project_key, "repository_names": repository_names,
+            "linked_keys": linked_keys, "query": query.casefold(),
+            "as_of": as_of.isoformat() if as_of else None,
+        })
+        documents = []
+        for row in rows:
+            header = row.pop("header", "")
+            status = re.search(
+                r"^\s*-\s*Status:\s*(proposed|accepted|superseded|rejected)\b",
+                header or "",
+                re.IGNORECASE | re.MULTILINE,
+            )
+            if status:
+                row["status"] = status[1].lower()
+            documents.append(ProjectDocument.model_validate(row))
+        return documents
+
     def list_documents(self) -> list[MemoryDocument]:
         query = "FOR doc IN @@documents SORT doc._key RETURN doc"
         cursor = self.database.aql.execute(query, bind_vars={"@documents": self._config.documents_collection})
@@ -674,6 +721,56 @@ class ArangoMemoryRepository:
     def read_document(self, document_key: str) -> MemoryDocument | None:
         collection = self.database.collection(self._config.documents_collection)
         return self._get_document(collection, document_key)
+
+    def list_adr_supersession_links(self, key: str) -> list[ReviewEntityLink]:
+        rows = self.database.aql.execute(
+            """
+            WITH @@documents
+            FOR vertex, edge IN 1..1 ANY @seed @@edges
+                FILTER edge.relation == "superseded_by" AND vertex.kind == "adr"
+                SORT vertex.title, vertex._key
+                RETURN {
+                    key: vertex._key,
+                    destination: "records",
+                    entity_type: "ADR",
+                    name: vertex.title,
+                    relationships: [edge._from == @seed ? "superseded_by" : "supersedes"]
+                }
+            """,
+            bind_vars={
+                "@documents": self._config.documents_collection,
+                "@edges": self._config.edges_collection,
+                "seed": self._document_id(key),
+            },
+        )
+        return [ReviewEntityLink.model_validate(row) for row in rows]
+
+    def search_question_documents(
+        self, terms: str, as_of: date, limit: int, *, document_keys: list[str] | None = None,
+    ) -> list[MemoryDocument]:
+        query = """
+        LET terms = UNIQUE(TOKENS(@terms, "text_en"))
+        FOR doc IN @@documents
+            FILTER @document_keys == null OR doc._key IN @document_keys
+        """ + _VALIDITY_FILTER + """
+            FILTER doc.status NOT IN ["proposed", "rejected", "archived", "inactive"]
+            LET title = CONCAT_SEPARATOR(" ", doc.title, doc._key, doc.conflict_scope.topic)
+            LET body = CONCAT_SEPARATOR(" ", doc.decision, doc.content, doc.conflict_scope.system,
+                doc.conflict_scope.environment)
+            LET title_matches = INTERSECTION(terms, TOKENS(title, "text_en"))
+            LET body_matches = INTERSECTION(terms, TOKENS(body, "text_en"))
+            LET score = 2 * LENGTH(title_matches) + LENGTH(body_matches)
+            FILTER score > 0
+            SORT score DESC, doc.effective_date != null DESC, doc.kind == "adr" DESC, doc._key
+            LIMIT @limit
+            RETURN UNSET(doc, "embedding")
+        """
+        rows = self.database.aql.execute(query, bind_vars={
+            "@documents": self._config.documents_collection,
+            "document_keys": document_keys,
+            "terms": terms, "as_of": as_of.isoformat(), "limit": limit,
+        })
+        return [self._parse_document(row) for row in rows]
 
     def search_documents(self, request: MemorySearchRequest) -> list[MemorySearchHit]:
         query = """

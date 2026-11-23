@@ -1,0 +1,11 @@
+services:
+  memorygraphmcp:
+    environment:
+      MGMCP_AUTH_REQUIRED: "true"
+      MGMCP_OIDC_ISSUER: http://127.0.0.1:${MGMCP_LOCAL_KEYCLOAK_PORT:-8180}/realms/memorygraphmcp
+      MGMCP_OIDC_AUDIENCE: memorygraphmcp-api
+      MGMCP_OIDC_JWKS_URI: http://keycloak:8080/realms/memorygraphmcp/protocol/openid-connect/certs
+      MGMCP_OIDC_BROWSER_ORIGIN: http://127.0.0.1:${MGMCP_REVIEW_PORT:-3200}
+      MGMCP_OIDC_BROWSER_CLIENT_ID: memorygraphmcp
+      MGMCP_OIDC_BROWSER_DISCOVERY_URL: http://keycloak:8080/realms/memorygraphmcp/.well-known/openid-configuration
+      MGMCP_OIDC_BROWSER_TOKEN_ENDPOINT: http://keycloak:8080/realms/memorygraphmcp/protocol/openid-connect/token
