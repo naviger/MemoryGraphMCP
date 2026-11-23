@@ -231,6 +231,10 @@ By default, the queue uses the current UTC date for overdue reviews and includes
 
 ### Review web client
 
+Project Overview provides a task-first workspace with state filters, Goals, Risks, and Constraints.
+See [recoverable capture and task execution](docs/recoverable-capture-and-task-execution.md) for lag,
+replay, backfill, local drafting, and agent setup.
+
 The React client is packaged in the `review-ui` container. Docker Compose starts it with the stack. Set `MGMCP_REVIEW_PORT` to change the host port. [Open the local review UI](http://127.0.0.1:3200).
 
 For an existing stack, run `docker compose up -d --build memorygraphmcp review-ui` to create the UI service and load changes. The `docker compose restart` command restarts containers that already exist.
