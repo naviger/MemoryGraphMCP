@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { reviewRequest } from './api.js';
 import { PreviewLink } from './RecordInspector.jsx';
 
@@ -124,6 +124,12 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
   const [agent, setAgent] = useState(Object.keys(agents)[0] || '');
   const [mode, setMode] = useState('');
   const [recommendation, setRecommendation] = useState(null);
+  const [repair, setRepair] = useState(null);
+  const repairPrompt = useRef(null);
+  const repairReview = repair?.review;
+  useEffect(() => {
+    if (repairReview) repairPrompt.current?.focus();
+  }, [repairReview]);
   const [requested, setRequested] = useState(() => crypto.randomUUID());
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -145,6 +151,29 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
       const choice = await send(`/workspace/tasks/${task.key}/recommend-agent`, { mode: selectedMode });
       setAgent(choice.agent);
       setRecommendation(choice);
+    } catch (err) { setError(err.message); }
+    finally { setBusy(false); }
+  }
+  async function prepareRepair(job) {
+    setBusy(true); setError('');
+    try {
+      const draft = await send(`${path}/${job.key}/repair-draft`);
+      setRepair({ ...draft, review: job.key });
+    } catch (err) { setError(err.message); }
+    finally { setBusy(false); }
+  }
+  async function startRepair(event) {
+    event.preventDefault();
+    if (!repair?.prompt.trim()) return;
+    setBusy(true); setError('');
+    try {
+      await send(path, {
+        request_id: requested, agent: repair.agent, mode: 'IMPLEMENT',
+        repair_review_key: repair.review, repair_prompt: repair.prompt,
+      });
+      setRequested(crypto.randomUUID());
+      setRepair(null);
+      await reload();
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
   }
@@ -184,10 +213,22 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
         {recommendation && <p role="status"><strong>Ollama recommends {recommendation.agent}.</strong> {recommendation.reason}{selectedAgent !== recommendation.agent ? ' You selected a different agent.' : ''}</p>}
       </form>
     ) : <p>No agent is configured for this project.</p>)}
+    {repair && <form className="detail workspace-form" onSubmit={startRepair}>
+      <h4>Fix review findings</h4>
+      <p><strong>Recommended agent and model</strong> · Codex · {repair.model}</p>
+      <p>{repair.reason} The new patch will return to Review.</p>
+      <p>Source patch SHA-256 <code>{repair.patch_sha256}</code></p>
+      <label>Repair prompt<textarea ref={repairPrompt} rows={8} maxLength={8000} required disabled={busy}
+        value={repair.prompt} onChange={(event) => setRepair({ ...repair, prompt: event.target.value })} /></label>
+      <div className="workspace-actions">
+        <button className="button primary" disabled={busy || active || !repair.prompt.trim()}>Start repair</button>
+        <button className="button outlined" type="button" disabled={busy} onClick={() => setRepair(null)}>Close</button>
+      </div>
+    </form>}
     {jobs === null && !error && <p role="status">Loading execution history…</p>}
     {jobs?.length === 0 && <p>No executions yet.</p>}
     {jobs?.map((job, index) => <details key={job.key} open={index === 0 ? true : undefined}>
-      <summary>{job.patch_execution_key ? 'Review patch' : MODES[job.mode]} · {job.agent} · {job.state} · {stamp(job.created_at)}{job.results.some(reviewBlocked) && <strong className="status error"> · Changes required</strong>}</summary>
+      <summary>{job.repair_review_key ? 'Fix review findings' : job.patch_execution_key ? 'Review patch' : MODES[job.mode]} · {job.agent} · {job.state} · {stamp(job.created_at)}{job.results.some(reviewBlocked) && <strong className="status error"> · Changes required</strong>}</summary>
       <p><PreviewLink destination="entities" entityKey={job.key} navigate={navigate}>Open execution in the graph</PreviewLink></p>
       {canWrite && job.state !== 'CANCEL_REQUESTED' && ACTIVE.includes(job.state) && <button className="button outlined" type="button" disabled={busy}
         onClick={() => submit(job)}>Cancel execution</button>}
@@ -203,6 +244,9 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
       {canWrite && !active && task.status !== 'cancelled' && agents.codex?.includes('REVIEW') &&
         job.agent === 'codex' && job.results.some((result) => result.artifacts.some((artifact) => artifact.name === 'Local implementation patch')) &&
         <button className="button primary" type="button" disabled={busy} onClick={() => submit(job, 'review-patch')}>Review this patch</button>}
+      {canWrite && !active && task.status !== 'cancelled' && agents.codex?.includes('IMPLEMENT') &&
+        job.results.some((result) => result.review_verdict === 'blocking' && result.reviewed_target?.kind === 'implementation patch') &&
+        <button className="button primary" type="button" disabled={busy} onClick={() => prepareRepair(job)}>Fix review findings</button>}
       <ExecutionUsage job={job} />
       <ol>{job.timeline.map((item, eventIndex) => <li key={eventIndex}>
         {item.action === 'retry' ? 'Retry requested' : item.state} · {stamp(item.timestamp)} · {item.actor}

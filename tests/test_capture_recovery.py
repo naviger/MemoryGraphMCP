@@ -349,6 +349,80 @@ def test_arango_recovery_and_workspace():
     assert failure.attempts[1].usage is None
     assert workspace.retry_execution("alpha", third.key, retry_job.key, "writer").state == "READY"
 
+    repair_task = workspace.create(
+        "alpha",
+        WorkDraft(
+            kind="Task",
+            name="Repair fixture",
+            description="Revise the reviewed patch",
+        ),
+        "writer",
+    )
+    original = workspace.start(
+        "alpha",
+        repair_task.key,
+        StartExecution(
+            request_id=uuid4().hex,
+            agent="codex",
+            mode="IMPLEMENT",
+        ),
+        "writer",
+    )
+    executing = workspace.transition(original, "RUNNING")
+    workspace.transition(
+        executing,
+        "REVIEW",
+        result=AgentResult(
+            summary="Saved patch",
+            artifacts=[
+                AgentArtifact(
+                    name="Local implementation patch",
+                    reference="local patch",
+                )
+            ],
+        ),
+    )
+    review = workspace.start(
+        "alpha",
+        repair_task.key,
+        StartExecution(
+            request_id=uuid4().hex,
+            agent="codex",
+            mode="REVIEW",
+            patch_execution_key=original.key,
+        ),
+        "writer",
+    )
+    reviewing = workspace.transition(review, "RUNNING")
+    workspace.transition(
+        reviewing,
+        "REVIEW",
+        result=AgentResult(
+            summary="Validate the source before import.",
+            review_verdict="blocking",
+            reviewed_target={
+                "kind": "implementation patch",
+                "execution_id": original.key,
+                "patch_sha256": "a" * 64,
+            },
+        ),
+    )
+    draft = workspace.repair_draft("alpha", repair_task.key, review.key)
+    assert "Validate the source" in draft["prompt"]
+    with pytest.raises(ArchitectureGraphError):
+        workspace.repair_draft("beta", repair_task.key, review.key)
+    request = StartExecution(
+        request_id=uuid4().hex,
+        agent="codex",
+        mode="IMPLEMENT",
+        repair_review_key=review.key,
+        repair_prompt="Edited repair prompt",
+    )
+    repair = workspace.start("alpha", repair_task.key, request, "writer")
+    assert repair.patch_execution_key == original.key and repair.repair_patch_sha256 == "a" * 64
+    assert repair.repair_prompt == "Edited repair prompt"
+    assert workspace.start("alpha", repair_task.key, request, "writer").key == repair.key
+
 
 def test_workspace_routes_require_project_and_writer_grants():
     from types import SimpleNamespace

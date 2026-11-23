@@ -201,10 +201,15 @@ class CodexBridge:
         directory = self.state / identity
         directory.mkdir(exist_ok=True, mode=0o700)
         context = json.loads(prompt)
-        target = context.get("patch_execution_key") if phase == "review" else None
+        repair = phase == "execute" and bool(context.get("repair_patch_sha256"))
+        target = context.get("patch_execution_key") if phase == "review" or repair else None
+        if repair and (not target or mode != "IMPLEMENT" or not context.get("repair_prompt")):
+            raise BridgeError(
+                400, "Repair requires the original patch and an editable repair prompt"
+            )
         reviewed_target = None
         if target:
-            if not re.fullmatch(r"[a-f0-9]{64}", target) or mode != "REVIEW":
+            if not re.fullmatch(r"[a-f0-9]{64}", target) or (mode != "REVIEW" and not repair):
                 raise BridgeError(400, "Invalid patch execution reference")
             original = self.state / target
             patch = original / "implementation.patch"
@@ -220,9 +225,11 @@ class CodexBridge:
             base = (original / "base").read_text().strip()
             git(checkout, "reset", "--hard", base)
             git(checkout, "clean", "-fdx")
-            captured = directory / "reviewed.patch"
+            captured = directory / ("repair-input.patch" if repair else "reviewed.patch")
             contents = patch.read_bytes()
             digest = hashlib.sha256(contents).hexdigest()
+            if repair and digest != context["repair_patch_sha256"]:
+                raise BridgeError(409, "The repair input differs from the reviewed patch")
             for artifact in json.loads(recorded[0]).get("artifacts", []):
                 if artifact.get("name") == "Local implementation patch" and artifact.get("sha256"):
                     if artifact["sha256"] != digest:
@@ -230,7 +237,9 @@ class CodexBridge:
                             409, "The implementation patch changed after it was saved"
                         )
             captured.write_bytes(contents)
-            git(checkout, "apply", "--index", str(captured))
+            (directory / "base").write_text(base + "\n")
+            if not repair:
+                git(checkout, "apply", "--index", str(captured))
             reviewed_target = {
                 "kind": "implementation patch",
                 "execution_id": target,
@@ -263,6 +272,8 @@ class CodexBridge:
             git(checkout, "clean", "-fdx")
             if checkpoint.exists() and checkpoint.stat().st_size:
                 git(checkout, "apply", "--index", str(checkpoint))
+            elif repair:
+                git(checkout, "apply", "--index", str(captured))
         schema = directory / "response.schema.json"
         schema.write_text(json.dumps(SCHEMA))
         output = directory / f"{phase}.json"
@@ -277,6 +288,11 @@ class CodexBridge:
                 "Leave the repository unchanged."
             ),
         }[phase]
+        if repair:
+            instructions += (
+                " The staged implementation is the exact reviewed patch. Follow repair_prompt "
+                "as the writer’s instructions for this repair. Preserve unrelated changes."
+            )
         if writable and checkpoint.exists():
             instructions += " Resume from the partial implementation in the checkout. Verify it."
         if phase == "review" and reviewed_target["kind"] == "implementation patch":
@@ -366,6 +382,8 @@ class CodexBridge:
             result["reviewed_target"] = reviewed_target
             result["completed"] = mode == "FULL_LIFECYCLE" and response["approved"] is True
         if writable:
+            if repair:
+                result["repaired_target"] = reviewed_target
             git(checkout, "add", "--all")
             changes = git(checkout, "diff", "--cached", "--binary", base, "--")
             files = git(checkout, "diff", "--cached", "--name-only", "-z", base, "--")
@@ -410,7 +428,9 @@ def serve(bridge, token, host, port):
         def do_GET(self):
             if self.authorized():
                 if self.path == "/capabilities":
-                    self.reply(200, {"modes": list(MODES)})
+                    self.reply(
+                        200, {"modes": list(MODES), "model": bridge.model or "Codex CLI default"}
+                    )
                 else:
                     self.reply(404, {})
 

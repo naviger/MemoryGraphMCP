@@ -182,3 +182,52 @@ def test_review_targets_saved_patch_even_after_checkout_changes(bridge):
                 }
             ),
         )
+
+
+def test_repair_starts_from_exact_reviewed_patch_and_honors_writer_prompt(bridge):
+    from hashlib import sha256
+
+    implementation = bridge.run(
+        "1" * 64,
+        "execute",
+        json.dumps(
+            {
+                "project_key": "target-project",
+                "mode": "IMPLEMENT",
+            }
+        ),
+    )
+    original = Path(implementation["artifacts"][0]["reference"])
+    original_digest = sha256(original.read_bytes()).hexdigest()
+    cli = Path(bridge.executable)
+    cli.write_text("""#!/usr/bin/env python3
+import json, pathlib, sys
+assert "Use the edited remediation text" in sys.stdin.read()
+fixture = pathlib.Path("fixture.txt")
+assert fixture.read_text().strip() == "changed by adapter"
+fixture.write_text("repaired in a new clone")
+pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(json.dumps({
+    "summary": "Fixed finding.", "tests": [], "approved": True,
+}))
+""")
+    prompt = {
+        "project_key": "target-project",
+        "mode": "IMPLEMENT",
+        "patch_execution_key": "1" * 64,
+        "repair_prompt": "Use the edited remediation text",
+    }
+    with pytest.raises(BridgeError, match="differs"):
+        bridge.run("2" * 64, "execute", json.dumps({**prompt, "repair_patch_sha256": "0" * 64}))
+    result = bridge.run(
+        "3" * 64,
+        "execute",
+        json.dumps(
+            {
+                **prompt,
+                "repair_patch_sha256": original_digest,
+            }
+        ),
+    )
+    assert result["repaired_target"]["patch_sha256"] == original_digest
+    assert b"+repaired in a new clone" in Path(result["artifacts"][0]["reference"]).read_bytes()
+    assert sha256(original.read_bytes()).hexdigest() == original_digest

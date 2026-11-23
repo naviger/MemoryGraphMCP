@@ -156,6 +156,40 @@ class ProjectWorkspaceRepository:
             self.put(tx, task)
         return task
 
+    @staticmethod
+    def repair_target(review, project, task_key):
+        if review.project_key != project or review.task_key != task_key or review.agent != "codex":
+            raise ArchitectureGraphError("Review does not belong to this task")
+        for result in reversed(review.results):
+            target = result.get("reviewed_target") or {}
+            if (
+                result.get("review_verdict") == "blocking"
+                and target.get("kind") == "implementation patch"
+                and target.get("execution_id")
+                and target.get("patch_sha256")
+            ):
+                return result, target
+        raise ArchitectureGraphError("This review has no blocking findings on an identified patch")
+
+    def repair_draft(self, project, task_key, review_key):
+        self.task(project, task_key)
+        review = self.graph.read_entity(review_key)
+        if not isinstance(review, Execution):
+            raise ArchitectureGraphError("Review does not belong to this task")
+        result, target = self.repair_target(review, project, task_key)
+        return {
+            "agent": "codex",
+            "model": "Codex CLI default",
+            "reason": "Codex can resume this exact local patch in an isolated clone.",
+            "patch_execution_key": target["execution_id"],
+            "patch_sha256": target["patch_sha256"],
+            "prompt": (
+                "Address the blocking review findings below in the staged implementation. "
+                "Preserve unrelated changes and run focused regression tests. "
+                "Report how each finding was addressed.\n\n" + result["summary"]
+            )[:8000],
+        }
+
     def start(self, project, key, command: StartExecution, actor: str) -> Execution:
         task = self.task(project, key)
         now = datetime.now(UTC)
@@ -170,12 +204,16 @@ class ProjectWorkspaceRepository:
                     execution.agent,
                     execution.mode,
                     execution.requested_by,
-                    execution.patch_execution_key,
+                    execution.patch_execution_key if not execution.repair_review_key else None,
+                    execution.repair_review_key,
+                    execution.repair_prompt,
                 ) != (
                     command.agent,
                     command.mode,
                     actor,
                     command.patch_execution_key,
+                    command.repair_review_key,
+                    command.repair_prompt,
                 ):
                     raise ArchitectureGraphError("Execution request ID was already used")
                 return execution
@@ -183,16 +221,39 @@ class ProjectWorkspaceRepository:
             if (
                 task.metadata.get("active_execution")
                 or task.status == "cancelled"
-                or (task.status == "done" and not command.patch_execution_key)
+                or (
+                    task.status == "done"
+                    and not (command.patch_execution_key or command.repair_review_key)
+                )
             ):
                 raise ArchitectureGraphError("Task must be open and have no active execution")
-            if command.patch_execution_key:
-                if command.mode != "REVIEW" or command.agent != "codex":
+            source_key = command.patch_execution_key
+            patch_hash = None
+            if command.repair_review_key:
+                if source_key or command.mode != "IMPLEMENT" or command.agent != "codex":
+                    raise ArchitectureGraphError("Repair requires the Codex Implement workflow")
+                if not command.repair_prompt:
+                    raise ArchitectureGraphError("A repair prompt is required")
+                review = Execution.model_validate(
+                    self.graph._require_entity_type(
+                        nodes,
+                        command.repair_review_key,
+                        "Execution",
+                    )
+                )
+                _, target = self.repair_target(review, project, key)
+                source_key, patch_hash = target["execution_id"], target["patch_sha256"]
+            elif command.repair_prompt:
+                raise ArchitectureGraphError("A repair prompt requires a blocking review")
+            if source_key:
+                if not command.repair_review_key and (
+                    command.mode != "REVIEW" or command.agent != "codex"
+                ):
                     raise ArchitectureGraphError("Patch review requires the Codex Review workflow")
                 source = Execution.model_validate(
                     self.graph._require_entity_type(
                         nodes,
-                        command.patch_execution_key,
+                        source_key,
                         "Execution",
                     )
                 )
@@ -212,7 +273,10 @@ class ProjectWorkspaceRepository:
                 name=f"{task.name} execution"[:500],
                 project_key=project,
                 task_key=key,
-                patch_execution_key=command.patch_execution_key,
+                patch_execution_key=source_key,
+                repair_review_key=command.repair_review_key,
+                repair_patch_sha256=patch_hash,
+                repair_prompt=command.repair_prompt,
                 requested_by=actor,
                 agent=command.agent,
                 mode=command.mode,
@@ -232,6 +296,8 @@ class ProjectWorkspaceRepository:
                 ),
             )
             self.link(tx, project, job.key, "defines", now)
+            if job.repair_review_key:
+                self.link(tx, job.key, job.repair_review_key, "references", now)
             if job.patch_execution_key:
                 self.link(tx, job.key, job.patch_execution_key, "references", now)
             self.link(tx, project, agent_key, "defines", now)

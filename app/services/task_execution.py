@@ -79,6 +79,21 @@ class BridgeProvider:
             response.raise_for_status()
             return response
 
+    async def model_label(self):
+        headers = {}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token.get_secret_value()}"
+        try:
+            async with httpx.AsyncClient(
+                timeout=5, follow_redirects=False, trust_env=False
+            ) as client:
+                response = await client.get(f"{self.url}/capabilities", headers=headers)
+                response.raise_for_status()
+                model = response.json().get("model")
+                return model[:200] if isinstance(model, str) and model else None
+        except (httpx.HTTPError, ValueError, AttributeError):
+            return None
+
     async def perform(self, phase, execution_key, prompt):
         response = await self._post(
             phase, execution_key, {"execution_id": execution_key, "prompt": prompt}
@@ -218,6 +233,10 @@ class TaskExecutor:
             for name, provider in self.providers.items()
         }
 
+    async def codex_model_label(self):
+        provider = self.providers.get("codex")
+        return await provider.model_label() if isinstance(provider, BridgeProvider) else None
+
     async def recommend(self, task, mode):
         await self.refresh()
         options = [agent for agent, modes in self.modes().items() if mode in modes]
@@ -321,6 +340,8 @@ class TaskExecutor:
                 ),
                 "project_key": job.project_key,
                 "patch_execution_key": job.patch_execution_key,
+                "repair_patch_sha256": job.repair_patch_sha256,
+                "repair_prompt": job.repair_prompt,
                 "task": {
                     "key": task.key,
                     "name": task.name,
@@ -380,7 +401,23 @@ class TaskExecutor:
             phase = phases[claimed.phase]
             with anyio.fail_after(570):
                 result = await provider.perform(phase, claimed.key, prompt)
-            if claimed.patch_execution_key:
+            if claimed.repair_review_key:
+                target = result.repaired_target or {}
+                if (
+                    target.get("execution_id") != claimed.patch_execution_key
+                    or target.get("patch_sha256") != claimed.repair_patch_sha256
+                ):
+                    await anyio.to_thread.run_sync(
+                        partial(
+                            move,
+                            claimed,
+                            "FAILED",
+                            usage=result.usage,
+                            failure="Bridge did not confirm the reviewed repair input.",
+                        )
+                    )
+                    return
+            if claimed.patch_execution_key and not claimed.repair_review_key:
                 target = result.reviewed_target or {}
                 if (
                     target.get("kind") != "implementation patch"
@@ -444,6 +481,8 @@ class TaskExecutor:
             state = "READY"
         elif claimed.mode == "PLAN_ONLY":
             state = "PLANNED"
+        elif claimed.repair_review_key:
+            state = "REVIEW"
         elif result.completed and claimed.mode in {"IMPLEMENT", "FULL_LIFECYCLE"}:
             state = "COMPLETED"
         else:

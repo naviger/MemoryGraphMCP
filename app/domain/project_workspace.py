@@ -43,6 +43,8 @@ class StartExecution(BaseModel):
     agent: AgentName
     mode: ExecutionMode
     patch_execution_key: MemoryKey | None = None
+    repair_review_key: MemoryKey | None = None
+    repair_prompt: WorkText | None = None
 
 
 class TaskUpdate(BaseModel):
@@ -72,6 +74,7 @@ class AgentResult(BaseModel):
 
     review_verdict: Literal["passed", "blocking"] | None = None
     reviewed_target: dict[str, str] | None = None
+    repaired_target: dict[str, str] | None = None
 
 
 class RecommendAgent(BaseModel):

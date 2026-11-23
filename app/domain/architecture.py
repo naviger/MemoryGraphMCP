@@ -273,6 +273,9 @@ class Execution(ArchitectureNode):
     project_key: MemoryKey
     task_key: MemoryKey
     patch_execution_key: MemoryKey | None = None
+    repair_review_key: MemoryKey | None = None
+    repair_patch_sha256: str | None = None
+    repair_prompt: str | None = None
     agent: Literal["local", "codex", "claude-code", "openhands"]
     mode: Literal["PLAN_ONLY", "IMPLEMENT", "REVIEW", "FULL_LIFECYCLE"]
     state: Literal[

@@ -107,6 +107,18 @@ def build_workspace_router(prefix, workspace, executor, capture):
             raise HTTPException(422, "This agent does not support the selected mode")
         return await invoke(workspace.start, project, task, command, actor)
 
+    @router.get("/{project}/workspace/tasks/{task}/executions/{execution}/repair-draft")
+    async def repair_draft(
+        project: MemoryKey, task: MemoryKey, execution: MemoryKey, request: Request
+    ):
+        authorize(project, request, write=True)
+        await executor.refresh()
+        if "IMPLEMENT" not in executor.modes().get("codex", []):
+            raise HTTPException(409, "Codex Implement must be enabled to repair this patch")
+        draft = await invoke(workspace.repair_draft, project, task, execution)
+        draft["model"] = await executor.codex_model_label() or draft["model"]
+        return draft
+
     @router.post("/{project}/workspace/tasks/{task}/executions/{execution}/retry")
     async def retry(project: MemoryKey, task: MemoryKey, execution: MemoryKey, request: Request):
         actor = authorize(project, request, write=True)
