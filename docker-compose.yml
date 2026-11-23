@@ -54,6 +54,23 @@ services:
     networks:
       - memorygraphmcp-net
 
+  arango-provision:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.repositories.provision_arango"]
+    depends_on:
+      - arangodb
+    environment:
+      MGMCP_AUTH_REQUIRED: "false"
+      ARANGO_HOST: http://memorygraphmcp-arangodb:8529
+      ARANGO_DATABASE: ${ARANGO_DATABASE:-architecture}
+      ARANGO_USERNAME: memorygraphmcp_app
+      ARANGO_PASSWORD: ${MGMCP_ARANGO_APP_PASSWORD:?Set a distinct MGMCP_ARANGO_APP_PASSWORD in .env}
+      MGMCP_ARANGO_BOOTSTRAP_PASSWORD: ${ARANGO_ROOT_PASSWORD:?Set ARANGO_ROOT_PASSWORD in .env}
+    networks:
+      - memorygraphmcp-net
+
   memorygraphmcp:
     build:
       context: .
@@ -61,8 +78,10 @@ services:
     container_name: memorygraphmcp
     restart: unless-stopped
     depends_on:
-      - arangodb
-      - mgmcp-ollama-embed
+      arango-provision:
+        condition: service_completed_successfully
+      mgmcp-ollama-embed:
+        condition: service_started
     ports:
       - "127.0.0.1:${MGMCP_HTTP_PORT:-3100}:${MGMCP_HTTP_PORT:-3100}"
     environment:
@@ -72,8 +91,8 @@ services:
       KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-}
       ARANGO_HOST: http://memorygraphmcp-arangodb:8529
       ARANGO_DATABASE: ${ARANGO_DATABASE:-architecture}
-      ARANGO_USERNAME: root
-      ARANGO_PASSWORD: ${ARANGO_ROOT_PASSWORD:?Set ARANGO_ROOT_PASSWORD in .env}
+      ARANGO_USERNAME: memorygraphmcp_app
+      ARANGO_PASSWORD: ${MGMCP_ARANGO_APP_PASSWORD:?Set a distinct MGMCP_ARANGO_APP_PASSWORD in .env}
       MGMCP_GRAPH_EVENT_PRODUCER_SUBJECT: ${MGMCP_GRAPH_EVENT_PRODUCER_SUBJECT:-}
       MGMCP_GRAPH_EVENT_PROJECT_KEY: ${MGMCP_GRAPH_EVENT_PROJECT_KEY:-}
       MGMCP_CI_TEST_RUN_TOKEN: ${MGMCP_CI_TEST_RUN_TOKEN:-}
@@ -88,6 +107,9 @@ services:
       MGMCP_TEST_FIX_OLLAMA_MODEL: ${MGMCP_TEST_FIX_OLLAMA_MODEL:-qwen3-coder:30b}
       MGMCP_DRAFT_WORKER_URL: ${MGMCP_DRAFT_WORKER_URL:-}
       MGMCP_DRAFT_WORKER_TOKEN: ${MGMCP_DRAFT_WORKER_TOKEN:-}
+      MGMCP_ARANGO_PROVISION_STORAGE: "false"
+      MGMCP_PROJECT_AUTHORIZATION_REQUIRED: ${MGMCP_PROJECT_AUTHORIZATION_REQUIRED:-true}
+      MGMCP_PROJECT_GRANTS_CLAIM: ${MGMCP_PROJECT_GRANTS_CLAIM:-mgmcp_projects}
       MGMCP_AUTH_REQUIRED: ${MGMCP_AUTH_REQUIRED:-true}
       MGMCP_HTTP_HOST: 0.0.0.0
       MGMCP_HTTP_PORT: ${MGMCP_HTTP_PORT:-3100}
@@ -98,8 +120,8 @@ services:
       MGMCP_KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-}
       MGMCP_ARANGO_URL: http://memorygraphmcp-arangodb:8529
       MGMCP_ARANGO_DATABASE: ${ARANGO_DATABASE:-architecture}
-      MGMCP_ARANGO_USERNAME: root
-      MGMCP_ARANGO_PASSWORD: ${ARANGO_ROOT_PASSWORD:?Set ARANGO_ROOT_PASSWORD in .env}
+      MGMCP_ARANGO_USERNAME: memorygraphmcp_app
+      MGMCP_ARANGO_PASSWORD: ${MGMCP_ARANGO_APP_PASSWORD:?Set a distinct MGMCP_ARANGO_APP_PASSWORD in .env}
       MGMCP_EMBEDDING_PROVIDER: ${MGMCP_EMBEDDING_PROVIDER:-ollama}
       MGMCP_EMBEDDING_BASE_URL: http://mgmcp-ollama-embed:11434
       MGMCP_EMBEDDING_MODEL: ${MGMCP_EMBED_MODEL:-nomic-embed-text}
