@@ -489,3 +489,6 @@ select {
 
 .guidance-text { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: .75rem; }
 .guidance-editor { display: block; width: 100%; margin: .35rem 0 .6rem; }
+
+.usage-section + .usage-section { margin-top: 16px; }
+.usage-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }

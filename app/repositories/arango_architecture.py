@@ -36,6 +36,7 @@ from app.domain.architecture_events import (
     TaskUpserted,
     TrackerActivity,
 )
+from app.domain.context_usage import UsageOutcome, UsageReceipt, UsageScope
 from app.domain.exceptions import ArchitectureGraphError
 from app.domain.project_changes import BranchCleanup
 from app.domain.project_guidance import (
@@ -957,6 +958,70 @@ class ArangoArchitectureRepository:
             if row["url"] not in cleanups:
                 cleanups[row["url"]] = BranchCleanup.model_validate(row)
         return cleanups
+
+    def record_usage(self, receipt: UsageReceipt, owner: str, session: str | None) -> None:
+        self._database().collection(self._events).insert({
+            "_key": f"usage-{receipt.request_id}", "event_type": "retrieval.usage",
+            "owner": owner, "usage_session": session, **receipt.model_dump(mode="json"),
+        })
+
+    def read_usage(self, request_id: str, owner: str) -> UsageReceipt | None:
+        row = self._database().collection(self._events).get(f"usage-{request_id}")
+        if not row or row.get("owner") != owner or row.get("event_type") != "retrieval.usage":
+            return None
+        return UsageReceipt.model_validate(row)
+
+    def report_usage(self, request_id: str, owner: str, outcome: UsageOutcome) -> UsageReceipt | None:
+        key = f"usage-{request_id}"
+        with self._transaction(with_events=True) as transaction:
+            journal = transaction.collection(self._events)
+            row = journal.get(key)
+            if not row or row.get("owner") != owner or row.get("event_type") != "retrieval.usage":
+                return None
+            result = UsageReceipt.model_validate(row)
+            result.outcome = outcome
+            result.response_tokens = outcome.response_tokens
+            result.total_tokens = result.query_tokens + result.context_tokens + (outcome.response_tokens or 0)
+            if result.savings_tokens is not None:
+                result.naive_rag_tokens = result.total_tokens + result.savings_tokens
+            journal.update({"_key": key, **result.model_dump(mode="json")})
+            return result
+
+    def query_usage(
+        self, scope: UsageScope, project: str | None, session: str | None,
+    ) -> tuple[list[dict], list[UsageReceipt]]:
+        if (scope == "session" and not session) or (scope == "project" and not project):
+            return [], []
+        database = self._database()
+        bindings = {"@events": self._events, "scope": scope, "project": project, "session": session}
+        selection = """
+        FOR row IN @@events
+            FILTER row.event_type == "retrieval.usage"
+            FILTER @scope != "project" OR row.project_key == @project
+            FILTER @scope != "session" OR row.usage_session == @session
+        """
+        groups = list(database.aql.execute(selection + """
+            COLLECT day = LEFT(row.timestamp, 10), method = row.method
+                AGGREGATE requests = COUNT(row),
+                    query_tokens = SUM(row.query_tokens),
+                    context_tokens = SUM(row.context_tokens),
+                    response_tokens = SUM(NOT_NULL(row.response_tokens, 0)),
+                    total_tokens = SUM(row.total_tokens),
+                    savings_tokens = SUM(NOT_NULL(row.savings_tokens, 0)),
+                    measured_savings_requests = SUM(row.savings_tokens == null ? 0 : 1),
+                    reported_outcomes = SUM(row.outcome == null ? 0 : 1),
+                    successful_completions = SUM(row.outcome.completed == true ? 1 : 0),
+                    retries = SUM(NOT_NULL(row.outcome.follow_up_retries, 0))
+            RETURN {day, method, requests, query_tokens, context_tokens, response_tokens,
+                    total_tokens, savings_tokens, measured_savings_requests, reported_outcomes,
+                    successful_completions, retries}
+        """, bind_vars=bindings))
+        recent = database.aql.execute(selection + """
+            SORT row.timestamp DESC, row.request_id DESC
+            LIMIT 20
+            RETURN row
+        """, bind_vars=bindings)
+        return groups, [UsageReceipt.model_validate(row) for row in recent]
 
     def read_guidance_state(self, project_key: str | None) -> GuidanceState:
         key = _guidance_key(project_key)

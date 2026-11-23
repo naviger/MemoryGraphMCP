@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Literal, get_args
+from urllib.parse import quote
 
+import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
@@ -18,9 +20,19 @@ from app.domain.architecture import (
     ArchitectureNeighborhood,
     ArchitectureSearch,
     EntityType,
+    Project,
 )
 from app.domain.architecture_events import TrackerOverview
 from app.domain.ask_graph import AskGraphAnswer, AskGraphQuery
+from app.domain.context_usage import (
+    ContextQuery,
+    MeasuredContextPackage,
+    RequestID,
+    UsageOutcome,
+    UsageReceipt,
+    UsageScope,
+    UsageSummary,
+)
 from app.domain.exceptions import ADRError, ArchitectureGraphError, RevalidationError
 from app.domain.models import (
     ADRConflictResolution,
@@ -67,7 +79,8 @@ from app.domain.test_runs import (
     ci_run_health,
     project_ci_health,
 )
-from app.services.ask_graph import AskGraphService
+from app.services.ask_graph import AskEvidence, AskGraphService
+from app.services.context_package import ContextPackageService
 from app.services.project_changes import ProjectChangesService
 from app.services.review_details import ReviewDetailService
 from app.services.review_queue import ReviewQueueService
@@ -78,6 +91,7 @@ from app.services.test_fix import (
     TestFixService,
     TestFixUnavailable,
 )
+from app.services.token_usage import TokenUsageService, document_baseline
 
 REVIEW_API_PREFIX = "/api/review"
 
@@ -130,6 +144,8 @@ def build_review_router(
     ci_repository_key: str = "",
     test_fixes: TestFixService | None = None,
     changes: ProjectChangesService | None = None,
+    context_packages: ContextPackageService | None = None,
+    usage: TokenUsageService | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix=REVIEW_API_PREFIX, tags=["Review"])
 
@@ -169,13 +185,92 @@ def build_review_router(
             query, [doc.key for doc in project.documents] if project is not None else None
         )
 
-    @router.post("/ask")
-    async def ask_graph(query: AskGraphQuery, response: Response) -> AskGraphAnswer:
+    async def measure(request, response, method, query, payload, **options):
+        if usage is None:
+            return
+        receipt = await usage.record(request, method, query, payload, **options)
+        headers = response.headers
+        headers["X-MemoryGraph-Request-ID"] = receipt.request_id
+        headers["X-MemoryGraph-Retrieval-Method"] = receipt.method
+        headers["X-MemoryGraph-Query-Tokens"] = str(receipt.query_tokens)
+        headers["X-MemoryGraph-Context-Tokens"] = str(receipt.context_tokens)
+        headers["X-MemoryGraph-Total-Tokens"] = str(receipt.total_tokens)
+        headers["X-MemoryGraph-Retrieval-Path"] = quote(receipt.retrieval_path)
+        if receipt.naive_rag_tokens is not None:
+            headers["X-MemoryGraph-Baseline-Tokens"] = str(receipt.naive_rag_tokens)
+        if receipt.savings_tokens is not None:
+            headers["X-MemoryGraph-Savings-Tokens"] = str(receipt.savings_tokens)
+
+    @router.post("/context-package")
+    async def build_context_package(
+        query: ContextQuery, request: Request, response: Response,
+    ) -> MeasuredContextPackage:
+        if context_packages is None or usage is None:
+            raise HTTPException(503, "Context packages are unavailable")
+        try:
+            package, baseline, count = await context_packages.build(query)
+        except ArchitectureGraphError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        receipt = await usage.record(
+            request, "ContextPackage", query.question, package, project=query.project_key,
+            baseline=baseline, entities=count, path="graph anchors → direct relationships → budgeted context",
+        )
         response.headers["Cache-Control"] = "no-store"
-        return await ask.answer(query, await resolve_project(query.project_key))
+        return MeasuredContextPackage(**package.model_dump(), usage=receipt)
+
+    @router.get("/token-usage")
+    async def token_usage(
+        request: Request, response: Response, scope: UsageScope = "session", project_key: MemoryKey | None = None,
+    ) -> UsageSummary:
+        if usage is None:
+            raise HTTPException(503, "Token analytics are unavailable")
+        if scope == "project":
+            if not project_key:
+                raise HTTPException(422, "Provide a project key for project totals")
+            if details.architecture is None or not isinstance(
+                await anyio.to_thread.run_sync(details.architecture.read_entity, project_key), Project,
+            ):
+                raise HTTPException(404, "Project not found")
+        response.headers["Cache-Control"] = "no-store"
+        return await usage.summary(request, scope, project_key)
+
+    @router.get("/token-usage/{request_id}")
+    async def retrieval_usage(request_id: RequestID, request: Request, response: Response) -> UsageReceipt:
+        if usage is None:
+            raise HTTPException(503, "Token analytics are unavailable")
+        receipt = await usage.read(request, request_id)
+        if receipt is None:
+            raise HTTPException(404, "Usage request not found")
+        response.headers["Cache-Control"] = "no-store"
+        return receipt
+
+    @router.post("/token-usage/{request_id}/outcome")
+    async def report_usage(
+        request_id: RequestID, outcome: UsageOutcome, request: Request, response: Response,
+    ) -> UsageReceipt:
+        if usage is None:
+            raise HTTPException(503, "Token analytics are unavailable")
+        receipt = await usage.report(request, request_id, outcome)
+        if receipt is None:
+            raise HTTPException(404, "Usage request not found")
+        response.headers["Cache-Control"] = "no-store"
+        return receipt
+
+    @router.post("/ask")
+    async def ask_graph(query: AskGraphQuery, response: Response, request: Request) -> AskGraphAnswer:
+        response.headers["Cache-Control"] = "no-store"
+        evidence = AskEvidence()
+        result = await ask.answer(query, await resolve_project(query.project_key), evidence=evidence)
+        await measure(
+            request, response, "Lexical" if evidence.lexical else "Graph", query.question,
+            result, project=query.project_key, baseline=evidence.baseline,
+            entities=len({(citation.key, citation.destination) for finding in result.findings
+                          for citation in finding.citations}), path=evidence.path,
+        )
+        return result
 
     @router.post("/search")
-    async def search_memory(query: ReviewSearchQuery, response: Response) -> ReviewSearchResults:
+    async def search_memory(query: ReviewSearchQuery, response: Response, request: Request) -> ReviewSearchResults:
         response.headers["Cache-Control"] = "no-store"
         retrieve = search.semantic_search if query.mode == "semantic" else search.hybrid_search
         if query.project_key:
@@ -183,7 +278,10 @@ def build_review_router(
             if project is None:
                 raise HTTPException(status_code=404, detail="Project not found")
             if not project.documents:
-                return ReviewSearchResults(matches=[], fallback_used=False)
+                result = ReviewSearchResults(matches=[], fallback_used=False)
+                await measure(request, response, query.mode.title(), query.query, [],
+                              project=query.project_key, path="project scope → no candidate documents")
+                return result
             hits = await retrieve(
                 query.query, limit=query.limit, as_of=query.as_of, kinds=query.kinds,
                 document_keys=[document.key for document in project.documents],
@@ -213,10 +311,16 @@ def build_review_router(
             provider=profile.get("embedding_provider"), model=profile.get("embedding_model"),
             dimension=profile.get("embedding_dimension"), version=profile.get("embedding_version"),
         )
-        return ReviewSearchResults(
+        result = ReviewSearchResults(
             matches=matches, fallback_used=any(hit.fallback_used for hit in hits),
             embedding=diagnostics,
         )
+
+        actual = "Lexical" if hits and all(hit.retrieval_mode == "lexical" for hit in hits) else query.mode.title()
+        await measure(request, response, actual, query.query, matches,
+                      project=query.project_key, baseline=document_baseline(hit.document for hit in hits),
+                      entities=len(matches), path=f"{query.mode} → {actual.lower()} excerpts")
+        return result
 
     @router.get("/projects/{key}")
     async def get_project(
@@ -702,18 +806,22 @@ def build_review_router(
 
     @router.get("/graph/entities")
     async def search_graph_entities(
-        query: Annotated[ArchitectureSearch, Query()], response: Response
+        query: Annotated[ArchitectureSearch, Query()], response: Response, request: Request
     ) -> list[ArchitectureEntity]:
         response.headers["Cache-Control"] = "no-store"
-        return await details.search_graph(query)
+        result = await details.search_graph(query)
+        await measure(request, response, "Graph", query.query, result,
+                      entities=len(result), path="architecture entity search")
+        return result
 
     @router.get("/graph/entities/{key}")
     async def get_graph_neighborhood(
         key: MemoryKey,
-        response: Response,
+        response: Response, request: Request,
         entity_type: EntityType | None = None,
         hops: Annotated[int, Query(ge=1, le=MAX_GRAPH_HOPS)] = DEFAULT_GRAPH_HOPS,
         entity_types: Annotated[list[EntityType] | None, Query(max_length=18)] = None,
+        project_key: MemoryKey | None = None,
     ) -> ArchitectureNeighborhood:
         result = await details.get_neighborhood(
             key, entity_types or ([entity_type] if entity_type else []), hops
@@ -721,16 +829,21 @@ def build_review_router(
         if result is None:
             raise HTTPException(status_code=404, detail="Architecture entity not found")
         response.headers["Cache-Control"] = "no-store"
+        await measure(request, response, "Graph", key, result, project=project_key,
+                      entities=len({result.center.key, *(path.entity.key for path in result.paths)}),
+                      path="graph neighborhood traversal")
         return result
 
     @router.get("/records/{key}/similar")
     async def get_similar_records(
-        key: MemoryKey, response: Response, limit: Annotated[int, Query(ge=1, le=20)] = 6
+        key: MemoryKey, response: Response, request: Request, limit: Annotated[int, Query(ge=1, le=20)] = 6
     ) -> SimilarRecords:
         result = await details.similar_records(key, limit)
         if result is None:
             raise HTTPException(status_code=404, detail="Memory record not found")
         response.headers["Cache-Control"] = "no-store"
+        await measure(request, response, "Semantic", key, result, entities=len(result.matches),
+                      path="stored-vector similar records")
         return result
 
     @router.get("/records/{key}")

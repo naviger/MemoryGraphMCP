@@ -21,6 +21,7 @@ from app.mcp.server import build_mcp_server
 from app.repositories.factory import build_repository
 from app.services.architecture_service import ArchitectureService
 from app.services.ask_graph import AskGraphService
+from app.services.context_package import ContextPackageService
 from app.services.embeddings import EmbeddingService
 from app.services.github_test_runs import GitHubBranchHead, poll_test_runs
 from app.services.ingestion_service import MemoryIngestionService
@@ -31,6 +32,7 @@ from app.services.review_details import ReviewDetailService
 from app.services.review_queue import ReviewQueueService
 from app.services.search_service import MemorySearchService
 from app.services.test_fix import TestFixService
+from app.services.token_usage import TokenUsageService
 
 logger = structlog.get_logger(__name__)
 
@@ -122,9 +124,10 @@ def create_application(settings: Settings | None = None) -> FastAPI:
             version=getattr(provider, "version", None),
         ),
     )
+    context_packages = ContextPackageService(graph_repository, repository) if graph_repository else None
     app.include_router(build_review_router(
         ReviewQueueService(repository), review_details,
-        AskGraphService(repository, review_details), settings.auth_required, service,
+        AskGraphService(repository, review_details, context_packages), settings.auth_required, service,
         ci_github_repository=settings.ci_github_repository,
         ci_project_key=settings.ci_project_key,
         ci_head=ci_head.current,
@@ -133,6 +136,8 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         test_fixes=TestFixService(settings, graph_repository, repository)
         if graph_repository else None,
         changes=ProjectChangesService(settings, graph_repository) if graph_repository else None,
+        context_packages=context_packages,
+        usage=TokenUsageService(graph_repository) if graph_repository and hasattr(graph_repository, "record_usage") else None,
     ))
     app.include_router(build_test_run_router(settings, graph_repository))
     app.mount(settings.mcp_mount_path, mcp_app)
