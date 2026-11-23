@@ -6,8 +6,10 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from app.domain.execution_usage import ExecutionAttempt
 from app.domain.knowledge_capture import CaptureSuggestion, Evidence
 from app.domain.models import MemoryKey
+from app.domain.repair_contract import RepairContract
 
 EntityName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
 EntityType = Literal[
@@ -271,6 +273,14 @@ class Execution(ArchitectureNode):
     entity_type: Literal["Execution"] = "Execution"
     project_key: MemoryKey
     task_key: MemoryKey
+    patch_execution_key: MemoryKey | None = None
+    repair_review_key: MemoryKey | None = None
+    repair_patch_sha256: str | None = None
+    repair_prompt: str | None = None
+    repair_direction: str | None = None
+    repair_contract: RepairContract | None = None
+    repair_token_ceiling: int | None = None
+    additional_review_tokens: int | None = None
     agent: Literal["local", "codex", "claude-code", "openhands"]
     mode: Literal["PLAN_ONLY", "IMPLEMENT", "REVIEW", "FULL_LIFECYCLE"]
     state: Literal[
@@ -286,6 +296,7 @@ class Execution(ArchitectureNode):
     timeline: list[dict[str, Any]] = Field(default_factory=list)
     context_keys: list[MemoryKey] = Field(default_factory=list)
     results: list[dict[str, Any]] = Field(default_factory=list)
+    attempts: list[ExecutionAttempt] = Field(default_factory=list)
     failure: str | None = None
 
 

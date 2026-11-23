@@ -16,6 +16,7 @@ from app.domain.architecture import (
     architecture_key,
 )
 from app.domain.exceptions import ArchitectureGraphError
+from app.domain.execution_usage import ExecutionAttempt, ExecutionUsage
 from app.domain.project_workspace import (
     AgentArtifact,
     AgentResult,
@@ -155,6 +156,91 @@ class ProjectWorkspaceRepository:
             self.put(tx, task)
         return task
 
+    @staticmethod
+    def repair_target(review, project, task_key):
+        if review.project_key != project or review.task_key != task_key or review.agent != "codex":
+            raise ArchitectureGraphError("Review does not belong to this task")
+        for result in reversed(review.results):
+            target = result.get("reviewed_target") or {}
+            if (
+                result.get("review_verdict") == "blocking"
+                and target.get("kind") == "implementation patch"
+                and target.get("execution_id")
+                and target.get("patch_sha256")
+            ):
+                return result, target
+        raise ArchitectureGraphError("This review has no blocking findings on an identified patch")
+
+    def previous_blocking_review(self, source, project, task_key, read):
+        if source.project_key != project or source.task_key != task_key or source.agent != "codex":
+            raise ArchitectureGraphError("Implementation does not belong to this task")
+        if not source.repair_review_key:
+            return None
+        earlier = read(source.repair_review_key)
+        if not isinstance(earlier, Execution):
+            raise ArchitectureGraphError("The previous review is unavailable")
+        result, _ = self.repair_target(earlier, project, task_key)
+        return {"execution_key": earlier.key, "findings": result["summary"]}
+
+    def _usage(self, database, project, task_key):
+        return next(
+            iter(
+                database.aql.execute(
+                    """
+            FOR job IN @@nodes
+                FILTER job.entity_type == "Execution" AND job.task_key == @task
+                FILTER job.project_key == @project
+                LET attempts = (FOR attempt IN (IS_ARRAY(job.attempts) ? job.attempts : [])
+                    FILTER attempt.ended_at != null RETURN attempt)
+                LET tokens = SUM(
+                    FOR attempt IN attempts FILTER attempt.usage != null
+                    RETURN attempt.usage.input_tokens + attempt.usage.output_tokens
+                )
+                LET missing = LENGTH(FOR attempt IN attempts FILTER attempt.usage == null RETURN 1)
+                LET legacy = LENGTH(attempts) == 0 AND LENGTH(job.results) > 0 ? 1 : 0
+                COLLECT AGGREGATE total = SUM(tokens), unknown = SUM(missing + legacy)
+                RETURN {tokens: total, unknown}
+            """,
+                    bind_vars={
+                        "@nodes": self.graph._entities,
+                        "project": project,
+                        "task": task_key,
+                    },
+                )
+            ),
+            {"tokens": 0, "unknown": 0},
+        )
+
+    def task_token_total(self, project, task_key):
+        return self._usage(self.graph._database(), project, task_key)["tokens"]
+
+    def repair_draft(self, project, task_key, review_key):
+        self.task(project, task_key)
+        review = self.graph.read_entity(review_key)
+        if not isinstance(review, Execution):
+            raise ArchitectureGraphError("Review does not belong to this task")
+        result, target = self.repair_target(review, project, task_key)
+        source = self.graph.read_entity(target["execution_id"])
+        if not isinstance(source, Execution):
+            raise ArchitectureGraphError("The reviewed implementation is unavailable")
+        earlier = self.previous_blocking_review(source, project, task_key, self.graph.read_entity)
+        return {
+            "needs_design_review": earlier is not None,
+            "usage": self._usage(self.graph._database(), project, task_key),
+            "previous_contract": source.repair_contract,
+            "previous_review": earlier,
+            "agent": "codex",
+            "model": "Codex CLI default",
+            "reason": "Codex can resume this exact local patch in an isolated clone.",
+            "patch_execution_key": target["execution_id"],
+            "patch_sha256": target["patch_sha256"],
+            "prompt": (
+                "Address the blocking review findings below in the staged implementation. "
+                "Preserve unrelated changes and run focused regression tests. "
+                "Report how each finding was addressed.\n\n" + result["summary"]
+            )[:8000],
+        }
+
     def start(self, project, key, command: StartExecution, actor: str) -> Execution:
         task = self.task(project, key)
         now = datetime.now(UTC)
@@ -165,21 +251,170 @@ class ProjectWorkspaceRepository:
             existing = nodes.get(execution_key)
             if existing:
                 execution = Execution.model_validate(existing)
-                if (execution.agent, execution.mode, execution.requested_by) != (
+                if (
+                    execution.agent,
+                    execution.mode,
+                    execution.requested_by,
+                    execution.patch_execution_key if not execution.repair_review_key else None,
+                    execution.repair_review_key,
+                    execution.repair_prompt,
+                    execution.repair_direction,
+                    execution.repair_contract if execution.repair_review_key else None,
+                    execution.additional_review_tokens,
+                ) != (
                     command.agent,
                     command.mode,
                     actor,
+                    command.patch_execution_key,
+                    command.repair_review_key,
+                    command.repair_prompt,
+                    command.repair_direction,
+                    command.repair_contract,
+                    command.additional_review_tokens,
                 ):
                     raise ArchitectureGraphError("Execution request ID was already used")
                 return execution
             task = self._task_in_transaction(tx, project, task)
-            if task.metadata.get("active_execution") or task.status in {"done", "cancelled"}:
+            if (
+                task.metadata.get("active_execution")
+                or task.status == "cancelled"
+                or (
+                    task.status == "done"
+                    and not (command.patch_execution_key or command.repair_review_key)
+                )
+            ):
                 raise ArchitectureGraphError("Task must be open and have no active execution")
+            if command.additional_review_tokens and (
+                not command.patch_execution_key or command.mode != "REVIEW"
+            ):
+                raise ArchitectureGraphError("Extra review tokens apply only to exact patch review")
+            source_key = command.patch_execution_key
+            patch_hash = None
+            contract = command.repair_contract
+            ceiling = None
+            if command.repair_review_key:
+                if source_key or command.mode != "IMPLEMENT" or command.agent != "codex":
+                    raise ArchitectureGraphError("Repair requires the Codex Implement workflow")
+                if not command.repair_prompt:
+                    raise ArchitectureGraphError("A repair prompt is required")
+                review = Execution.model_validate(
+                    self.graph._require_entity_type(
+                        nodes,
+                        command.repair_review_key,
+                        "Execution",
+                    )
+                )
+                _, target = self.repair_target(review, project, key)
+                source_key, patch_hash = target["execution_id"], target["patch_sha256"]
+            elif command.repair_prompt or command.repair_direction or contract:
+                raise ArchitectureGraphError("A repair prompt requires a blocking review")
+            if source_key:
+                if not command.repair_review_key and (
+                    command.mode != "REVIEW" or command.agent != "codex"
+                ):
+                    raise ArchitectureGraphError("Patch review requires the Codex Review workflow")
+                source = Execution.model_validate(
+                    self.graph._require_entity_type(
+                        nodes,
+                        source_key,
+                        "Execution",
+                    )
+                )
+                if (
+                    source.project_key != project
+                    or source.task_key != key
+                    or source.agent != "codex"
+                    or not any(
+                        artifact.get("name") == "Local implementation patch"
+                        for result in source.results
+                        for artifact in result.get("artifacts", [])
+                    )
+                ):
+                    raise ArchitectureGraphError("Execution has no reviewable patch for this task")
+                if command.repair_review_key:
+
+                    def read_in_transaction(execution_key):
+                        row = nodes.get(execution_key)
+                        if row and row["entity_type"] == "Execution":
+                            return Execution.model_validate(row)
+                        return None
+
+                    earlier = self.previous_blocking_review(
+                        source, project, key, read_in_transaction
+                    )
+                    if earlier and not command.repair_direction:
+                        raise ArchitectureGraphError(
+                            "This revised patch is blocked again. Record design direction first."
+                        )
+                    if not contract:
+                        raise ArchitectureGraphError(
+                            "Set acceptance criteria, regression tests, and a token budget first."
+                        )
+                    if (
+                        earlier
+                        and source.repair_contract
+                        and (
+                            source.repair_contract.acceptance_criteria
+                            == contract.acceptance_criteria
+                            and source.repair_contract.test_paths == contract.test_paths
+                        )
+                    ):
+                        raise ArchitectureGraphError(
+                            "Revise the acceptance criteria or test selection before continuing."
+                        )
+                    ceiling = self._usage(tx, project, key)["tokens"] + contract.additional_tokens
+                    superseded = tx.aql.execute(
+                        """
+                        FOR job IN @@nodes
+                            FILTER job.entity_type == "Execution" AND job.task_key == @task
+                            FILTER job.project_key == @project
+                            FILTER job.patch_execution_key == @source
+                            FILTER job.repair_review_key != null
+                            FOR result IN job.results
+                                FOR artifact IN result.artifacts
+                                    FILTER artifact.name == "Local implementation patch"
+                                    LIMIT 1 RETURN true
+                        """,
+                        bind_vars={
+                            "@nodes": self.graph._entities,
+                            "task": key,
+                            "project": project,
+                            "source": source_key,
+                        },
+                    )
+                    if next(iter(superseded), False):
+                        raise ArchitectureGraphError("A newer patch has superseded this review")
+                elif source.repair_contract:
+                    implementation = next(
+                        (value for value in reversed(source.results) if value.get("verification")),
+                        {},
+                    )
+                    if not implementation.get("verification", {}).get("passed"):
+                        raise ArchitectureGraphError("Required tests must pass before model review")
+                    contract = source.repair_contract
+                    ceiling = source.repair_token_ceiling
+                    used = self._usage(tx, project, key)["tokens"]
+                    if command.additional_review_tokens:
+                        ceiling = max(used, ceiling or 0) + command.additional_review_tokens
+                    if ceiling is not None and used >= ceiling:
+                        raise ArchitectureGraphError(
+                            "The approved repair token budget is exhausted"
+                        )
+                elif command.additional_review_tokens:
+                    raise ArchitectureGraphError("This patch has no repair token budget to extend")
             job = Execution(
                 key=execution_key,
                 name=f"{task.name} execution"[:500],
                 project_key=project,
                 task_key=key,
+                patch_execution_key=source_key,
+                repair_review_key=command.repair_review_key,
+                repair_patch_sha256=patch_hash,
+                repair_prompt=command.repair_prompt,
+                repair_direction=command.repair_direction,
+                repair_contract=contract,
+                repair_token_ceiling=ceiling,
+                additional_review_tokens=command.additional_review_tokens,
                 requested_by=actor,
                 agent=command.agent,
                 mode=command.mode,
@@ -193,12 +428,16 @@ class ProjectWorkspaceRepository:
                 tx,
                 task.model_copy(
                     update={
-                        "status": "in_progress",
+                        "status": task.status if command.patch_execution_key else "in_progress",
                         "metadata": {**task.metadata, "active_execution": job.key},
                     }
                 ),
             )
             self.link(tx, project, job.key, "defines", now)
+            if job.repair_review_key:
+                self.link(tx, job.key, job.repair_review_key, "references", now)
+            if job.patch_execution_key:
+                self.link(tx, job.key, job.patch_execution_key, "references", now)
             self.link(tx, project, agent_key, "defines", now)
             self.link(tx, task.key, job.key, "produced", now)
             self.link(tx, job.key, agent_key, "uses", now)
@@ -230,6 +469,65 @@ class ProjectWorkspaceRepository:
             )
         ]
 
+    def retry_execution(self, project, task_key, execution_key, actor):
+        task = self.task(project, task_key)
+        now = datetime.now(UTC)
+        with self.graph._transaction() as tx:
+            task = self._task_in_transaction(tx, project, task)
+            row = self.graph._require_entity_type(
+                tx.collection(self.graph._entities),
+                execution_key,
+                "Execution",
+            )
+            job = Execution.model_validate(row)
+            if job.project_key != project or job.task_key != task_key:
+                raise ArchitectureGraphError("Execution does not belong to this task")
+            if (
+                job.repair_token_ceiling is not None
+                and self._usage(tx, project, task_key)["tokens"] >= job.repair_token_ceiling
+            ):
+                raise ArchitectureGraphError("The approved repair token budget is exhausted")
+            active = task.metadata.get("active_execution")
+            if (
+                job.state not in {"BLOCKED", "FAILED"}
+                or active
+                and active != job.key
+                or task.status in {"done", "cancelled"}
+            ):
+                raise ArchitectureGraphError(
+                    "This execution cannot be retried in its current state"
+                )
+            self.put(
+                tx,
+                task.model_copy(
+                    update={
+                        "status": "in_progress",
+                        "metadata": {**task.metadata, "active_execution": job.key},
+                    }
+                ),
+            )
+            updated = job.model_copy(
+                update={
+                    "state": "READY",
+                    "failure": None,
+                    "lease_until": None,
+                    "updated_at": now,
+                    "revision": job.revision + 1,
+                    "timeline": [
+                        *job.timeline,
+                        {
+                            "state": "READY",
+                            "timestamp": now.isoformat(),
+                            "phase": job.phase,
+                            "actor": actor,
+                            "action": "retry",
+                        },
+                    ][-100:],
+                }
+            )
+            self.put(tx, updated)
+            return updated
+
     def transition(
         self,
         job,
@@ -238,6 +536,7 @@ class ProjectWorkspaceRepository:
         context_keys=None,
         result: AgentResult | None = None,
         failure=None,
+        usage: ExecutionUsage | None = None,
         actor="execution-worker",
     ):
         now = datetime.now(UTC)
@@ -266,6 +565,31 @@ class ProjectWorkspaceRepository:
                     },
                 ][-100:],
             }
+            attempts = list(prior.attempts)
+            if state == "RUNNING" and context_keys is None:
+                if attempts and attempts[-1].state == "running":
+                    attempts[-1] = attempts[-1].model_copy(
+                        update={
+                            "state": "interrupted",
+                            "ended_at": now,
+                        }
+                    )
+                attempts.append(ExecutionAttempt(phase=prior.phase, started_at=now))
+            elif state != "RUNNING" and attempts and attempts[-1].state == "running":
+                attempt_state = (
+                    "succeeded"
+                    if result
+                    else ("interrupted" if state.startswith("CANCEL") else "failed")
+                )
+                attempts[-1] = attempts[-1].model_copy(
+                    update={
+                        "state": attempt_state,
+                        "ended_at": now,
+                        "failure": failure,
+                        "usage": result.usage if result else usage,
+                    }
+                )
+            updates["attempts"] = attempts
             if context_keys is not None:
                 updates["context_keys"] = context_keys
                 for key in context_keys:

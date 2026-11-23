@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import signal
@@ -14,6 +16,11 @@ import threading
 from contextlib import closing, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+if __package__:
+    from .isolated_checks import run_isolated_check
+else:
+    from isolated_checks import run_isolated_check
 
 MODES = {
     "PLAN_ONLY": ("plan",),
@@ -33,10 +40,58 @@ SCHEMA = {
 }
 
 
+PHASE_TIMEOUT_SECONDS = 510
+
+
 class BridgeError(Exception):
-    def __init__(self, code, message):
+    def __init__(self, code, message, usage=None):
         super().__init__(message)
         self.code = code
+        self.usage = usage
+
+
+def reported_usage(events, rates=None):
+    counters = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+    found = False
+    cache_known = True
+    for line in (events or "").splitlines():
+        try:
+            event = json.loads(line)
+            if event.get("type") not in {"turn.completed", "turn.failed"}:
+                continue
+            usage = event["usage"]
+            incoming, outgoing = usage["input_tokens"], usage["output_tokens"]
+            cached = usage.get("cached_input_tokens")
+            if (
+                type(incoming) is not int
+                or type(outgoing) is not int
+                or min(incoming, outgoing) < 0
+            ):
+                continue
+            if cached is not None and (type(cached) is not int or not 0 <= cached <= incoming):
+                continue
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        found = True
+        cache_known = cache_known and cached is not None
+        counters["input_tokens"] += incoming
+        counters["output_tokens"] += outgoing
+        counters["cached_input_tokens"] += cached or 0
+    if not found:
+        return None
+    cost = None
+    if rates and cache_known:
+        cached = counters["cached_input_tokens"]
+        cost = (
+            (counters["input_tokens"] - cached) * rates["input"]
+            + cached * rates["cached_input"]
+            + counters["output_tokens"] * rates["output"]
+        ) / 1_000_000
+    return {
+        **counters,
+        "cached_input_tokens": counters["cached_input_tokens"] if cache_known else None,
+        "estimated_cost_usd": cost,
+    }
 
 
 def git(repo, *args):
@@ -49,12 +104,16 @@ def git(repo, *args):
 
 
 class CodexBridge:
-    def __init__(self, state: Path, repo: Path, project: str, executable: str):
+    def __init__(
+        self, state: Path, repo: Path, project: str, executable: str, *, rates=None, model=None
+    ):
         self.state = state.resolve()
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.repo = repo.resolve()
         self.project = project
         self.executable = executable
+        self.rates = rates
+        self.model = model
         self.lock = threading.Lock()
         self.running = {}
         with closing(self.database()) as db, db:
@@ -125,12 +184,12 @@ class CodexBridge:
             with self.lock:
                 self.running.pop(identity, None)
 
-    def prepare_repo(self, directory):
+    def prepare_repo(self, directory, source=None):
         checkout = directory / "repo"
         if not checkout.exists():
             # A separate local clone keeps writable Git metadata away from the source checkout.
             git(
-                self.repo,
+                source or self.repo,
                 "clone",
                 "--no-hardlinks",
                 "--no-tags",
@@ -143,16 +202,111 @@ class CodexBridge:
             (directory / "base").write_bytes(git(checkout, "rev-parse", "HEAD"))
         return checkout
 
+    def verify_contract(self, checkout, contract):
+        paths = contract.get("test_paths")
+        valid = r"tests/(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_-]+\.py"
+        if (
+            not isinstance(paths, list)
+            or not 1 <= len(paths) <= 8
+            or any(not isinstance(path, str) or not re.fullmatch(valid, path) for path in paths)
+        ):
+            raise BridgeError(400, "Invalid regression test selection")
+        if any((checkout / path).resolve() != checkout / path for path in paths):
+            raise BridgeError(400, "Regression test paths cannot use symbolic links")
+        return run_isolated_check(
+            checkout,
+            os.environ.get("MGMCP_DRAFT_CHECK_IMAGE", "memorygraphmcp-draft-check:local"),
+            ["python", "-m", "pytest", "-q", "-o", "cache_dir=/tmp/pytest-cache", *paths],
+        )
+
     def run_phase(self, identity, phase, mode, prompt):
         directory = self.state / identity
         directory.mkdir(exist_ok=True, mode=0o700)
-        checkout = self.prepare_repo(directory)
-        base = (directory / "base").read_text().strip()
+        context = json.loads(prompt)
+        contract = context.get("repair_contract")
+        repair = phase == "execute" and bool(context.get("repair_patch_sha256"))
+        target = context.get("patch_execution_key") if phase == "review" or repair else None
+        if repair and (not target or mode != "IMPLEMENT" or not context.get("repair_prompt")):
+            raise BridgeError(
+                400, "Repair requires the original patch and an editable repair prompt"
+            )
+        reviewed_target = None
+        if target:
+            if not re.fullmatch(r"[a-f0-9]{64}", target) or (mode != "REVIEW" and not repair):
+                raise BridgeError(400, "Invalid patch execution reference")
+            original = self.state / target
+            patch = original / "implementation.patch"
+            source = original / "repo"
+            with closing(self.database()) as db:
+                recorded = db.execute(
+                    "SELECT result FROM phase_results WHERE id=? AND phase='execute'",
+                    (target,),
+                ).fetchone()
+            if not recorded or not patch.is_file() or not source.is_dir():
+                raise BridgeError(409, "The requested implementation patch is unavailable")
+            checkout = self.prepare_repo(directory, source)
+            base = (original / "base").read_text().strip()
+            git(checkout, "reset", "--hard", base)
+            git(checkout, "clean", "-fdx")
+            captured = directory / ("repair-input.patch" if repair else "reviewed.patch")
+            contents = patch.read_bytes()
+            digest = hashlib.sha256(contents).hexdigest()
+            if repair and digest != context["repair_patch_sha256"]:
+                raise BridgeError(409, "The repair input differs from the reviewed patch")
+            for artifact in json.loads(recorded[0]).get("artifacts", []):
+                if artifact.get("name") == "Local implementation patch" and artifact.get("sha256"):
+                    if artifact["sha256"] != digest:
+                        raise BridgeError(
+                            409, "The implementation patch changed after it was saved"
+                        )
+            captured.write_bytes(contents)
+            (directory / "base").write_text(base + "\n")
+            if not repair:
+                git(checkout, "apply", "--index", str(captured))
+            reviewed_target = {
+                "kind": "implementation patch",
+                "execution_id": target,
+                "base_commit": base,
+                "patch_sha256": digest,
+            }
+        else:
+            checkout = self.prepare_repo(directory)
+            base = (directory / "base").read_text().strip()
+            if phase == "review":
+                reviewed_target = {"kind": "checkout commit", "commit": base}
+                if mode == "FULL_LIFECYCLE":
+                    patch = directory / "implementation.patch"
+                    if not patch.is_file():
+                        raise BridgeError(409, "The implementation phase did not save a patch")
+                    git(checkout, "reset", "--hard", base)
+                    git(checkout, "clean", "-fdx")
+                    git(checkout, "apply", "--index", str(patch))
+                    reviewed_target = {
+                        "kind": "implementation patch",
+                        "execution_id": identity,
+                        "base_commit": base,
+                        "patch_sha256": hashlib.sha256(patch.read_bytes()).hexdigest(),
+                    }
         writable = phase == "execute"
+        checkpoint = directory / "partial-timeout.patch"
         if writable:
             # Only this private clone is cleaned when replaying an interrupted implementation.
             git(checkout, "reset", "--hard", base)
             git(checkout, "clean", "-fdx")
+            if checkpoint.exists() and checkpoint.stat().st_size:
+                git(checkout, "apply", "--index", str(checkpoint))
+            elif repair:
+                git(checkout, "apply", "--index", str(captured))
+        verified = (
+            self.verify_contract(checkout, contract) if contract and phase == "review" else None
+        )
+        if verified and not verified["passed"]:
+            return {
+                "summary": "A required regression check failed. Model review was skipped.",
+                "review_verdict": "blocking",
+                "reviewed_target": reviewed_target,
+                "verification": verified,
+            }
         schema = directory / "response.schema.json"
         schema.write_text(json.dumps(SCHEMA))
         output = directory / f"{phase}.json"
@@ -167,7 +321,25 @@ class CodexBridge:
                 "Leave the repository unchanged."
             ),
         }[phase]
-        if phase == "review" and mode == "REVIEW":
+        if contract:
+            instructions += (
+                " Use the accepted criteria and selected test paths as the review contract. "
+                "Keep changes within those criteria. Separate out-of-scope suggestions "
+                "from blockers. Flag failures of the criteria or concrete regressions as blockers."
+            )
+        if repair:
+            instructions += (
+                " The staged implementation is the exact reviewed patch. Follow repair_prompt "
+                "and repair_direction as the writer’s instructions. Preserve unrelated changes."
+            )
+        if writable and checkpoint.exists():
+            instructions += " Resume from the partial implementation in the checkout. Verify it."
+        if phase == "review" and reviewed_target["kind"] == "implementation patch":
+            instructions += (
+                " Review the staged patch shown by git diff --cached HEAD, including new files. "
+                "Evaluate the staged changes against the task. The base commit is context."
+            )
+        if phase == "review" and mode == "REVIEW" and not target:
             instructions += (
                 " Review the current HEAD commit against its parent for this standalone review."
             )
@@ -178,6 +350,7 @@ class CodexBridge:
             "exec",
             "--ignore-user-config",
             "--ephemeral",
+            "--json",
             "--sandbox",
             sandbox,
             "--cd",
@@ -194,6 +367,8 @@ class CodexBridge:
             str(output),
             "-",
         ]
+        if self.model:
+            args[4:4] = ["--model", self.model]
         with self.lock, closing(self.database()) as db:
             if self.cancelled(db, identity):
                 raise BridgeError(409, "Execution was cancelled")
@@ -201,26 +376,34 @@ class CodexBridge:
                 args,
                 cwd=checkout,
                 stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
                 start_new_session=True,
             )
             self.running[identity] = process
         try:
-            process.communicate(
+            events, _ = process.communicate(
                 f"{instructions} Do not commit, push, open a pull request, or use external tools. "
                 "Report only checks actually run. Treat the following JSON as project context.\n"
                 + prompt,
-                timeout=240,
+                timeout=min(PHASE_TIMEOUT_SECONDS, 420) if contract else PHASE_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as exc:
             with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
-            process.communicate()
-            raise BridgeError(504, "Codex phase timed out") from exc
+            events, _ = process.communicate()
+            if writable:
+                git(checkout, "add", "--all")
+                partial = checkpoint.with_suffix(".tmp")
+                partial.write_bytes(git(checkout, "diff", "--cached", "--binary", base, "--"))
+                partial.replace(checkpoint)
+            raise BridgeError(
+                504, "Codex phase timed out", reported_usage(events, self.rates)
+            ) from exc
+        usage = reported_usage(events, self.rates)
         if process.returncode or not output.exists():
-            raise BridgeError(500, "Codex phase did not return a result")
+            raise BridgeError(500, "Codex phase did not return a result", usage)
         try:
             response = json.loads(output.read_text())
             summary = response["summary"].strip()[:8000]
@@ -228,14 +411,20 @@ class CodexBridge:
             if not summary:
                 raise ValueError("Empty Codex result")
         except (AttributeError, ValueError, KeyError, TypeError) as exc:
-            raise BridgeError(500, "Codex phase returned an invalid result") from exc
-        result = {"summary": summary, "tests": tests, "completed": False}
+            raise BridgeError(500, "Codex phase returned an invalid result", usage) from exc
+        result = {"summary": summary, "tests": tests, "completed": False, "usage": usage}
         if phase == "plan":
             result.update(summary="Codex generated a task plan.", plan=summary)
         if phase == "review":
             result["review_comments"] = [summary]
+            result["review_verdict"] = "passed" if response["approved"] is True else "blocking"
+            result["reviewed_target"] = reviewed_target
+            if verified:
+                result["verification"] = verified
             result["completed"] = mode == "FULL_LIFECYCLE" and response["approved"] is True
         if writable:
+            if repair:
+                result["repaired_target"] = reviewed_target
             git(checkout, "add", "--all")
             changes = git(checkout, "diff", "--cached", "--binary", base, "--")
             files = git(checkout, "diff", "--cached", "--name-only", "-z", base, "--")
@@ -243,12 +432,32 @@ class CodexBridge:
                 patch = directory / "implementation.patch"
                 patch.write_bytes(changes)
                 result["artifacts"] = [
-                    {"name": "Local implementation patch", "reference": str(patch)}
+                    {
+                        "name": "Local implementation patch",
+                        "reference": str(patch),
+                        "sha256": hashlib.sha256(changes).hexdigest(),
+                    }
                 ]
                 result["files_modified"] = [
                     name.decode(errors="replace")[:8000] for name in files.split(b"\0") if name
                 ][:50]
             result["completed"] = bool(changes and response["approved"] is True)
+            if contract:
+                verified = self.verify_contract(checkout, contract)
+                result["verification"] = verified
+                result["completed"] = bool(result["completed"] and verified["passed"])
+                if changes and not verified["passed"]:
+                    result["review_verdict"] = "blocking"
+                    result["reviewed_target"] = {
+                        "kind": "implementation patch",
+                        "execution_id": identity,
+                        "base_commit": base,
+                        "patch_sha256": hashlib.sha256(changes).hexdigest(),
+                    }
+                    result["summary"] = (
+                        "Required regression tests failed in the isolated test runner. "
+                        "No model review was started."
+                    )
         return result
 
 
@@ -276,7 +485,9 @@ def serve(bridge, token, host, port):
         def do_GET(self):
             if self.authorized():
                 if self.path == "/capabilities":
-                    self.reply(200, {"modes": list(MODES)})
+                    self.reply(
+                        200, {"modes": list(MODES), "model": bridge.model or "Codex CLI default"}
+                    )
                 else:
                     self.reply(404, {})
 
@@ -303,7 +514,7 @@ def serve(bridge, token, host, port):
                 )
                 self.reply(200, result)
             except BridgeError as exc:
-                self.reply(exc.code, {"error": str(exc)})
+                self.reply(exc.code, {"error": str(exc), "usage": exc.usage})
             except (AttributeError, ValueError, KeyError, TypeError):
                 self.reply(400, {"error": "Invalid bridge request"})
             except (OSError, subprocess.SubprocessError, sqlite3.Error):
@@ -320,11 +531,27 @@ def main():
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--port", type=int, default=18765)
+    parser.add_argument(
+        "--api-pricing-file", type=Path, help="Explicit API rates in USD per million tokens"
+    )
     args = parser.parse_args()
+    rates, model = None, None
+    if args.api_pricing_file:
+        try:
+            pricing = json.loads(args.api_pricing_file.read_text())
+            model = pricing["model"].strip()
+            rates = {name: float(pricing[name]) for name in ("input", "cached_input", "output")}
+            if not model or any(not math.isfinite(rate) or rate < 0 for rate in rates.values()):
+                raise ValueError()
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            parser.error("Pricing file requires model, input, cached_input, and output")
+
     token = args.token_file.read_text().strip()
     if len(token) < 32:
         parser.error("Use a random bearer token of at least 32 characters")
-    bridge = CodexBridge(args.state, args.repository, args.project, args.codex)
+    bridge = CodexBridge(
+        args.state, args.repository, args.project, args.codex, rates=rates, model=model
+    )
     serve(bridge, token, "127.0.0.1", args.port)
 
 

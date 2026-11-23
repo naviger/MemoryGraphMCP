@@ -5,7 +5,9 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.domain.architecture import EntityName, TaskStatus
+from app.domain.execution_usage import ExecutionUsage
 from app.domain.models import MemoryKey
+from app.domain.repair_contract import RepairContract, RepairVerification
 
 WorkType = Literal["Task", "Goal", "Risk", "Constraint"]
 AgentName = Literal["local", "codex", "claude-code", "openhands"]
@@ -41,6 +43,12 @@ class StartExecution(BaseModel):
     request_id: MemoryKey
     agent: AgentName
     mode: ExecutionMode
+    patch_execution_key: MemoryKey | None = None
+    repair_review_key: MemoryKey | None = None
+    repair_prompt: WorkText | None = None
+    repair_direction: WorkText | None = None
+    repair_contract: RepairContract | None = None
+    additional_review_tokens: int | None = Field(default=None, ge=1, le=20_000_000)
 
 
 class TaskUpdate(BaseModel):
@@ -51,6 +59,7 @@ class TaskUpdate(BaseModel):
 class AgentArtifact(BaseModel):
     name: EntityName
     reference: WorkText
+    sha256: str | None = None
 
 
 class AgentResult(BaseModel):
@@ -65,3 +74,13 @@ class AgentResult(BaseModel):
     lesson: WorkText | None = None
     related_keys: list[MemoryKey] = Field(default_factory=list, max_length=50)
     completed: bool = False
+    usage: ExecutionUsage | None = None
+
+    review_verdict: Literal["passed", "blocking"] | None = None
+    reviewed_target: dict[str, str] | None = None
+    repaired_target: dict[str, str] | None = None
+    verification: RepairVerification | None = None
+
+
+class RecommendAgent(BaseModel):
+    mode: ExecutionMode

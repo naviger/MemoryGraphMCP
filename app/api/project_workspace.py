@@ -13,7 +13,13 @@ from app.auth.project_access import current_project_access
 from app.domain.capture_checkpoint import CaptureHistoryInput, CaptureStatus
 from app.domain.exceptions import ArchitectureGraphError
 from app.domain.models import MemoryKey
-from app.domain.project_workspace import AssistDraft, StartExecution, TaskUpdate, WorkDraft
+from app.domain.project_workspace import (
+    AssistDraft,
+    RecommendAgent,
+    StartExecution,
+    TaskUpdate,
+    WorkDraft,
+)
 
 
 def build_workspace_router(prefix, workspace, executor, capture):
@@ -77,6 +83,17 @@ def build_workspace_router(prefix, workspace, executor, capture):
         actor = authorize(project, request, write=True)
         return await invoke(workspace.task_update, project, task, data, actor)
 
+    @router.post("/{project}/workspace/tasks/{task}/recommend-agent")
+    async def recommend(
+        project: MemoryKey, task: MemoryKey, data: RecommendAgent, request: Request
+    ):
+        authorize(project, request, write=True)
+        record = await invoke(workspace.task, project, task)
+        try:
+            return await executor.recommend(record, data.mode)
+        except (ArchitectureGraphError, httpx.HTTPError, ValueError, KeyError) as exc:
+            raise HTTPException(503, "Could not obtain an eligible agent recommendation") from exc
+
     @router.get("/{project}/workspace/tasks/{task}/executions")
     async def history(project: MemoryKey, task: MemoryKey, request: Request):
         authorize(project, request)
@@ -89,6 +106,23 @@ def build_workspace_router(prefix, workspace, executor, capture):
         if command.mode not in executor.modes().get(command.agent, []):
             raise HTTPException(422, "This agent does not support the selected mode")
         return await invoke(workspace.start, project, task, command, actor)
+
+    @router.get("/{project}/workspace/tasks/{task}/executions/{execution}/repair-draft")
+    async def repair_draft(
+        project: MemoryKey, task: MemoryKey, execution: MemoryKey, request: Request
+    ):
+        authorize(project, request, write=True)
+        await executor.refresh()
+        if "IMPLEMENT" not in executor.modes().get("codex", []):
+            raise HTTPException(409, "Codex Implement must be enabled to repair this patch")
+        draft = await invoke(workspace.repair_draft, project, task, execution)
+        draft["model"] = await executor.codex_model_label() or draft["model"]
+        return draft
+
+    @router.post("/{project}/workspace/tasks/{task}/executions/{execution}/retry")
+    async def retry(project: MemoryKey, task: MemoryKey, execution: MemoryKey, request: Request):
+        actor = authorize(project, request, write=True)
+        return await invoke(workspace.retry_execution, project, task, execution, actor)
 
     @router.post("/{project}/workspace/tasks/{task}/executions/{execution}/cancel")
     async def cancel(project: MemoryKey, task: MemoryKey, execution: MemoryKey, request: Request):

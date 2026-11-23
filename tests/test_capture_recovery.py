@@ -314,6 +314,220 @@ def test_arango_recovery_and_workspace():
     assert saved.metadata["memories_created"] == 1
     assert "service" in saved.context_keys
 
+    from app.domain.execution_usage import ExecutionUsage
+
+    third = workspace.create(
+        "alpha",
+        WorkDraft(kind="Task", name="Retry fixture", description="Record retry usage"),
+        "writer",
+    )
+    retry_job = workspace.start(
+        "alpha",
+        third.key,
+        StartExecution(
+            request_id=uuid4().hex,
+            agent="codex",
+            mode="PLAN_ONLY",
+        ),
+        "writer",
+    )
+    running = workspace.transition(retry_job, "RUNNING")
+    usage = ExecutionUsage(input_tokens=300, cached_input_tokens=20, output_tokens=150)
+    blocked = workspace.transition(running, "BLOCKED", failure="Phase timed out", usage=usage)
+    assert blocked.lease_until is not None
+    assert blocked.attempts[0].state == "failed"
+    assert blocked.attempts[0].usage == usage
+    with pytest.raises(ArchitectureGraphError):
+        workspace.retry_execution("beta", third.key, retry_job.key, "writer")
+    queued = workspace.retry_execution("alpha", third.key, retry_job.key, "writer")
+    assert queued.key == retry_job.key and queued.phase == blocked.phase
+    assert queued.lease_until is None and queued.timeline[-1]["action"] == "retry"
+    with pytest.raises(ArchitectureGraphError):
+        workspace.retry_execution("alpha", third.key, retry_job.key, "writer")
+    running_again = workspace.transition(queued, "RUNNING")
+    failure = workspace.transition(running_again, "FAILED", failure="Adapter rejected operation")
+    assert failure.attempts[1].usage is None
+    assert workspace.retry_execution("alpha", third.key, retry_job.key, "writer").state == "READY"
+
+    repair_task = workspace.create(
+        "alpha",
+        WorkDraft(
+            kind="Task",
+            name="Repair fixture",
+            description="Revise the reviewed patch",
+        ),
+        "writer",
+    )
+    original = workspace.start(
+        "alpha",
+        repair_task.key,
+        StartExecution(
+            request_id=uuid4().hex,
+            agent="codex",
+            mode="IMPLEMENT",
+        ),
+        "writer",
+    )
+    executing = workspace.transition(original, "RUNNING")
+    workspace.transition(
+        executing,
+        "REVIEW",
+        result=AgentResult(
+            summary="Saved patch",
+            artifacts=[
+                AgentArtifact(
+                    name="Local implementation patch",
+                    reference="local patch",
+                )
+            ],
+        ),
+    )
+    review = workspace.start(
+        "alpha",
+        repair_task.key,
+        StartExecution(
+            request_id=uuid4().hex,
+            agent="codex",
+            mode="REVIEW",
+            patch_execution_key=original.key,
+        ),
+        "writer",
+    )
+    reviewing = workspace.transition(review, "RUNNING")
+    workspace.transition(
+        reviewing,
+        "REVIEW",
+        result=AgentResult(
+            summary="Validate the source before import.",
+            review_verdict="blocking",
+            reviewed_target={
+                "kind": "implementation patch",
+                "execution_id": original.key,
+                "patch_sha256": "a" * 64,
+            },
+        ),
+    )
+    draft = workspace.repair_draft("alpha", repair_task.key, review.key)
+    assert "Validate the source" in draft["prompt"]
+    with pytest.raises(ArchitectureGraphError):
+        workspace.repair_draft("beta", repair_task.key, review.key)
+    from app.domain.repair_contract import RepairContract
+
+    request = StartExecution(
+        request_id=uuid4().hex,
+        agent="codex",
+        mode="IMPLEMENT",
+        repair_review_key=review.key,
+        repair_prompt="Edited repair prompt",
+        repair_contract=RepairContract(
+            acceptance_criteria=["Preserve source identity"],
+            test_paths=["tests/test_arango_repository.py"],
+            additional_tokens=100,
+        ),
+    )
+    repair = workspace.start("alpha", repair_task.key, request, "writer")
+    assert repair.patch_execution_key == original.key and repair.repair_patch_sha256 == "a" * 64
+    assert repair.repair_prompt == "Edited repair prompt"
+    assert repair.repair_token_ceiling == 100
+    assert workspace.start("alpha", repair_task.key, request, "writer").key == repair.key
+
+    repairing = workspace.transition(repair, "RUNNING")
+    workspace.transition(
+        repairing,
+        "REVIEW",
+        result=AgentResult(
+            summary="Saved new patch",
+            usage=ExecutionUsage(input_tokens=90, output_tokens=10),
+            verification={"passed": True},
+            artifacts=[
+                AgentArtifact(
+                    name="Local implementation patch",
+                    reference="new patch",
+                )
+            ],
+        ),
+    )
+    with pytest.raises(ArchitectureGraphError, match="superseded"):
+        workspace.start(
+            "alpha",
+            repair_task.key,
+            request.model_copy(
+                update={
+                    "request_id": uuid4().hex,
+                }
+            ),
+            "writer",
+        )
+    review_request = StartExecution(
+        request_id=uuid4().hex,
+        agent="codex",
+        mode="REVIEW",
+        patch_execution_key=repair.key,
+    )
+    with pytest.raises(ArchitectureGraphError, match="budget is exhausted"):
+        workspace.start("alpha", repair_task.key, review_request, "writer")
+    second_review = workspace.start(
+        "alpha",
+        repair_task.key,
+        review_request.model_copy(update={"additional_review_tokens": 50}),
+        "writer",
+    )
+    assert second_review.repair_token_ceiling == 150
+    examining = workspace.transition(second_review, "RUNNING")
+    workspace.transition(
+        examining,
+        "REVIEW",
+        result=AgentResult(
+            summary="Still needs a scope decision.",
+            review_verdict="blocking",
+            reviewed_target={
+                "kind": "implementation patch",
+                "execution_id": repair.key,
+                "patch_sha256": "b" * 64,
+            },
+        ),
+    )
+    escalated = workspace.repair_draft("alpha", repair_task.key, second_review.key)
+    assert escalated["needs_design_review"]
+    assert escalated["previous_review"]["execution_key"] == review.key
+    next_request = request.model_copy(
+        update={
+            "request_id": uuid4().hex,
+            "repair_review_key": second_review.key,
+        }
+    )
+    with pytest.raises(ArchitectureGraphError, match="design direction"):
+        workspace.start("alpha", repair_task.key, next_request, "writer")
+    with pytest.raises(ArchitectureGraphError, match="criteria or test"):
+        workspace.start(
+            "alpha",
+            repair_task.key,
+            next_request.model_copy(
+                update={
+                    "repair_direction": "Retry against the same checks.",
+                }
+            ),
+            "writer",
+        )
+    directed = workspace.start(
+        "alpha",
+        repair_task.key,
+        next_request.model_copy(
+            update={
+                "repair_direction": "Keep legacy resolution behavior covered by end-to-end tests.",
+                "repair_contract": request.repair_contract.model_copy(
+                    update={
+                        "acceptance_criteria": [
+                            "Preserve legacy resolution and repository ownership"
+                        ],
+                    }
+                ),
+            }
+        ),
+        "writer",
+    )
+    assert directed.repair_direction.startswith("Keep legacy")
+
 
 def test_workspace_routes_require_project_and_writer_grants():
     from types import SimpleNamespace
@@ -347,6 +561,7 @@ def test_workspace_routes_require_project_and_writer_grants():
     workspace = SimpleNamespace(
         entities=lambda project: [], create=lambda project, data, actor: data
     )
+
     async def refresh():
         return None
 

@@ -150,3 +150,20 @@ async def test_probes_are_read_only_and_verify_capabilities(monkeypatch):
         )["ok"] is ok
     assert all(call.method == "GET" for call in calls)
     assert registry.read()[0] == 0
+
+
+@pytest.mark.anyio
+async def test_recommendation_only_accepts_workflow_eligible_agents(monkeypatch):
+    registry = make_registry()
+    executor = TaskExecutor(registry.settings, SimpleNamespace(graph=registry.graph), None)
+    executor.local.url = "http://ollama:11434"
+    executor.providers = {"codex": executor.providers["codex"], "local": executor.local}
+    task = SimpleNamespace(name="Add documentation", description="Explain graph linking")
+
+    async def generate(instruction, prompt):
+        assert '"eligible_agents": ["codex"]' in prompt
+        return {"agent": "local", "reason": "Text drafting"}
+
+    monkeypatch.setattr(executor.local, "generate", generate)
+    with pytest.raises(ArchitectureGraphError, match="eligible agent"):
+        await executor.recommend(task, "FULL_LIFECYCLE")
