@@ -291,7 +291,7 @@ class CodexBridge:
         if repair:
             instructions += (
                 " The staged implementation is the exact reviewed patch. Follow repair_prompt "
-                "as the writer’s instructions for this repair. Preserve unrelated changes."
+                "and repair_direction as the writer’s instructions. Preserve unrelated changes."
             )
         if writable and checkpoint.exists():
             instructions += " Resume from the partial implementation in the checkout. Verify it."

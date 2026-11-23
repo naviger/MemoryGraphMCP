@@ -423,6 +423,79 @@ def test_arango_recovery_and_workspace():
     assert repair.repair_prompt == "Edited repair prompt"
     assert workspace.start("alpha", repair_task.key, request, "writer").key == repair.key
 
+    repairing = workspace.transition(repair, "RUNNING")
+    workspace.transition(
+        repairing,
+        "REVIEW",
+        result=AgentResult(
+            summary="Saved new patch",
+            artifacts=[
+                AgentArtifact(
+                    name="Local implementation patch",
+                    reference="new patch",
+                )
+            ],
+        ),
+    )
+    with pytest.raises(ArchitectureGraphError, match="superseded"):
+        workspace.start(
+            "alpha",
+            repair_task.key,
+            request.model_copy(
+                update={
+                    "request_id": uuid4().hex,
+                }
+            ),
+            "writer",
+        )
+    second_review = workspace.start(
+        "alpha",
+        repair_task.key,
+        StartExecution(
+            request_id=uuid4().hex,
+            agent="codex",
+            mode="REVIEW",
+            patch_execution_key=repair.key,
+        ),
+        "writer",
+    )
+    examining = workspace.transition(second_review, "RUNNING")
+    workspace.transition(
+        examining,
+        "REVIEW",
+        result=AgentResult(
+            summary="Still needs a scope decision.",
+            review_verdict="blocking",
+            reviewed_target={
+                "kind": "implementation patch",
+                "execution_id": repair.key,
+                "patch_sha256": "b" * 64,
+            },
+        ),
+    )
+    escalated = workspace.repair_draft("alpha", repair_task.key, second_review.key)
+    assert escalated["needs_design_review"]
+    assert escalated["previous_review"]["execution_key"] == review.key
+    next_request = request.model_copy(
+        update={
+            "request_id": uuid4().hex,
+            "repair_review_key": second_review.key,
+        }
+    )
+    with pytest.raises(ArchitectureGraphError, match="design direction"):
+        workspace.start("alpha", repair_task.key, next_request, "writer")
+    directed = workspace.start(
+        "alpha",
+        repair_task.key,
+        next_request.model_copy(
+            update={
+                "repair_direction": "Keep legacy resolution behavior covered by end-to-end tests.",
+            }
+        ),
+        "writer",
+    )
+    assert directed.repair_direction.startswith("Keep legacy")
+
 
 def test_workspace_routes_require_project_and_writer_grants():
     from types import SimpleNamespace

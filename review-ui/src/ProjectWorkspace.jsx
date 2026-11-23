@@ -202,6 +202,13 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
   }, [active]);
   const steps = executionSteps(jobs || []);
   const progress = patchProgress(jobs || []);
+  const latestBlocker = steps.find(({ job, result }) =>
+    result?.review_verdict === 'blocking' && result.reviewed_target?.kind === 'implementation patch' &&
+    !progress.superseded.has(result.reviewed_target.execution_id) &&
+    progress.latestReview.get(result.reviewed_target.execution_id) === job.key);
+  const needsDirection = (step) => Boolean((jobs || []).find((job) =>
+    job.key === step.result?.reviewed_target?.execution_id)?.repair_review_key);
+
   const selected = steps.find((step) => step.key === selection) || steps[0];
   const workflows = Object.keys(MODES).filter((value) => Object.values(agents).some((allowed) => allowed.includes(value)));
   const selectedMode = workflows.includes(mode) ? mode : workflows[0] || '';
@@ -220,18 +227,19 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
     setBusy(true); setError('');
     try {
       const draft = await send(`${path}/${job.key}/repair-draft`);
-      setRepair({ ...draft, review: job.key });
+      setRepair({ ...draft, review: job.key, direction: '' });
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
   }
   async function startRepair(event) {
     event.preventDefault();
-    if (!repair?.prompt.trim()) return;
+    if (!repair?.prompt.trim() || (repair.needs_design_review && !repair.direction.trim())) return;
     setBusy(true); setError('');
     try {
       const started = await send(path, {
         request_id: requested, agent: repair.agent, mode: 'IMPLEMENT',
         repair_review_key: repair.review, repair_prompt: repair.prompt,
+        repair_direction: repair.direction.trim() || null,
       });
       setRequested(crypto.randomUUID());
       setRepair(null);
@@ -261,7 +269,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
   return <section className="detail workspace-form">
     <div className="workspace-actions"><h3>{task.name}</h3>
       <button className="button outlined" type="button" onClick={close}>Close</button></div>
-    {canWrite && !active && !['done', 'cancelled'].includes(task.status) && (selectedAgent ? (
+    {canWrite && !active && !latestBlocker && !['done', 'cancelled'].includes(task.status) && (selectedAgent ? (
       <form className="workspace-form" onSubmit={(event) => { event.preventDefault(); submit(); }}>
         <div className="workspace-actions">
           <label>Workflow<select disabled={busy} value={selectedMode} onChange={(event) => { setMode(event.target.value); setRecommendation(null); }}>
@@ -290,6 +298,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
           const mayReview = mayChange && !active && agents.codex?.includes('REVIEW') &&
             job.agent === 'codex' && !progress.reviewed.has(job.key) && !progress.superseded.has(job.key) &&
             result?.artifacts.some((item) => item.name === 'Local implementation patch');
+          const escalated = step.key === latestBlocker?.key && needsDirection(step);
           const mayRepair = mayChange && !active && agents.codex?.includes('IMPLEMENT') &&
             result?.review_verdict === 'blocking' && result.reviewed_target?.kind === 'implementation patch' &&
             !progress.superseded.has(result.reviewed_target.execution_id) &&
@@ -298,7 +307,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
             <button type="button" className="execution-step-select" aria-pressed={selected?.key === step.key}
               onClick={() => setSelection(step.key)}>
               <span className="execution-step-heading"><strong>{stepTitle(step)}</strong>
-                <span className={step.attention ? 'execution-badge attention' : 'execution-badge'}>{step.state}</span></span>
+                <span className={step.attention ? 'execution-badge attention' : 'execution-badge'}>{escalated ? 'Needs design review' : step.state}</span></span>
               {(progress.superseded.has(job.key) || progress.superseded.has(result?.reviewed_target?.execution_id)) &&
                 <span className="muted">Superseded by a revised patch</span>}
               <span className="muted">{job.agent} · {MODES[job.mode]}{step.attempts.length > 0 ?
@@ -313,21 +322,32 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
               {mayReview && <button type="button" className="button outlined" disabled={busy}
                 onClick={() => submit(job, 'review-patch')}>Review this patch</button>}
               {mayRepair && <button type="button" className="button primary" disabled={busy}
-                onClick={() => { setSelection(step.key); prepareRepair(job); }}>Revise patch</button>}
+                onClick={() => { setSelection(step.key); prepareRepair(job); }}>{escalated ? 'Review blockers' : 'Revise patch'}</button>}
             </div>}
           </li>;
         })}
       </ol>
       {selected && <StepDetails step={selected} now={now} navigate={navigate}>
     {repair?.review === selected.job.key && <form className="detail workspace-form" onSubmit={startRepair}>
-      <h5>Revise this patch</h5>
+      <h5>{repair.needs_design_review ? 'Needs design review' : 'Revise this patch'}</h5>
+      {repair.needs_design_review && <>
+        <p>This patch was revised and blocked again. Review both sets of findings and tell the agent what to change about its approach before continuing.</p>
+        {repair.previous_review && <details>
+          <summary>Previous blocking findings</summary>
+          <p className="execution-text">{repair.previous_review.findings}</p>
+        </details>}
+        <label>Design direction<textarea rows={4} maxLength={8000} disabled={busy} required
+          value={repair.direction} onChange={(event) => setRepair({ ...repair, direction: event.target.value })}
+          placeholder="Clarify the expected behavior, narrow the scope, or specify which regression tests to add." /></label>
+      </>}
       <p><strong>Recommended agent and model</strong> · Codex · {repair.model}</p>
       <p>{repair.reason} The new patch will return to Review.</p>
       <p>Source patch SHA-256 <code>{repair.patch_sha256}</code></p>
       <label>Repair prompt<textarea ref={repairPrompt} rows={8} maxLength={8000} required disabled={busy}
         value={repair.prompt} onChange={(event) => setRepair({ ...repair, prompt: event.target.value })} /></label>
       <div className="workspace-actions">
-        <button className="button primary" disabled={busy || active || !repair.prompt.trim()}>Generate revised patch</button>
+        <button className="button primary" disabled={busy || active || !repair.prompt.trim() || (repair.needs_design_review && !repair.direction.trim())}>
+          {repair.needs_design_review ? 'Continue with this direction' : 'Generate revised patch'}</button>
         <button className="button outlined" type="button" disabled={busy} onClick={() => setRepair(null)}>Close</button>
       </div>
     </form>}

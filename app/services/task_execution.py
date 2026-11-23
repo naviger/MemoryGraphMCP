@@ -342,6 +342,7 @@ class TaskExecutor:
                 "patch_execution_key": job.patch_execution_key,
                 "repair_patch_sha256": job.repair_patch_sha256,
                 "repair_prompt": job.repair_prompt,
+                "repair_direction": job.repair_direction,
                 "task": {
                     "key": task.key,
                     "name": task.name,

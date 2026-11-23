@@ -171,13 +171,30 @@ class ProjectWorkspaceRepository:
                 return result, target
         raise ArchitectureGraphError("This review has no blocking findings on an identified patch")
 
+    def previous_blocking_review(self, source, project, task_key, read):
+        if source.project_key != project or source.task_key != task_key or source.agent != "codex":
+            raise ArchitectureGraphError("Implementation does not belong to this task")
+        if not source.repair_review_key:
+            return None
+        earlier = read(source.repair_review_key)
+        if not isinstance(earlier, Execution):
+            raise ArchitectureGraphError("The previous review is unavailable")
+        result, _ = self.repair_target(earlier, project, task_key)
+        return {"execution_key": earlier.key, "findings": result["summary"]}
+
     def repair_draft(self, project, task_key, review_key):
         self.task(project, task_key)
         review = self.graph.read_entity(review_key)
         if not isinstance(review, Execution):
             raise ArchitectureGraphError("Review does not belong to this task")
         result, target = self.repair_target(review, project, task_key)
+        source = self.graph.read_entity(target["execution_id"])
+        if not isinstance(source, Execution):
+            raise ArchitectureGraphError("The reviewed implementation is unavailable")
+        earlier = self.previous_blocking_review(source, project, task_key, self.graph.read_entity)
         return {
+            "needs_design_review": earlier is not None,
+            "previous_review": earlier,
             "agent": "codex",
             "model": "Codex CLI default",
             "reason": "Codex can resume this exact local patch in an isolated clone.",
@@ -207,6 +224,7 @@ class ProjectWorkspaceRepository:
                     execution.patch_execution_key if not execution.repair_review_key else None,
                     execution.repair_review_key,
                     execution.repair_prompt,
+                    execution.repair_direction,
                 ) != (
                     command.agent,
                     command.mode,
@@ -214,6 +232,7 @@ class ProjectWorkspaceRepository:
                     command.patch_execution_key,
                     command.repair_review_key,
                     command.repair_prompt,
+                    command.repair_direction,
                 ):
                     raise ArchitectureGraphError("Execution request ID was already used")
                 return execution
@@ -243,7 +262,7 @@ class ProjectWorkspaceRepository:
                 )
                 _, target = self.repair_target(review, project, key)
                 source_key, patch_hash = target["execution_id"], target["patch_sha256"]
-            elif command.repair_prompt:
+            elif command.repair_prompt or command.repair_direction:
                 raise ArchitectureGraphError("A repair prompt requires a blocking review")
             if source_key:
                 if not command.repair_review_key and (
@@ -268,6 +287,42 @@ class ProjectWorkspaceRepository:
                     )
                 ):
                     raise ArchitectureGraphError("Execution has no reviewable patch for this task")
+                if command.repair_review_key:
+
+                    def read_in_transaction(execution_key):
+                        row = nodes.get(execution_key)
+                        if row and row["entity_type"] == "Execution":
+                            return Execution.model_validate(row)
+                        return None
+
+                    earlier = self.previous_blocking_review(
+                        source, project, key, read_in_transaction
+                    )
+                    if earlier and not command.repair_direction:
+                        raise ArchitectureGraphError(
+                            "This revised patch is blocked again. Record design direction first."
+                        )
+                    superseded = tx.aql.execute(
+                        """
+                        FOR job IN @@nodes
+                            FILTER job.entity_type == "Execution" AND job.task_key == @task
+                            FILTER job.project_key == @project
+                            FILTER job.patch_execution_key == @source
+                            FILTER job.repair_review_key != null
+                            FOR result IN job.results
+                                FOR artifact IN result.artifacts
+                                    FILTER artifact.name == "Local implementation patch"
+                                    LIMIT 1 RETURN true
+                        """,
+                        bind_vars={
+                            "@nodes": self.graph._entities,
+                            "task": key,
+                            "project": project,
+                            "source": source_key,
+                        },
+                    )
+                    if next(iter(superseded), False):
+                        raise ArchitectureGraphError("A newer patch has superseded this review")
             job = Execution(
                 key=execution_key,
                 name=f"{task.name} execution"[:500],
@@ -277,6 +332,7 @@ class ProjectWorkspaceRepository:
                 repair_review_key=command.repair_review_key,
                 repair_patch_sha256=patch_hash,
                 repair_prompt=command.repair_prompt,
+                repair_direction=command.repair_direction,
                 requested_by=actor,
                 agent=command.agent,
                 mode=command.mode,

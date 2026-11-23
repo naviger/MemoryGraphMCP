@@ -45,6 +45,7 @@ class StartExecution(BaseModel):
     patch_execution_key: MemoryKey | None = None
     repair_review_key: MemoryKey | None = None
     repair_prompt: WorkText | None = None
+    repair_direction: WorkText | None = None
 
 
 class TaskUpdate(BaseModel):
