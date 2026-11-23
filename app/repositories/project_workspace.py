@@ -241,6 +241,110 @@ class ProjectWorkspaceRepository:
             )[:8000],
         }
 
+    def apply_approved(self, project, key, review_key, actor) -> Execution:
+        task = self.task(project, key)
+        now = datetime.now(UTC)
+        with self.graph._transaction() as tx:
+            nodes = tx.collection(self.graph._entities)
+            task = self._task_in_transaction(tx, project, task)
+            review = Execution.model_validate(
+                self.graph._require_entity_type(nodes, review_key, "Execution")
+            )
+            result = review.results[-1] if review.results else {}
+            target = result.get("reviewed_target") or {}
+            if (
+                (review.project_key, review.task_key, review.agent) != (project, key, "codex")
+                or review.state not in {"REVIEW", "COMPLETED"}
+                or result.get("review_verdict") != "passed"
+                or target.get("kind") != "implementation patch"
+                or not all(
+                    target.get(field) for field in ("execution_id", "base_commit", "patch_sha256")
+                )
+                or not review.repair_contract
+                or not (result.get("verification") or {}).get("passed")
+            ):
+                raise ArchitectureGraphError(
+                    "A passing exact-patch review with required tests is needed"
+                )
+            source_key = target["execution_id"]
+            source = Execution.model_validate(
+                self.graph._require_entity_type(nodes, source_key, "Execution")
+            )
+            if (source.project_key, source.task_key, source.agent) != (
+                project,
+                key,
+                "codex",
+            ) or not any(
+                artifact.get("name") == "Local implementation patch"
+                and artifact.get("sha256") == target.get("patch_sha256")
+                for entry in source.results
+                for artifact in entry.get("artifacts", [])
+            ):
+                raise ArchitectureGraphError("The reviewed patch is unavailable for this task")
+            execution_key = architecture_key("approved-patch", project, key, source_key)
+            existing = nodes.get(execution_key)
+            if existing:
+                return Execution.model_validate(existing)
+            if task.metadata.get("active_execution") or task.status == "cancelled":
+                raise ArchitectureGraphError(
+                    "The task already has an active execution or is cancelled"
+                )
+            newer = tx.aql.execute(
+                """
+                FOR job IN @@nodes
+                    FILTER job.entity_type == "Execution" AND job.project_key == @project
+                    FILTER job.task_key == @task AND job.patch_execution_key == @source
+                    FILTER job._key != @review
+                    FOR entry IN job.results
+                        FILTER (job.repair_review_key != null
+                            AND "Local implementation patch" IN entry.artifacts[*].name)
+                            OR (job.created_at >= @created
+                            AND entry.reviewed_target.kind == "implementation patch"
+                            AND entry.review_verdict != null)
+                        LIMIT 1 RETURN true
+                """,
+                bind_vars={
+                    "@nodes": self.graph._entities,
+                    "project": project,
+                    "task": key,
+                    "source": source_key,
+                    "review": review.key,
+                    "created": review.model_dump(mode="json")["created_at"],
+                },
+            )
+            if next(iter(newer), False):
+                raise ArchitectureGraphError("A newer patch or review superseded this approval")
+            job = Execution(
+                key=execution_key,
+                name=f"{task.name} approved patch"[:500],
+                project_key=project,
+                task_key=key,
+                agent="codex",
+                mode="APPLY_APPROVED",
+                patch_execution_key=source_key,
+                approved_review_key=review.key,
+                approved_patch=target,
+                repair_contract=review.repair_contract,
+                requested_by=actor,
+                created_at=now,
+                updated_at=now,
+                timeline=[{"state": "READY", "timestamp": now.isoformat(), "actor": actor}],
+            )
+            self.put(tx, job)
+            self.put(
+                tx,
+                task.model_copy(
+                    update={
+                        "metadata": {**task.metadata, "active_execution": job.key},
+                    }
+                ),
+            )
+            self.link(tx, project, job.key, "defines", now)
+            self.link(tx, task.key, job.key, "produced", now)
+            self.link(tx, job.key, review.key, "references", now)
+            self.link(tx, job.key, source.key, "references", now)
+        return job
+
     def start(self, project, key, command: StartExecution, actor: str) -> Execution:
         task = self.task(project, key)
         now = datetime.now(UTC)
@@ -492,7 +596,8 @@ class ProjectWorkspaceRepository:
                 job.state not in {"BLOCKED", "FAILED"}
                 or active
                 and active != job.key
-                or task.status in {"done", "cancelled"}
+                or task.status == "cancelled"
+                or (task.status == "done" and not job.approved_review_key)
             ):
                 raise ArchitectureGraphError(
                     "This execution cannot be retried in its current state"
@@ -501,7 +606,7 @@ class ProjectWorkspaceRepository:
                 tx,
                 task.model_copy(
                     update={
-                        "status": "in_progress",
+                        "status": task.status if job.approved_review_key else "in_progress",
                         "metadata": {**task.metadata, "active_execution": job.key},
                     }
                 ),

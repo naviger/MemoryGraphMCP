@@ -527,6 +527,95 @@ def test_arango_recovery_and_workspace():
         "writer",
     )
     assert directed.repair_direction.startswith("Keep legacy")
+    with pytest.raises(ArchitectureGraphError, match="passing exact-patch review"):
+        workspace.apply_approved("alpha", repair_task.key, second_review.key, "writer")
+    digest = "b" * 64
+    verified = {"passed": True, "command": "pytest tests/test_restore.py"}
+    workspace.transition(
+        workspace.transition(directed, "RUNNING"),
+        "REVIEW",
+        result=AgentResult(
+            summary="Saved directed patch",
+            verification=verified,
+            artifacts=[
+                AgentArtifact(
+                    name="Local implementation patch",
+                    reference="verified patch",
+                    sha256=digest,
+                )
+            ],
+        ),
+    )
+    passing = workspace.start(
+        "alpha",
+        repair_task.key,
+        StartExecution(
+            request_id=uuid4().hex,
+            agent="codex",
+            mode="REVIEW",
+            patch_execution_key=directed.key,
+            additional_review_tokens=50,
+        ),
+        "writer",
+    )
+    target = {
+        "kind": "implementation patch",
+        "execution_id": directed.key,
+        "patch_sha256": digest,
+        "base_commit": "a" * 40,
+    }
+    workspace.transition(
+        workspace.transition(passing, "RUNNING"),
+        "REVIEW",
+        result=AgentResult(
+            summary="Reviewed directed patch",
+            reviewed_target=target,
+            review_verdict="passed",
+            verification=verified,
+        ),
+    )
+    with pytest.raises(ArchitectureGraphError):
+        workspace.apply_approved("beta", repair_task.key, passing.key, "other-writer")
+    approved = workspace.apply_approved("alpha", repair_task.key, passing.key, "approving-writer")
+    assert approved.mode == "APPLY_APPROVED"
+    assert approved.requested_by == "approving-writer"
+    assert approved.approved_patch == target
+    with pytest.raises(ArchitectureGraphError, match="managed by the task workflow"):
+        graph.put_entity(approved)
+    assert approved.repair_contract == passing.repair_contract
+    assert (
+        workspace.apply_approved("alpha", repair_task.key, passing.key, "writer").key
+        == approved.key
+    )
+
+    class ApprovedAgent:
+        async def perform(self, phase, execution_key, prompt):
+            assert execution_key == approved.key and digest in prompt
+            if phase == "apply":
+                return AgentResult(
+                    summary="Applied",
+                    verification=verified,
+                    applied_commit={
+                        **target,
+                        "commit": "c" * 40,
+                        "branch": f"codex/task-fix-{approved.key[:12]}",
+                    },
+                )
+            assert phase == "review_commit"
+            return AgentResult(
+                summary="Commit passed review",
+                review_verdict="passed",
+                reviewed_target={"kind": "fix branch commit", "commit": "c" * 40},
+            )
+
+    executor.providers["codex"] = ApprovedAgent()
+    anyio.run(executor.process, approved)
+    applied = next(item for item in workspace.ready() if item.key == approved.key)
+    assert applied.phase == 1
+    anyio.run(executor.process, applied)
+    completed = workspace.executions("alpha", repair_task.key)[0]
+    assert completed.key == approved.key and completed.state == "COMPLETED"
+    assert graph.read_entity(repair_task.key).status == "done"
 
 
 def test_workspace_routes_require_project_and_writer_grants():
@@ -559,13 +648,23 @@ def test_workspace_routes_require_project_and_writer_grants():
             current_project_access.reset(key)
 
     workspace = SimpleNamespace(
-        entities=lambda project: [], create=lambda project, data, actor: data
+        entities=lambda project: [],
+        create=lambda project, data, actor: data,
+        apply_approved=lambda project, task, review, actor: {"review": review, "actor": actor},
     )
 
     async def refresh():
         return None
 
-    executor = SimpleNamespace(modes=lambda: {}, local=SimpleNamespace(url=None), refresh=refresh)
+    async def can_apply_approved():
+        return True
+
+    executor = SimpleNamespace(
+        modes=lambda: {},
+        local=SimpleNamespace(url=None),
+        refresh=refresh,
+        can_apply_approved=can_apply_approved,
+    )
     app.include_router(build_workspace_router("/api/review", workspace, executor, None))
     api = TestClient(app)
     path = "/api/review/projects/alpha/workspace"
@@ -574,3 +673,10 @@ def test_workspace_routes_require_project_and_writer_grants():
     assert api.post(path, headers={"role": "reader"}, json=data).status_code == 403
     assert api.post(path, headers={"role": "writer"}, json=data).status_code == 200
     assert api.get(path.replace("alpha", "beta"), headers={"role": "writer"}).status_code == 403
+
+    apply = f"{path}/tasks/task/executions/review/apply-approved"
+    assert api.post(apply, headers={"role": "reader"}).status_code == 403
+    assert api.post(apply.replace("alpha", "beta"), headers={"role": "writer"}).status_code == 403
+    approved = api.post(apply, headers={"role": "writer"})
+    assert approved.status_code == 200
+    assert approved.json() == {"review": "review", "actor": "writer"}

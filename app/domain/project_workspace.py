@@ -80,6 +80,7 @@ class AgentResult(BaseModel):
     reviewed_target: dict[str, str] | None = None
     repaired_target: dict[str, str] | None = None
     verification: RepairVerification | None = None
+    applied_commit: dict[str, str] | None = None
 
 
 class RecommendAgent(BaseModel):

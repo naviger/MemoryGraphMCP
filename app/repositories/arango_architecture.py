@@ -22,6 +22,7 @@ from app.domain.architecture import (
     ConstraintInput,
     ConversationSummary,
     EntityType,
+    Execution,
     Goal,
     Observation,
     Project,
@@ -115,6 +116,8 @@ class ArangoArchitectureRepository:
         return {**entity.model_dump(mode="json"), "_key": entity.key}
 
     def put_entity(self, entity: ArchitectureEntity) -> ArchitectureEntity:
+        if isinstance(entity, Execution):
+            raise ArchitectureGraphError("Task executions are managed by the task workflow")
         if isinstance(entity, Observation):
             raise ArchitectureGraphError(
                 "Use add_observation to record an observation and its links"

@@ -109,7 +109,7 @@ function ReviewResult({ result, navigate }) {
       <>the patch from <PreviewLink destination="entities" entityKey={target.execution_id} navigate={navigate}>
         execution {target.execution_id.slice(0, 12)}
       </PreviewLink><br />Base commit <code>{target.base_commit}</code><br />Patch SHA-256 <code>{target.patch_sha256}</code></>
-    ) : <>checkout commit <code>{target.commit}</code></>}</p>
+    ) : <>{target.kind} <code>{target.commit}</code></>}</p>
   </div>;
 }
 
@@ -137,14 +137,19 @@ function StepDetails({ step, now, navigate, children }) {
   return <section className="execution-inspector" aria-label="Selected phase">
     <header>
       <h4>{stepTitle(step)}</h4>
-      <p>{MODES[job.mode]} · {job.agent} · {step.state}</p>
+      <p>{job.mode === 'APPLY_APPROVED' ? 'Apply approved patch' : MODES[job.mode]} · {job.agent} · {step.state}</p>
     </header>
     <StepTimes step={step} now={now} />
     <p><PreviewLink destination="entities" entityKey={job.key} navigate={navigate}>Open execution in the graph</PreviewLink></p>
     {step.current && job.failure && <p role="alert" className="status error">{job.failure}</p>}
     {step.current && job.state === 'BLOCKED' && job.lease_until && <p>Automatic retry scheduled for {stamp(job.lease_until)}.</p>}
     {result && <section>
-      <ReviewResult result={result} navigate={navigate} />
+      {result.applied_commit && <div className="status">
+        <p>Local fix branch <code>{result.applied_commit.branch}</code></p>
+        <p>Commit <code>{result.applied_commit.commit}</code></p>
+        <p>Publishing requires separate approval.</p>
+      </div>}
+      {(!result.applied_commit || result.reviewed_target) && <ReviewResult result={result} navigate={navigate} />}
       {result.verification && <details open={!result.verification.passed}>
         <summary>{result.verification.passed ? 'Required regression tests passed' : 'Required regression tests failed'}</summary>
         <p><code>{result.verification.command}</code></p>
@@ -185,6 +190,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
   const [recommendation, setRecommendation] = useState(null);
   const [repair, setRepair] = useState(null);
   const [reviewBudget, setReviewBudget] = useState(null);
+  const [applyApproval, setApplyApproval] = useState(null);
   const repairPrompt = useRef(null);
   const repairReview = repair?.review;
   useEffect(() => {
@@ -276,7 +282,11 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
     setBusy(true);
     setError('');
     try {
-      if (action === 'review-patch') {
+      if (action === 'apply-approved') {
+        const started = await send(`${path}/${job.key}/apply-approved`, {});
+        setApplyApproval(null);
+        setSelection(`${started.key}/0`);
+      } else if (action === 'review-patch') {
         const started = await send(path, {
           request_id: requested, agent: 'codex', mode: 'REVIEW',
           patch_execution_key: job.key, additional_review_tokens: additionalReviewTokens,
@@ -328,11 +338,17 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
           const { job, result, current } = step;
           const mayChange = canWrite && task.status !== 'cancelled';
           const mayCancel = mayChange && current && job.state !== 'CANCEL_REQUESTED' && ACTIVE.includes(job.state);
-          const mayRetry = mayChange && current && ['BLOCKED', 'FAILED'].includes(job.state) && task.status !== 'done';
+          const mayRetry = mayChange && current && ['BLOCKED', 'FAILED'].includes(job.state) && (task.status !== 'done' || job.mode === 'APPLY_APPROVED');
           const mayReview = mayChange && !active && agents.codex?.includes('REVIEW') &&
             job.agent === 'codex' && !progress.reviewed.has(job.key) && !progress.superseded.has(job.key) &&
             (!job.repair_contract || result?.verification?.passed) &&
             result?.artifacts.some((item) => item.name === 'Local implementation patch');
+          const target = result?.reviewed_target;
+          const mayApply = mayChange && !active && task.status !== 'cancelled' &&
+            agents.codex?.includes('REVIEW') && target?.kind === 'implementation patch' &&
+            result.review_verdict === 'passed' && result.verification?.passed && job.repair_contract &&
+            !progress.superseded.has(target.execution_id) && !progress.applications.has(target.execution_id) &&
+            progress.latestReview.get(target.execution_id) === job.key;
           const escalated = step.key === latestBlocker?.key && needsDirection(step);
           const mayRepair = mayChange && !active && agents.codex?.includes('IMPLEMENT') &&
             result?.review_verdict === 'blocking' && result.reviewed_target?.kind === 'implementation patch' &&
@@ -345,17 +361,19 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
                 <span className={step.attention ? 'execution-badge attention' : 'execution-badge'}>{escalated ? 'Needs design review' : step.state}</span></span>
               {(progress.superseded.has(job.key) || progress.superseded.has(result?.reviewed_target?.execution_id)) &&
                 <span className="muted">Superseded by a revised patch</span>}
-              <span className="muted">{job.agent} · {MODES[job.mode]}{step.attempts.length > 0 ?
+              <span className="muted">{job.agent} · {job.mode === 'APPLY_APPROVED' ? 'Apply approved patch' : MODES[job.mode]}{step.attempts.length > 0 ?
                 ` · ${step.attempts.length} ${step.attempts.length === 1 ? 'attempt' : 'attempts'}` : ''}</span>
               <StepTimes step={step} now={now} compact />
             </button>
-            {(mayCancel || mayRetry || mayReview || mayRepair) && <div className="execution-step-actions">
+            {(mayCancel || mayRetry || mayReview || mayRepair || mayApply) && <div className="execution-step-actions">
               {mayRetry && <button type="button" className="button primary" disabled={busy || (job.state === 'FAILED' && active)}
                 onClick={() => submit(job, 'retry')}>Retry now</button>}
               {mayCancel && <button type="button" className="button outlined" disabled={busy}
                 onClick={() => submit(job)}>Cancel execution</button>}
               {mayReview && <button type="button" className="button outlined" disabled={busy}
                 onClick={() => submit(job, 'review-patch')}>Review this patch</button>}
+              {mayApply && <button type="button" className="button primary" disabled={busy}
+                onClick={() => { setSelection(step.key); setApplyApproval(step.key); }}>Apply approved patch</button>}
               {mayRepair && <button type="button" className="button primary" disabled={busy}
                 onClick={() => { setSelection(step.key); prepareRepair(job); }}>{escalated ? 'Review blockers' : 'Revise patch'}</button>}
             </div>}
@@ -363,6 +381,16 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
         })}
       </ol>
       {selected && <StepDetails step={selected} now={now} navigate={navigate}>
+    {applyApproval === selected.key && <form className="detail workspace-form"
+      onSubmit={(event) => { event.preventDefault(); submit(selected.job, 'apply-approved'); }}>
+      <h5>Approve application to a local fix branch</h5>
+      <p>The bridge will commit the reviewed patch, rerun the required checks below, and run a commit review if they pass. Publishing requires separate approval.</p>
+      <ul>{selected.job.repair_contract.test_paths.map((test) => <li key={test}><code>{test}</code></li>)}</ul>
+      <div className="workspace-actions">
+        <button className="button primary" disabled={busy || active}>Apply to local fix branch</button>
+        <button type="button" className="button outlined" onClick={() => setApplyApproval(null)}>Cancel</button>
+      </div>
+    </form>}
     {reviewBudget?.job.key === selected.job.key && <form className="detail workspace-form"
       onSubmit={(event) => { event.preventDefault(); submit(reviewBudget.job, 'review-patch', Number(reviewBudget.tokens)); }}>
       <h5>Approve additional tokens for this review</h5>
