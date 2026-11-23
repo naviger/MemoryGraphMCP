@@ -211,20 +211,22 @@ class ArangoMemoryRepository:
             )
             return ArchitecturalDecisionRecord.model_validate(updated)
 
-    def find_adr_conflicts(self, request: ADRConflictQuery) -> list[ADRConflict]:
+    def find_adr_conflicts(self, request: ADRConflictQuery, *, allowed_document_keys: list[str] | None = None) -> list[ADRConflict]:
         return self._find_adr_conflicts(
             self.database, self.read_adr(request.key), as_of=request.as_of, limit=request.limit,
+            allowed_document_keys=allowed_document_keys,
         )
 
     def list_adr_conflicts(
-        self, request: ADRConflictListQuery, *, document_keys: list[str] | None = None
+        self, request: ADRConflictListQuery, *, document_keys: list[str] | None = None,
+        require_both: bool = False,
     ) -> list[ADRConflict]:
-        return self._query_adr_conflicts(self.database, request, document_keys=document_keys)
+        return self._query_adr_conflicts(self.database, request, document_keys=document_keys, require_both=require_both)
 
     def _find_adr_conflicts(
         self, database: StandardDatabase | TransactionDatabase,
         original: ArchitecturalDecisionRecord, *, as_of: date | None, limit: int,
-        competing_key: str | None = None,
+        competing_key: str | None = None, allowed_document_keys: list[str] | None = None,
     ) -> list[ADRConflict]:
         if original.conflict_scope is None:
             raise ADRError("Set a topic and system or environment before checking this ADR")
@@ -241,12 +243,13 @@ class ArangoMemoryRepository:
         return self._query_adr_conflicts(
             database, ADRConflictListQuery(as_of=as_of, limit=limit),
             key=original.key, competing_key=competing_key,
+            document_keys=allowed_document_keys, require_both=allowed_document_keys is not None,
         )
 
     def _query_adr_conflicts(
         self, database: StandardDatabase | TransactionDatabase, request: ADRConflictListQuery,
         *, key: str | None = None, competing_key: str | None = None,
-        document_keys: list[str] | None = None,
+        document_keys: list[str] | None = None, require_both: bool = False,
     ) -> list[ADRConflict]:
         query = """
         FOR original IN @@documents
@@ -263,8 +266,10 @@ class ArangoMemoryRepository:
 
             FOR doc IN @@documents
                 FILTER @key == null ? original._key < doc._key : original._key != doc._key
-                FILTER @document_keys == null OR original._key IN @document_keys
-                    OR doc._key IN @document_keys
+                FILTER @document_keys == null OR (
+                    @require_both ? (original._key IN @document_keys AND doc._key IN @document_keys)
+                        : (original._key IN @document_keys OR doc._key IN @document_keys)
+                )
                 FILTER @competing_key == null OR doc._key == @competing_key
                 FILTER doc.kind == "adr" AND doc.conflict_scope.topic == original.conflict_scope.topic
                 FILTER NOT_NULL(doc.namespace, "default") == NOT_NULL(original.namespace, "default")
@@ -322,7 +327,7 @@ class ArangoMemoryRepository:
                 "@edges": self._config.edges_collection,
                 "key": key,
                 "competing_key": competing_key,
-                "document_keys": document_keys,
+                "document_keys": document_keys, "require_both": require_both,
                 "system": request.system,
                 "environment": request.environment,
                 "as_of": request.as_of.isoformat() if request.as_of else None,
@@ -368,7 +373,7 @@ class ArangoMemoryRepository:
         )
         return [OverdueValidation.model_validate(row) for row in rows]
 
-    def list_resolved_adr_conflicts(self, request: ADRConflictListQuery) -> list[ResolvedADRConflict]:
+    def list_resolved_adr_conflicts(self, request: ADRConflictListQuery, *, allowed_document_keys: list[str] | None = None) -> list[ResolvedADRConflict]:
         query = """
         FOR edge IN @@edges
             FILTER edge.relation == "adr_conflict_resolution"
@@ -380,6 +385,7 @@ class ArangoMemoryRepository:
             LET original = DOCUMENT(edge._from)
             LET competing = DOCUMENT(edge._to)
             FILTER original.kind == "adr" AND competing.kind == "adr"
+            FILTER @allowed == null OR (original._key IN @allowed AND competing._key IN @allowed)
             LET system = HAS(edge, "system") ? edge.system
                 : NOT_NULL(original.conflict_scope.system, competing.conflict_scope.system)
             LET environment = HAS(edge, "environment") ? edge.environment
@@ -400,6 +406,7 @@ class ArangoMemoryRepository:
         cursor = self.database.aql.execute(
             query,
             bind_vars={
+                "allowed": allowed_document_keys,
                 "@edges": self._config.edges_collection,
                 "document_prefix": f"{self._config.documents_collection}/",
                 "system": request.system,
@@ -623,19 +630,22 @@ class ArangoMemoryRepository:
             },
         ))
 
-    def effectiveness_resolutions(self, document_keys: list[str], start: date | None, end: date | None) -> int:
+    def effectiveness_resolutions(
+        self, document_keys: list[str], start: date | None, end: date | None, *, require_both: bool = False,
+    ) -> int:
         rows = self.database.aql.execute(
             """
             FOR edge IN @@edges
                 FILTER edge.relation == "adr_conflict_resolution"
-                FILTER edge.source_key IN @keys OR edge.target_key IN @keys
+                FILTER @both ? (edge.source_key IN @keys AND edge.target_key IN @keys)
+                    : (edge.source_key IN @keys OR edge.target_key IN @keys)
                 LET day = LEFT(edge.resolved_at, 10)
                 FILTER (@start == null OR day >= @start) AND (@end == null OR day <= @end)
                 COLLECT WITH COUNT INTO total
                 RETURN total
             """,
             bind_vars={
-                "@edges": self._config.edges_collection, "keys": document_keys,
+                "@edges": self._config.edges_collection, "both": require_both, "keys": document_keys,
                 "start": start.isoformat() if start else None, "end": end.isoformat() if end else None,
             },
         )
@@ -944,10 +954,16 @@ class ArangoMemoryRepository:
             )
         return sorted(fused, key=lambda hit: hit.score, reverse=True)[: request.limit]
 
-    def find_related_entities(self, request: GraphTraversalRequest) -> list[RelatedEntity]:
+    def find_related_entities(self, request: GraphTraversalRequest, *, allowed_document_keys: list[str] | None = None) -> list[RelatedEntity]:
+        if allowed_document_keys is not None and request.seed_entity_id not in {
+            self._document_id(key) for key in allowed_document_keys
+        }:
+            return []
         query = """
         FOR vertex, edge, path IN 1..@depth OUTBOUND @seed @@edges
-            PRUNE edge.relation == "adr_conflict_resolution"
+            PRUNE blocked = (edge != null AND edge.relation == "adr_conflict_resolution")
+                OR (@allowed != null AND vertex._id NOT IN @allowed)
+            FILTER !blocked
             FILTER edge.relation != "adr_conflict_resolution"
             LIMIT @limit
             RETURN {
@@ -966,6 +982,8 @@ class ArangoMemoryRepository:
             query,
             bind_vars={
                 "seed": request.seed_entity_id,
+                "allowed": [self._document_id(key) for key in allowed_document_keys]
+                    if allowed_document_keys is not None else None,
                 "depth": request.depth,
                 "limit": request.limit,
                 "@edges": self._config.edges_collection,

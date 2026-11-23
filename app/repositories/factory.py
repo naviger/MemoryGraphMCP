@@ -5,7 +5,9 @@ from app.repositories.arango_repository import ArangoMemoryRepository, ArangoRep
 
 
 def build_repository(settings: Settings) -> ArangoMemoryRepository:
-    password = settings.arango_password or settings.arango_root_password
+    password = settings.arango_password
+    if not password and settings.arango_username == "root":
+        password = settings.arango_root_password
     return ArangoMemoryRepository(
         ArangoRepositoryConfig(
             architecture_entities_collection=settings.arango_architecture_entities_collection,

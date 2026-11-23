@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import Middleware
 
+from app.auth.project_access import ProjectAccessDenied, current_project_access
 from app.config.settings import Settings
 from app.mcp.prompts.templates import register_prompts
 from app.mcp.resources.catalog import register_resources
@@ -21,6 +24,16 @@ from app.services.knowledge_base import StaticKnowledgeBase
 from app.services.review_queue import ReviewQueueService
 from app.services.search_service import MemorySearchService
 from app.services.token_usage import TokenUsageService
+
+
+class ProjectAccessMiddleware(Middleware):
+    async def on_call_tool(self, context, call_next):
+        if current_project_access.get() is None:
+            raise ToolError("Project access is required")
+        try:
+            return await call_next(context)
+        except ProjectAccessDenied as exc:
+            raise ToolError(str(exc)) from exc
 
 
 def build_mcp_server(
@@ -51,6 +64,8 @@ def build_mcp_server(
         ),
         version=settings.app_version,
     )
+    if settings.project_authorization_required:
+        server.add_middleware(ProjectAccessMiddleware())
     register_resources(server, knowledge_base)
     register_search_tools(server, service)
     if architecture_service is not None:

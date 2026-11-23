@@ -275,7 +275,7 @@ class ArangoArchitectureRepository:
         ))
 
     def capture_review(
-        self, project_key: str | None, limit: int, as_of: str | None,
+        self, project_key: str | None, limit: int, as_of: str | None, *, allowed_projects: list[str] | None = None, allowed_entity_keys: list[str] | None = None,
     ) -> list[CaptureReviewItem]:
         rows = self._database().aql.execute(
             """
@@ -284,14 +284,24 @@ class ArangoArchitectureRepository:
                 LET project = node.metadata.capture_project
                 FILTER IS_STRING(project) AND (@project == null OR project == @project)
                 FILTER @as_of == null OR LEFT(node.timestamp, 10) <= @as_of
+                FILTER @projects == null OR project IN @projects
+                FILTER @entities_allowed == null OR node._key IN @entities_allowed
+                LET suggestions = (
+                    FOR link IN node.suggestions
+                        FILTER @entities_allowed == null OR
+                            (link.source_key IN @entities_allowed AND link.target_key IN @entities_allowed)
+                        RETURN link
+                )
+                FILTER LENGTH(suggestions) > 0
                 SORT node.timestamp DESC, node._key DESC
                 LIMIT @limit
                 RETURN {key: node._key, project_key: project, summary: node.summary,
-                        timestamp: node.timestamp, suggestions: node.suggestions}
+                        timestamp: node.timestamp, suggestions}
             """,
             bind_vars={
                 "@entities": self._entities, "project": project_key,
-                "limit": limit, "as_of": as_of,
+                "limit": limit, "as_of": as_of, "projects": allowed_projects,
+                "entities_allowed": allowed_entity_keys,
             },
         )
         return [CaptureReviewItem.model_validate(row) for row in rows]
@@ -1078,15 +1088,16 @@ class ArangoArchitectureRepository:
             return result
 
     def query_usage(
-        self, scope: UsageScope, project: str | None, session: str | None,
+        self, scope: UsageScope, project: str | None, session: str | None, *, allowed_projects: list[str] | None = None,
     ) -> tuple[list[dict], list[UsageReceipt]]:
         if (scope == "session" and not session) or (scope == "project" and not project):
             return [], []
         database = self._database()
-        bindings = {"@events": self._events, "scope": scope, "project": project, "session": session}
+        bindings = {"@events": self._events, "scope": scope, "project": project, "session": session, "allowed": allowed_projects}
         selection = """
         FOR row IN @@events
             FILTER row.event_type == "retrieval.usage"
+            FILTER @allowed == null OR row.project_key IN @allowed
             FILTER @scope != "project" OR row.project_key == @project
             FILTER @scope != "session" OR row.usage_session == @session
         """
@@ -1161,14 +1172,14 @@ class ArangoArchitectureRepository:
         return False
 
     def effectiveness_graph(
-        self, project: str, allowed: list[str], repositories: list[str], repository: str | None,
+        self, project: str, allowed: list[str], repositories: list[str], repository: str | None, *, strict_scope: bool = False,
     ) -> dict:
         rows = self._database().aql.execute(
             """
             WITH @@entities
             LET owned = (
                 FOR node IN @@entities
-                    FILTER node.repository IN @repositories AND node.index_state == "stale"
+                    FILTER !@strict AND node.repository IN @repositories AND node.index_state == "stale"
                     RETURN node._key
             )
             LET seeds = @repository == null ? @allowed : (
@@ -1186,7 +1197,7 @@ class ArangoArchitectureRepository:
                         FILTER (node._key IN @allowed AND node.entity_type IN
                                 ["ADR", "Constraint", "Goal", "Observation", "Task", "TestSuite"]
                                 AND edge.relationship_type != "uses")
-                            OR (node.entity_type IN ["ADR", "Constraint", "Goal"] AND edge.relationship_type IN
+                            OR (!@strict AND node.entity_type IN ["ADR", "Constraint", "Goal"] AND edge.relationship_type IN
                                 ["implements", "constrained_by", "supports_goal", "validated_by"])
                         RETURN node._key
             )
@@ -1213,7 +1224,7 @@ class ArangoArchitectureRepository:
             """,
             bind_vars={
                 "@entities": self._entities, "@edges": self._edges, "entities_name": self._entities,
-                "project": project, "allowed": allowed, "repositories": repositories, "repository": repository,
+                "strict": strict_scope, "project": project, "allowed": allowed, "repositories": repositories, "repository": repository,
             },
         )
         return next(iter(rows))
@@ -1374,20 +1385,34 @@ class ArangoArchitectureRepository:
         )
         return [Constraint.model_validate(row) for row in rows]
 
-    def project_scope(self, key: str) -> ProjectScope:
+    def project_access_keys(self) -> list[str]:
+        return list(self._database().aql.execute(
+            "FOR node IN @@entities FILTER node.entity_type == 'Project' RETURN node._key",
+            bind_vars={"@entities": self._entities},
+        ))
+
+    def project_scope(self, key: str, *, strict_scope: bool = False) -> ProjectScope:
         rows = self._database().aql.execute(
             """
             WITH @@entities
             LET direct = (
                 FOR node, edge IN 1..1 ANY @seed @@edges
                     FILTER node.index_state != "stale" AND node.entity_type != "Project"
-                    FILTER edge.relationship_type != "uses"
+                    FILTER @strict ? edge.relationship_type IN ["defines", "related_to", "references"]
+                        : edge.relationship_type != "uses"
                     RETURN DISTINCT node._key
             )
             LET repositories = (
                 FOR key IN direct
                     LET node = DOCUMENT(@entities, key)
                     FILTER node.entity_type == "Repository" AND node.role == "source"
+                    FILTER !@strict OR LENGTH(
+                        FOR candidate IN @@entities
+                            FILTER candidate.entity_type == "Repository" AND candidate.role == "source"
+                            FILTER candidate.name == node.name
+                            LIMIT 2
+                            RETURN true
+                    ) == 1
                     RETURN node
             )
             LET repository_names = UNIQUE(repositories[*].name)
@@ -1395,14 +1420,24 @@ class ArangoArchitectureRepository:
                 FOR repo IN repositories
                     FOR node, edge IN 1..1 OUTBOUND repo._id @@edges
                         FILTER edge.relationship_type == "defines" AND node.index_state != "stale"
+                        FILTER !@strict OR node.entity_type != "Project"
                         RETURN DISTINCT node._key
             )
             LET owned = (
                 FOR node IN @@entities
                     FILTER node.repository IN repository_names AND node.index_state != "stale"
+                    FILTER !@strict OR node.entity_type != "Project"
                     RETURN node._key
             )
-            LET scoped = UNION_DISTINCT(direct, defined, owned)
+            LET scoped = (
+                FOR key IN UNION_DISTINCT(direct, defined, owned)
+                    LET node = DOCUMENT(@entities, key)
+                    FILTER !@strict OR (
+                        (node.metadata.capture_project == null OR node.metadata.capture_project == @key)
+                        AND (node.project_key == null OR node.project_key == @key)
+                    )
+                    RETURN key
+            )
             LET project_keys = APPEND(scoped, @key)
             LET record_dates = (
                 FOR key IN project_keys
@@ -1489,7 +1524,7 @@ class ArangoArchitectureRepository:
                     last_index_date: MAX(index_dates)}
             """,
             bind_vars={
-                "@entities": self._entities, "@edges": self._edges,
+                "@entities": self._entities, "strict": strict_scope, "@edges": self._edges,
                 "entities": self._entities, "seed": f"{self._entities}/{key}", "key": key,
                 "static": _STATIC_SOURCE,
             },
@@ -1497,7 +1532,7 @@ class ArangoArchitectureRepository:
         return ProjectScope.model_validate(next(iter(rows)))
 
     def count_by_entity_type(
-        self, *, source_repositories_only: bool = False
+        self, *, source_repositories_only: bool = False, allowed_entity_keys: list[str] | None = None
     ) -> dict[EntityType, int]:
         rows = self._database().aql.execute(
             """
@@ -1508,15 +1543,16 @@ class ArangoArchitectureRepository:
                 RETURN {entity_type, total}
             """,
             bind_vars={
-                "@entities": self._entities,
+                "@entities": self._entities, "allowed": allowed_entity_keys,
                 "source_repositories_only": source_repositories_only,
             },
         )
         return {row["entity_type"]: row["total"] for row in rows}
 
-    def search(self, request: ArchitectureSearch) -> list[ArchitectureEntity]:
+    def search(self, request: ArchitectureSearch, *, allowed_entity_keys: list[str] | None = None) -> list[ArchitectureEntity]:
         query = """
         FOR node IN @@entities
+            FILTER @allowed == null OR node._key IN @allowed
             FILTER @include_stale OR node.index_state != "stale"
             FILTER @entity_type == null OR node.entity_type == @entity_type
             FILTER @query == "" OR CONTAINS(LOWER(node.name), @query)
@@ -1535,7 +1571,7 @@ class ArangoArchitectureRepository:
         rows = self._database().aql.execute(
             query,
             bind_vars={
-                "@entities": self._entities,
+                "@entities": self._entities, "allowed": allowed_entity_keys,
                 "query": request.query.strip().lower(),
                 "entity_type": request.entity_type,
                 "include_stale": request.include_stale,
@@ -1544,7 +1580,7 @@ class ArangoArchitectureRepository:
         )
         return [_ENTITY.validate_python(row) for row in rows]
 
-    def trace(self, request: ArchitectureTrace) -> list[ArchitecturePath]:
+    def trace(self, request: ArchitectureTrace, *, allowed_entity_keys: list[str] | None = None) -> list[ArchitecturePath]:
         database = self._database()
         if not database.collection(self._entities).has(request.key):
             raise ArchitectureGraphError(f"Architecture entity '{request.key}' was not found")
@@ -1552,7 +1588,9 @@ class ArangoArchitectureRepository:
         query = """
         WITH @@entities
         FOR entity, edge, path IN @min_depth..@depth ANY @seed @@edges
+            PRUNE @allowed != null AND entity._key NOT IN @allowed
             OPTIONS {order: "bfs", uniqueVertices: @uniqueness}
+            FILTER @allowed == null OR entity._key IN @allowed
             FILTER LENGTH(@entity_types) == 0 OR entity.entity_type IN @entity_types
             LET relationships = (
                 FOR i IN 0..LENGTH(path.edges) - 1
@@ -1584,7 +1622,7 @@ class ArangoArchitectureRepository:
         rows = database.aql.execute(
             query,
             bind_vars={
-                "@entities": self._entities,
+                "@entities": self._entities, "allowed": allowed_entity_keys,
                 "@edges": self._edges,
                 "seed": f"{self._entities}/{request.key}",
                 "depth": request.depth,

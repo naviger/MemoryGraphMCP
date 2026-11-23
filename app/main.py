@@ -5,7 +5,8 @@ from contextlib import asynccontextmanager
 import anyio
 import structlog
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastmcp.utilities.lifespan import combine_lifespans
 
 from app.api.effectiveness import build_effectiveness_router
@@ -14,12 +15,14 @@ from app.api.test_runs import build_test_run_router
 from app.auth.browser_oidc import BrowserOIDC
 from app.auth.jwt import JWTVerifier
 from app.auth.middleware import BearerTokenMiddleware
+from app.auth.project_access import ProjectAccessDenied
 from app.config.logging import configure_logging
 from app.config.settings import Settings, get_settings
 from app.config.telemetry import configure_telemetry, instrument_fastapi
 from app.domain.review_details import SearchEmbeddingDiagnostics
 from app.mcp.server import build_mcp_server
 from app.repositories.factory import build_repository
+from app.repositories.scoped import ScopedRepositories
 from app.services.architecture_service import ArchitectureService
 from app.services.ask_graph import AskGraphService
 from app.services.capture_worker import CaptureWorker
@@ -49,12 +52,15 @@ def create_application(settings: Settings | None = None) -> FastAPI:
     repository = build_repository(settings)
     observability = MemoryObservability()
     embedding_service = EmbeddingService.from_settings(settings)
-    service = MemorySearchService(repository=repository, embedding_service=embedding_service, observability=observability)
-    ingestion_service = MemoryIngestionService(repository=repository, embedding_service=embedding_service, observability=observability)
-    knowledge_base = StaticKnowledgeBase()
     graph_repository = getattr(repository, "architecture", None)
+    scoped = ScopedRepositories(repository) if settings.project_authorization_required else None
+    request_memory = scoped.memory if scoped else repository
+    request_graph = scoped.graph if scoped else graph_repository
+    service = MemorySearchService(repository=request_memory, embedding_service=embedding_service, observability=observability)
+    ingestion_service = MemoryIngestionService(repository=request_memory, embedding_service=embedding_service, observability=observability)
+    knowledge_base = StaticKnowledgeBase()
     ci_head = GitHubBranchHead()
-    architecture_service = ArchitectureService(graph_repository, repository) if graph_repository else None
+    architecture_service = ArchitectureService(request_graph, request_memory) if request_graph else None
     mcp = build_mcp_server(
         settings=settings,
         service=service,
@@ -62,7 +68,8 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         ingestion_service=ingestion_service,
         architecture_service=architecture_service,
     )
-    mcp_app = mcp.http_app(path="/")
+    # A project-scoped tool call must use the bearer token for that HTTP request.
+    mcp_app = mcp.http_app(path="/", stateless_http=True) if scoped else mcp.http_app(path="/")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -77,7 +84,8 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         app.state.embedding_status = embedding_status
         if embedding_status["status"] == "unavailable" and settings.embed_require_ready:
             raise RuntimeError(embedding_status["error_summary"] or "Embedding capability unavailable")
-        await anyio.to_thread.run_sync(repository.ensure_storage_ready)
+        check_storage = repository.ensure_storage_ready if settings.arango_provision_storage else repository.ensure_connected
+        await anyio.to_thread.run_sync(check_storage)
         logger.info(
             "memorygraphmcp_storage_ready",
             database=settings.arango_database,
@@ -109,6 +117,10 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         version=settings.app_version,
         lifespan=combine_lifespans(lifespan, mcp_app.lifespan),
     )
+    @app.exception_handler(ProjectAccessDenied)
+    async def deny_project_access(request: Request, exc: ProjectAccessDenied):
+        return JSONResponse({"detail": str(exc)}, status_code=403)
+
     verifier = JWTVerifier(settings)
     browser_oidc = BrowserOIDC(settings, verifier)
     app.include_router(browser_oidc.router())
@@ -119,11 +131,12 @@ def create_application(settings: Settings | None = None) -> FastAPI:
             protected_prefix=settings.mcp_mount_path,
             additional_prefixes=(REVIEW_API_PREFIX,),
             browser=browser_oidc,
+            project_claim=settings.project_grants_claim if scoped else None,
         )
     provider = embedding_service.primary_provider
     review_details = ReviewDetailService(
-        repository,
-        graph_repository,
+        request_memory,
+        request_graph,
         SearchEmbeddingDiagnostics(
             provider=provider.name,
             model=provider.model,
@@ -131,24 +144,24 @@ def create_application(settings: Settings | None = None) -> FastAPI:
             version=getattr(provider, "version", None),
         ),
     )
-    context_packages = ContextPackageService(graph_repository, repository) if graph_repository else None
+    context_packages = ContextPackageService(request_graph, request_memory) if request_graph else None
     app.include_router(build_review_router(
-        ReviewQueueService(repository), review_details,
-        AskGraphService(repository, review_details, context_packages), settings.auth_required, service,
+        ReviewQueueService(request_memory), review_details,
+        AskGraphService(request_memory, review_details, context_packages), settings.auth_required, service,
         ci_github_repository=settings.ci_github_repository,
         ci_project_key=settings.ci_project_key,
         ci_head=ci_head.current,
         tracker_project_key=settings.graph_event_project_key,
         ci_repository_key=settings.ci_repository_key,
-        test_fixes=TestFixService(settings, graph_repository, repository)
+        test_fixes=TestFixService(settings, request_graph, request_memory)
         if graph_repository else None,
-        changes=ProjectChangesService(settings, graph_repository) if graph_repository else None,
+        changes=ProjectChangesService(settings, request_graph) if graph_repository else None,
         context_packages=context_packages,
-        usage=TokenUsageService(graph_repository) if graph_repository and hasattr(graph_repository, "record_usage") else None,
+        usage=TokenUsageService(request_graph) if graph_repository and hasattr(graph_repository, "record_usage") else None,
     ))
     if graph_repository is not None and hasattr(graph_repository, "effectiveness_graph"):
         app.include_router(build_effectiveness_router(
-            EffectivenessService(graph_repository, repository), REVIEW_API_PREFIX,
+            EffectivenessService(request_graph, request_memory), REVIEW_API_PREFIX,
         ))
     app.include_router(build_test_run_router(settings, graph_repository))
     app.mount(settings.mcp_mount_path, mcp_app)

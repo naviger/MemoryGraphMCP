@@ -6,6 +6,7 @@ from starlette.requests import Request
 
 from app.auth.browser_oidc import SESSION_COOKIE, BrowserOIDC
 from app.auth.jwt import JWTVerifier
+from app.auth.project_access import serve_with_project_access
 from app.domain.exceptions import AuthenticationError
 
 
@@ -19,6 +20,7 @@ class BearerTokenMiddleware:
         additional_prefixes: tuple[str, ...] = (),
         browser: BrowserOIDC | None = None,
         browser_prefix: str = "/api/review",
+        project_claim: str | None = None,
     ) -> None:
         self.app = app
         self.verifier = verifier
@@ -29,6 +31,7 @@ class BearerTokenMiddleware:
         self.exempt_paths = exempt_paths or {"/healthz", "/readyz", "/docs", "/openapi.json", "/redoc"}
         self.browser = browser
         self.browser_prefix = browser_prefix
+        self.project_claim = project_claim
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
@@ -59,7 +62,7 @@ class BearerTokenMiddleware:
                     )
                     return
                 scope.setdefault("state", {}).update(auth_claims=claims, browser_session=True)
-                await self.app(scope, receive, send)
+                await self._authenticated(scope, receive, send)
                 return
         if not authorization.lower().startswith("bearer "):
             await JSONResponse({"detail": "Missing bearer token"}, status_code=401)(scope, receive, send)
@@ -74,4 +77,10 @@ class BearerTokenMiddleware:
 
         state = scope.setdefault("state", {})
         state["auth_claims"] = claims.model_dump(mode="json")
-        await self.app(scope, receive, send)
+        await self._authenticated(scope, receive, send)
+
+    async def _authenticated(self, scope, receive, send):
+        if self.project_claim:
+            await serve_with_project_access(self.app, scope, receive, send, self.project_claim)
+        else:
+            await self.app(scope, receive, send)
