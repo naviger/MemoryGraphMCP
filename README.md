@@ -11,6 +11,9 @@ It exposes MCP resources, tools, and prompts for retrieval and code generation w
 - Prompts for generating FastAPI services, React components, and ArangoDB repositories
 - FastAPI hosting with MCP mounted at `/mcp`
 - JWT bearer authentication for HTTP access
+- A project-scoped architecture graph linking decisions, constraints, goals, tasks, source code, and tests
+- A containerized React UI for project navigation, evidence review, search, and guidance publishing
+- Local GitHub Actions import, read-only source control history, and an approval-driven CI fix workflow
 - OpenTelemetry and structlog instrumentation hooks
 
 ## Architecture
@@ -102,8 +105,21 @@ A Dockerfile is included for containerized deployment. The mounted FastAPI app s
 
 ## Architecture graph and project guidance
 
-Use the [architecture metamodel](docs/architecture-metamodel.md) for the graph
-schema, code indexer, and the read-only MCP tool `get_project_guidance`.
+Projects and source repositories are separate nodes. A project can span multiple
+repositories. The Python AST indexer records files, modules, classes, functions,
+methods, service and repository classes, FastAPI routes, and tests. It infers
+code relationships where supported by the source. Use explicit relationships such
+as `implements` and `validated_by` to connect decisions to their implementation
+and test evidence. Edges record direction, source, confidence, and timestamps.
+See the [architecture metamodel](docs/architecture-metamodel.md) and run
+`python -m scripts.index_architecture --help` for indexing options.
+
+Use `add_observation` to attach a sourced, timestamped summary and confidence score
+to graph entities. Use `save_architectural_constraint` to record a rule, its scope,
+authority, enforcement status, governed entities, and validating tests.
+`save_project_goal` links objectives to projects, ADRs, services, and tasks.
+`add_conversation_summary` stores concise summaries with links to decisions,
+risks, and tasks surfaced by the conversation.
 
 ## Semantic Retrieval
 
@@ -213,21 +229,51 @@ Call `get_review_queue` for two lists: `overdue_validations` and `unresolved_adr
 
 By default, the queue uses the current UTC date for overdue reviews and includes unresolved conflicts across all overlap dates. Pass `as_of` to evaluate due dates and limit conflicts to that date. Use `limit` for each section, and `validation_offset` and `conflict_offset` to page them independently. Writers can act on entries with `revalidate_memory` or `resolve_adr_conflict`.
 
-### Review queue web client
+### Review web client
 
-The React client is packaged in the `review-ui` container. Docker Compose starts it with the stack. Set `MGMCP_REVIEW_PORT` to change the host port. [Open the local review queue](http://127.0.0.1:3200).
+The React client is packaged in the `review-ui` container. Docker Compose starts it with the stack. Set `MGMCP_REVIEW_PORT` to change the host port. [Open the local review UI](http://127.0.0.1:3200).
 
 For an existing stack, run `docker compose up -d --build memorygraphmcp review-ui` to create the UI service and load changes. The `docker compose restart` command restarts containers that already exist.
 
 Use **Open record** on a validation or **Open ADR** on either side of a conflict to see the record's validity window, confidence history, and citations. The detail view also shows linked ADRs, services, source files, and tests. Architecture links come from the graph, so an existing ADR needs a graph entry and explicit links to show its related code and tests. Supersession links from the ADR lifecycle appear directly.
 
-Paste a bearer token accepted by the existing MemoryGraphMCP issuer and audience configuration. Readers can inspect both queues and their evidence. Writers and admins can cite evidence and optionally update confidence during revalidation, or resolve an ADR conflict with a rationale. The token stays in memory in the current tab. The container serves the UI and proxies the review API on the same origin.
+Sign in through OIDC or connect with a bearer token accepted by the configured
+issuer and audience. Readers can inspect the queue and its evidence. Writers
+and admins can cite evidence and optionally update confidence during
+revalidation, or resolve an ADR conflict with a rationale. The container
+serves the UI and proxies the review API on the same origin.
 
-Use the Graph page to explore linked entities or review the supported node types and relationships. [Open Graph](http://127.0.0.1:3200/graph) · [Architecture metamodel](docs/architecture-metamodel.md).
+- **Home** lists projects with CI health, created and last edited dates, open
+  tasks, proposed ADRs, overdue reviews, unresolved conflicts, and the last
+  successful code index. Counts open the relevant project tab. When project
+  dates are missing, the table uses the earliest and latest known records.
+- **Projects** uses the project from the header throughout the UI. Overview
+  shows counts and open work. The Code tab groups classes and top-level
+  functions by repository and file, with methods under their class. Searchable
+  functions and methods appear under their containing file. The inspector
+  previews decisions, code, and search results, links to full records, and
+  opens Graph centered on the selected item via **Explore relationships**.
+  Returning from a record restores search filters, expanded files, and selection.
+- **Graph** centers the view on a selected node. Filter by node type or
+  collapsible category and adjust the hop count from its default of four up
+  to ten. Selecting a node or edge opens a right-hand panel. Edge details include
+  direction, source, confidence, and both connected nodes.
+- **Search Memory** supports semantic and hybrid retrieval with project, as-of
+  date, and document type filters. Results show excerpts, sources, validity
+  dates, and record links. Open **Advanced options** for search mode and
+  embedding diagnostics.
+- **Record details** show citations, validity dates, validation and confidence
+  history, and linked architecture entities. **Embedding diagnostics** shows
+  provider, model, version, dimensions, and compatibility with the active
+  search profile. Open **Similar records** on an eligible record or graph node
+  to load semantic matches on demand.
+- **Help** is at the bottom of the sidebar. It explains the main views,
+  guidance publishing, and the graph metamodel, including the supported node
+  types and forward and inverse relationships.
 
 For UI development, run `npm ci` and `npm run dev` in `review-ui/` while MemoryGraphMCP is running. Vite proxies the review API to `http://127.0.0.1:3100` by default. Set `REVIEW_API_URL` if the API uses a different address.
 
-**Ask the Graph** accepts a plain-language question and an optional as-of date. It synthesizes a direct answer from matching decisions and notes, groups corroborating citations per claim, and can explain a decision using its stored rationale. Citations open the underlying detail pages. It shows unresolved ADR conflicts and gaps such as missing effective dates or dated validation evidence. Code and test links come from the current graph and carry a note about their historical coverage. The view uses stored evidence and does not require a generative model or a new provider.
+**Ask the Graph** accepts a plain-language question and an optional as-of date. It answers project and repository counts from the corresponding graph node types. For questions about engineering decisions, it synthesizes a direct answer from matching decisions and notes, groups corroborating citations per claim, and can explain a decision using its stored rationale. Citations open the underlying detail pages. It shows unresolved ADR conflicts and gaps such as missing effective dates or dated validation evidence. Code and test links come from the current graph and carry a note about their historical coverage. The view uses stored evidence and does not require a generative model or a new provider.
 
 ### Browser sign-in and local Keycloak
 
@@ -280,7 +326,7 @@ Register `<UI origin>/api/auth/callback` and `<UI origin>/` as the exact login a
 
 ### CI test runs
 
-The project **Testing** tab opens the latest imported GitHub Actions attempt by default. Use **Run history** to open an earlier attempt and see its commit, completion time, totals, and failures. **Load older runs** pages through imported history. **Recurring failures** groups by test name and source file across the most recent 20 imported attempts. Open a group to inspect the attempts that reported it. Failed tests use their repository-relative JUnit file path to find the indexed test suite and its current ADR and constraint validation links. CI publishes test names, paths, and exception types when available. Open the linked GitHub Actions attempt for full logs.
+The project **Testing** tab opens the latest imported GitHub Actions attempt by default. Use **Run history** to open an earlier attempt and see its commit, completion time, totals, and failures. **Load older runs** pages through imported history. **Last passing run** shows when the most recent successful attempt finished and links to that attempt, including when the latest run failed. **Recurring failures** groups by test name and source file across the most recent 20 imported attempts. Open a group to inspect the attempts that reported it. Failed tests use their repository-relative JUnit file path to find the indexed test suite and its current ADR and constraint validation links. CI publishes test names, paths, and exception types when available. Open the linked GitHub Actions attempt for full logs.
 
 The workflow runs pytest on pushes and pull requests. Default-branch pushes upload a bounded JSON summary as a GitHub Actions artifact, including when pytest fails. To enable local import, set `MGMCP_CI_GITHUB_REPOSITORY` to `owner/repo` and set `MGMCP_CI_PROJECT_KEY` and `MGMCP_CI_REPOSITORY_KEY` to the existing project and linked source repository. The API polls GitHub from inside the local deployment. Set `MGMCP_CI_GITHUB_BRANCH` if the default branch is different from `main`. For private repositories, set `MGMCP_CI_GITHUB_READ_TOKEN` locally to a credential with Actions read access. GitHub needs no inbound access to the API. The importer retries missing artifacts within its ten-run window and skips attempts already stored.
 
@@ -338,10 +384,23 @@ in processing order. It links to tasks still associated with the project and
 labels stale events. Readers can inspect activity through the Review UI.
 
 
-### Project Guidance editor
+### Global and Project Guidance
 
-Open **Projects → Guidance** to read the published instructions and earlier
-versions. Writers and admins can save drafts. Admins explicitly approve and
-publish the saved revision. A publication records the author, approving admin,
-timestamps, and version. The MCP tool `get_project_guidance` returns only the
-published instructions, alongside current ADRs and constraints.
+`AGENTS.md` is the entry point for coding agents. It directs them to call
+`get_project_guidance(project_key)` before starting architecture work or
+recorded follow-ups. Find the project key using `search_architecture_entities`.
+
+| Editor | Scope | Who can draft | Who can publish |
+| --- | --- | --- | --- |
+| Sidebar **Global Guidance** | All projects in this deployment | Admin | Admin |
+| **Projects → Guidance** | Selected project | Writer or admin | Admin |
+
+Save a draft, then choose **Approve and publish** and confirm the saved revision.
+Each publication records the author, approving admin, timestamps, and version.
+The editors show the current publication and earlier versions.
+
+The read-only MCP tool returns the two published scopes separately.
+`global_guidance` contains deployment-wide instructions and `published_guidance`
+contains project instructions. Each field is null until its first publication.
+Drafts stay in the editors. Current accepted ADRs and active constraints,
+including validating test keys, are returned alongside both guidance fields.
