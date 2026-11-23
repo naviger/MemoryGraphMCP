@@ -85,3 +85,17 @@ def test_role_checks_and_validation_for_outcome_reports():
         change(task_outcome="completed")
     with pytest.raises(ValidationError, match="successful first pass"):
         change(first_pass_success=True, retries=1)
+
+
+def test_delivery_trend_uses_utc_mondays_and_deduplicated_task_finishes():
+    from app.services.effectiveness import delivery_trend
+
+    monday = datetime(2026, 11, 16, 1, tzinfo=UTC)
+    sunday = monday - timedelta(days=1)
+    trend = delivery_trend(
+        [change(occurred_at=monday), change(actor="human", occurred_at=sunday)],
+        {"finished": (monday, "completed"), "abandoned": (monday, "abandoned")},
+    )
+    assert [week.week_start.isoformat() for week in trend] == ["2026-11-09", "2026-11-16"]
+    assert trend[0].human_changes == 1
+    assert trend[1].agent_changes == 1 and trend[1].tasks_completed == 1

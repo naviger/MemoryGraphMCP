@@ -534,3 +534,26 @@ select {
 .effectiveness-methodology { display: grid; gap: 9px; margin-bottom: 0; }
 .effectiveness-methodology dd { margin: 0; }
 .effectiveness-methodology dt { text-transform: capitalize; }
+
+.metric-section, .metric-grid { margin-bottom: 16px; }
+.metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(310px, 100%), 1fr)); gap: 16px; align-items: start; }
+.metric-grid .metric-section, .metric-grid figure { margin: 0; }
+.metric-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 12px; margin-top: 0; }
+.metric-summary > div { padding: 12px; background: var(--pale-teal); border-radius: 8px; }
+.metric-summary dt { color: var(--muted); font-size: .875rem; }
+.metric-summary dd { margin: 0; font-size: 1.4rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.metric-insights { margin-top: 6px; list-style: disc; padding-left: 19px; }
+.metric-insights li + li { margin-top: 4px; }
+.metric-chart { margin: 0; min-width: 0; }
+.metric-chart figcaption { margin-bottom: 10px; }
+.metric-control { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.metric-control select { max-width: 100%; }
+.metric-bars { display: grid; gap: 7px; }
+.metric-bars li { display: grid; grid-template-columns: minmax(62px, 1fr) minmax(45px, 2fr) minmax(45px, auto); align-items: center; gap: 8px; }
+.metric-label { overflow-wrap: anywhere; font-size: .875rem; }
+.metric-number { text-align: right; font-size: .875rem; font-variant-numeric: tabular-nums; }
+.metric-track { position: relative; display: block; height: 10px; border-radius: 6px; background: #edf1f5; }
+.metric-fill { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 6px; background: var(--teal); }
+.metric-bars.signed .metric-track { background: linear-gradient(to right, #edf1f5 49%, #8997a5 49% 51%, #edf1f5 51%); }
+.metric-bars.signed .metric-fill { left: 50%; }
+.metric-bars.signed .metric-fill.negative { left: auto; right: 50%; background: #af493a; }
