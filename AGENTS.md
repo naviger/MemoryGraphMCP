@@ -11,7 +11,7 @@ Use the running MemoryGraphMCP as the development memory for this repository. Us
 ## Development workflow
 
 - Work on a focused feature branch based on current `origin/main`. Inspect existing local edits before branching or integrating upstream. Use a separate worktree when needed to preserve the user's checkout.
-- Before changing architecture or starting a recorded follow-up, call MemoryGraphMCP's `get_project_guidance` with project key `230a0395ec1b86f503063b1e1dfdf9503e9309c5eb6054046fcc5e1cc566f97a`. Review the relevant ADRs and constraint tests. Use the Project Overview if the tool is unavailable.
+- Before changing architecture or starting a recorded follow-up, call MemoryGraphMCP's `get_project_guidance` with project key `230a0395ec1b86f503063b1e1dfdf9503e9309c5eb6054046fcc5e1cc566f97a`. Read the published project guidance, relevant ADRs, and constraint tests. Use the Project Overview if the tool is unavailable.
 - Run the checks that cover the change and report their results. For backend changes use `python -m pytest`. For UI changes run `npm run build` from `review-ui` and verify the affected flow. Run `git diff --check` before committing.
 - Review and stage only files and hunks belonging to the task. Commit the verified changes on the feature branch. Keep credentials, runtime data, and unrelated local edits out of the commit.
 - Get explicit approval before pushing a branch or publishing a pull request. In the approval request, include the branch, commit, proposed PR scope, and checks. Use a separate PR for each independently reviewable change.

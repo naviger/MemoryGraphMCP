@@ -62,6 +62,7 @@ class ArchitectureService:
         return ProjectGuidance(
             project_key=project_key, project_name=project.name, as_of=as_of,
             decisions=decisions, constraints=constraints,
+            published_guidance=self.repository.read_guidance_state(project_key).published,
         )
 
     async def add_observation(

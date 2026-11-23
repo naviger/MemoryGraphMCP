@@ -18,7 +18,7 @@ from app.domain.architecture import (
 )
 from app.domain.architecture_events import GraphEvent, GraphEventReceipt, TrackerActivity
 from app.domain.project_changes import BranchCleanup
-from app.domain.project_guidance import GuidanceScope
+from app.domain.project_guidance import GuidanceScope, GuidanceState, PublishedGuidance
 from app.domain.review_details import ProjectScope
 from app.domain.test_drafts import FixWorkflow
 from app.domain.test_runs import RecurringTestFailures, TestRun, TestRunDetail, TestRunHistory
@@ -36,6 +36,18 @@ class ArchitectureRepository(Protocol):
     ) -> dict[str, TestRun]: ...
 
     def change_branch_cleanups(self, project: str, urls: list[str]) -> dict[str, BranchCleanup]: ...
+
+    def read_guidance_state(self, project_key: str) -> GuidanceState: ...
+
+    def list_guidance_versions(
+        self, project_key: str, before: int, limit: int,
+    ) -> list[PublishedGuidance]: ...
+
+    def save_guidance_draft(
+        self, project_key: str, revision: int, text: str, actor: str,
+    ) -> None: ...
+
+    def approve_guidance(self, project_key: str, revision: int, actor: str) -> None: ...
 
     def guidance_scope(self, project_key: str) -> GuidanceScope: ...
 

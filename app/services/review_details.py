@@ -17,6 +17,7 @@ from app.domain.architecture import (
 from app.domain.architecture_events import TrackerOverview
 from app.domain.exceptions import ArchitectureGraphError
 from app.domain.models import MemoryDocument, MemorySearchRequest
+from app.domain.project_guidance import GuidanceEditor
 from app.domain.review_details import (
     ProjectEntity,
     ProjectOverview,
@@ -81,6 +82,41 @@ class ReviewDetailService:
 
     async def get_project_summary(self, key: str) -> ProjectSummary | None:
         return await anyio.to_thread.run_sync(self._get_project_summary, key)
+
+    async def get_guidance_editor(
+        self, key: str, can_edit: bool, can_publish: bool, before_version: int | None,
+    ) -> GuidanceEditor | None:
+        return await anyio.to_thread.run_sync(
+            self._get_guidance_editor, key, can_edit, can_publish, before_version,
+        )
+
+    def _get_guidance_editor(
+        self, key: str, can_edit: bool, can_publish: bool, before_version: int | None,
+    ) -> GuidanceEditor | None:
+        if self.architecture is None or not isinstance(self.architecture.read_entity(key), Project):
+            return None
+        state = self.architecture.read_guidance_state(key)
+        cutoff = (state.published.version if state.published else 0) + 1
+        history = self.architecture.list_guidance_versions(
+            key, min(cutoff, before_version or cutoff), 11,
+        ) if state.published else []
+        return GuidanceEditor(
+            revision=state.revision, draft=state.draft if can_edit else None,
+            published=state.published, can_edit=can_edit, can_publish=can_publish,
+            history=history[:10], next_before_version=history[9].version if len(history) > 10 else None,
+        )
+
+    async def change_guidance(
+        self, key: str, revision: int, actor: str, *, text: str | None = None,
+    ) -> None:
+        if self.architecture is None:
+            raise ArchitectureGraphError("Project guidance is unavailable")
+        if text is None:
+            await anyio.to_thread.run_sync(self.architecture.approve_guidance, key, revision, actor)
+        else:
+            await anyio.to_thread.run_sync(
+                self.architecture.save_guidance_draft, key, revision, text, actor,
+            )
 
     async def get_tracker_overview(
         self, key: str, configured_project: str | None,
