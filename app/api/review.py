@@ -32,6 +32,7 @@ from app.domain.models import (
     ReviewQueue,
     ReviewQueueQuery,
 )
+from app.domain.project_changes import ChangeView, ProjectChanges
 from app.domain.review_details import (
     ProjectOverview,
     ProjectSummary,
@@ -65,6 +66,7 @@ from app.domain.test_runs import (
     project_ci_health,
 )
 from app.services.ask_graph import AskGraphService
+from app.services.project_changes import ProjectChangesService
 from app.services.review_details import ReviewDetailService
 from app.services.review_queue import ReviewQueueService
 from app.services.search_service import MemorySearchService
@@ -118,6 +120,7 @@ def build_review_router(
     ci_head: Callable[[], str | None] | None = None,
     ci_repository_key: str = "",
     test_fixes: TestFixService | None = None,
+    changes: ProjectChangesService | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix=REVIEW_API_PREFIX, tags=["Review"])
 
@@ -225,6 +228,22 @@ def build_review_router(
             raise HTTPException(status_code=404, detail="Project not found")
         response.headers["Cache-Control"] = "no-store"
         return summary
+
+    @router.get("/projects/{key}/changes")
+    async def get_project_changes(
+        key: MemoryKey, response: Response, view: ChangeView = "pulls",
+        repository_key: MemoryKey | None = None,
+    ) -> ProjectChanges:
+        if changes is None:
+            raise HTTPException(503, "Project change history is unavailable")
+        try:
+            result = await changes.history(key, view, repository_key)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        if result is None:
+            raise HTTPException(404, "Project not found")
+        response.headers["Cache-Control"] = "no-store"
+        return result
 
     @router.get("/projects/{key}/testing")
     async def get_project_testing(

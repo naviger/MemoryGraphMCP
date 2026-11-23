@@ -1,4 +1,5 @@
 import { InspectorView, PreviewLink } from './RecordInspector.jsx';
+import ProjectChanges from './ProjectChanges.jsx';
 import { ProjectHealth, ProjectTesting } from './ProjectTesting.jsx';
 import { Network, Search } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -118,10 +119,11 @@ function RepositoryInventory({ items, renderEntity, navigate, searching }) {
   );
 }
 
-const TABS = ['Overview', 'Decisions', 'Code', 'Testing', 'Memory', 'Review'];
+const TABS = ['Overview', 'Decisions', 'Code', 'Testing', 'Source Control', 'Memory', 'Review'];
 
 function projectTab(requested) {
-  return TABS.includes(requested) ? requested : 'Overview';
+  const tab = requested === 'Changes' ? 'Source Control' : requested;
+  return TABS.includes(tab) ? tab : 'Overview';
 }
 
 function ProjectReview({ projectKey, asOf, token, navigate, onUnauthorized, active }) {
@@ -255,6 +257,8 @@ function Inventory({ project, navigate, searching, tab, setTab, token, asOf, onU
       </>],
       ['Testing', <ProjectTesting projectKey={project.key} token={token} navigate={navigate}
         onUnauthorized={onUnauthorized} active={tab === 'Testing'} />],
+      ['Source Control', <ProjectChanges projectKey={project.key} token={token}
+        onUnauthorized={onUnauthorized} active={tab === 'Source Control'} />],
       ['Memory', <InventoryGroup title="Memory documents" items={project.documents} open renderItem={(doc) => (
         <>
           <PreviewLink entityKey={doc.key} navigate={navigate}>{doc.title}</PreviewLink>

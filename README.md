@@ -304,3 +304,14 @@ write permissions. Set `MGMCP_DRAFT_REMOTE` to the HTTPS GitHub URL for
 use `MGMCP_CI_GITHUB_READ_TOKEN`. For private repositories, give that token
 Actions, Contents, and Pull requests read access. Use a protected target branch with required
 pull requests, approvals and CI status checks. Allow squash merges, and keep the publishing credential subject to the target branch rules. Each saved CI patch gets its own fix branch. A single patch can address related symptoms that share a root cause.
+
+### Project Source Control
+
+The Source Control tab follows the project selected in the header and shows recent GitHub pull requests and default-branch commits for
+the project's linked source repositories. CI links use the exact commit from
+locally imported runs. Branch cleanup uses the saved Testing record. The existing
+CI repository is available automatically. To enable more repositories, set
+`MGMCP_GITHUB_CHANGE_REPOSITORIES` to comma-separated
+`graph-repository-key=owner/name` pairs in the local environment. The existing
+GitHub read credential needs Pull requests and Contents read access for any
+private repositories included in the view.
