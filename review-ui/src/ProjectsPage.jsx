@@ -1,4 +1,5 @@
 import { InspectorView, PreviewLink } from './RecordInspector.jsx';
+import { ProjectHealth, ProjectTesting } from './ProjectTesting.jsx';
 import { Network, Search } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { reviewRequest } from './api.js';
@@ -117,7 +118,7 @@ function RepositoryInventory({ items, renderEntity, navigate, searching }) {
   );
 }
 
-const TABS = ['Overview', 'Decisions', 'Code', 'Memory', 'Review'];
+const TABS = ['Overview', 'Decisions', 'Code', 'Testing', 'Memory', 'Review'];
 
 function projectTab(requested) {
   return TABS.includes(requested) ? requested : 'Overview';
@@ -252,6 +253,8 @@ function Inventory({ project, navigate, searching, tab, setTab, token, asOf, onU
         <RepositoryInventory items={code} renderEntity={renderEntity} navigate={navigate} searching={searching} />
         <InventoryGroup title="Cross-project dependencies" items={project.dependencies} renderItem={renderEntity} />
       </>],
+      ['Testing', <ProjectTesting projectKey={project.key} token={token} navigate={navigate}
+        onUnauthorized={onUnauthorized} active={tab === 'Testing'} />],
       ['Memory', <InventoryGroup title="Memory documents" items={project.documents} open renderItem={(doc) => (
         <>
           <PreviewLink entityKey={doc.key} navigate={navigate}>{doc.title}</PreviewLink>
@@ -331,7 +334,7 @@ export function ProjectsPage({ projectKey, token, navigate, onUnauthorized, requ
             <>
               <div className="page-heading">
                 <div><h2>{current.name}</h2>{current.description && <p>{current.description}</p>}
-                </div>
+                  <ProjectHealth projectKey={current.key} token={token} /></div>
                 <a className="button outlined"
                   href={`/graph/${encodeURIComponent(current.key)}`}
                   onClick={(event) => navigate(event, `/graph/${encodeURIComponent(current.key)}`)}>

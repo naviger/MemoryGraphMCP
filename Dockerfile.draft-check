@@ -1,0 +1,6 @@
+FROM python:3.13-slim
+WORKDIR /tmp
+COPY pyproject.toml README.md /setup/
+COPY app /setup/app
+RUN python -m pip install --no-cache-dir '/setup[dev]' hatchling
+ENV HOME=/tmp PYTHONDONTWRITEBYTECODE=1 PIP_ROOT_USER_ACTION=ignore PYTEST_ADDOPTS=--color=no

@@ -66,6 +66,18 @@ class Settings(BaseSettings):
     arango_root_password: str = Field(default="")
     arango_architecture_entities_collection: str = "architecture_entities"
     arango_architecture_edges_collection: str = "architecture_edges"
+    arango_architecture_events_collection: str = "architecture_events"
+    ci_test_run_token: SecretStr | None = None
+    ci_project_key: str = ""
+    ci_repository_key: str = ""
+    ci_github_repository: str = Field(default="", pattern=r"^(?:[\w.-]+/[\w.-]+)?$")
+    ci_github_branch: str = "main"
+    ci_github_read_token: SecretStr | None = None
+    ci_github_publish_token: SecretStr | None = None
+    test_fix_ollama_url: str = ""
+    test_fix_ollama_model: str = "qwen3-coder:30b"
+    draft_worker_url: str = ""
+    draft_worker_token: SecretStr | None = None
     arango_documents_collection: str = Field(default="memory_documents")
     arango_edges_collection: str = Field(default="memory_edges")
     arango_vectors_collection: str = Field(default="memory_vectors")

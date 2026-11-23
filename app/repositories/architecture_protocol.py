@@ -17,6 +17,8 @@ from app.domain.architecture import (
 )
 from app.domain.project_guidance import GuidanceScope
 from app.domain.review_details import ProjectScope
+from app.domain.test_drafts import FixWorkflow
+from app.domain.test_runs import RecurringTestFailures, TestRun, TestRunDetail, TestRunHistory
 
 
 class ArchitectureRepository(Protocol):
@@ -39,6 +41,32 @@ class ArchitectureRepository(Protocol):
     def add_conversation_summary(
         self, conversation: ConversationSummary
     ) -> ConversationSummary: ...
+
+    def known_test_run_ids(self, repository_key: str, run_ids: list[str]) -> set[str]: ...
+
+    def put_test_run(self, run: TestRun) -> TestRun: ...
+
+    def read_fix_workflow(
+        self, project_key: str, run_id: str, issue_type: str, issue_index: int,
+    ) -> FixWorkflow | None: ...
+
+    def save_fix_workflow(self, workflow: FixWorkflow) -> FixWorkflow: ...
+
+    def latest_test_run(self, project_key: str) -> TestRunDetail | None: ...
+
+    def read_test_run_for_commit(
+        self, project_key: str, repository_key: str, commit: str,
+    ) -> TestRun | None: ...
+
+    def latest_passing_test_run(self, project_key: str) -> TestRunDetail | None: ...
+
+    def read_test_run(self, project_key: str, run_id: str) -> TestRunDetail | None: ...
+
+    def list_test_runs(
+        self, project_key: str, limit: int, cursor: str | None,
+    ) -> TestRunHistory: ...
+
+    def recurring_test_failures(self, project_key: str, limit: int) -> RecurringTestFailures: ...
 
     def put_link(self, link: ArchitectureLink) -> ArchitectureRelationship: ...
 

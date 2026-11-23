@@ -416,3 +416,51 @@ select {
 .search-advanced summary { cursor: pointer; color: var(--teal); font-weight: 650; }
 .search-advanced > label, .search-advanced > div { margin-top: .5rem; }
 .search-advanced h2 { font-size: 1rem; }
+
+.project-test-failures { display: grid; gap: .5rem; padding-left: 1.25rem; overflow-wrap: anywhere; }
+.project-test-failures summary { cursor: pointer; color: var(--teal); }
+.project-test-failures details > p, .project-test-failures details > ul { margin-top: .35rem; }
+
+.test-fix { margin-top: .75rem; }
+.test-fix h5 { margin: .75rem 0 .2rem; font-size: 1rem; }
+.test-fix dl { display: grid; gap: .6rem; }
+.test-fix dt { font-weight: 650; }
+.test-fix dd { margin: .15rem 0 0; white-space: pre-wrap; }
+
+.test-run-details + .test-run-history, .test-run-history + .test-run-details { margin-top: .8rem; }
+.recurring-test-failures, .recurring-test-failures + .test-run-details { margin-top: .8rem; }
+.recurring-test-attempts { display: grid; gap: .35rem; padding-left: 1rem; }
+.recurring-test-attempts button[aria-pressed="true"] { background: var(--pale-teal); }
+.test-run-history-table { width: 100%; border-collapse: collapse; text-align: left; }
+.test-run-history-table th, .test-run-history-table td { padding: .5rem; white-space: nowrap; }
+.test-run-history-table tbody tr { border-top: 1px solid var(--line); }
+.test-run-history-table button[aria-pressed="true"] { background: var(--pale-teal); }
+.test-run-history > button { margin-top: .6rem; }
+
+.project-health-summary { display: grid; justify-items: start; gap: .12rem; }
+.project-health { display: inline-flex; align-items: center; gap: .4rem; font-weight: 650; }
+.project-health-stale { color: #925000; font-weight: 650; }
+.project-health span { width: .55rem; height: .55rem; border-radius: 50%; background: #64748b; }
+.project-health[data-health="green"] span { background: #168046; }
+.project-health[data-health="yellow"] span { background: #a96508; }
+.project-health[data-health="red"] span { background: #bd2929; }
+
+.draft-fix pre { overflow: auto; max-height: 22rem; padding: .65rem; background: #f4f7fa; }
+.patch-diff .patch-removed { color: #a31b29; }
+.patch-diff .patch-added { color: #18633a; }
+.draft-fix details, .draft-fix > button, .draft-fix > div { margin-top: .5rem; }
+
+.fix-wait { display: flex; align-items: center; gap: .55rem; }
+.fix-spinner {
+  flex: none;
+  width: .95rem;
+  height: .95rem;
+  border: 2px solid currentColor;
+  border-inline-end-color: transparent;
+  border-radius: 50%;
+  animation: fix-spin .8s linear infinite;
+}
+@keyframes fix-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .fix-spinner { animation: none; } }
+.fix-step { margin-top: .65rem; }
+.fix-step > button + button { margin-left: .45rem; }

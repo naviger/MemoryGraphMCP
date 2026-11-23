@@ -10,6 +10,7 @@ def build_repository(settings: Settings) -> ArangoMemoryRepository:
         ArangoRepositoryConfig(
             architecture_entities_collection=settings.arango_architecture_entities_collection,
             architecture_edges_collection=settings.arango_architecture_edges_collection,
+            architecture_events_collection=settings.arango_architecture_events_collection,
             url=settings.arango_url,
             database=settings.arango_database,
             username=settings.arango_username,
