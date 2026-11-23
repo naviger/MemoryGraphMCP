@@ -315,3 +315,20 @@ CI repository is available automatically. To enable more repositories, set
 `graph-repository-key=owner/name` pairs in the local environment. The existing
 GitHub read credential needs Pull requests and Contents read access for any
 private repositories included in the view.
+
+
+### Project tracker events
+
+To enable tracker event ingestion, set `MGMCP_GRAPH_EVENT_PRODUCER_SUBJECT` to the
+verified token subject of the tracker writer and `MGMCP_GRAPH_EVENT_PROJECT_KEY`
+to the key of its existing Project. Both settings require authentication.
+The configured producer can submit `task.upserted` and `task.completed` using
+`ingest_graph_event` and retrieve receipts with `get_graph_event`.
+
+Each event includes `project_key`, `task_key`, `event_id`, and a timezone-aware
+`occurred_at`. An upsert includes `name` and may include `description` and
+`status`. New tasks, their ownership links, and receipts are written together.
+Existing tasks must link directly and exclusively to that project through a
+`defines`, `related_to`, or `references` edge. Replaying the same payload returns
+its original receipt. Reusing its ID with a different payload is rejected.
+Events at or before the last applied time are recorded without changing the task.

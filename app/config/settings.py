@@ -5,6 +5,8 @@ from urllib.parse import urlsplit
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.domain.models import MemoryKey
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MGMCP_", env_file=".env", extra="ignore")
@@ -67,6 +69,8 @@ class Settings(BaseSettings):
     arango_architecture_entities_collection: str = "architecture_entities"
     arango_architecture_edges_collection: str = "architecture_edges"
     arango_architecture_events_collection: str = "architecture_events"
+    graph_event_producer_subject: str | None = None
+    graph_event_project_key: MemoryKey | None = None
     ci_test_run_token: SecretStr | None = None
     ci_project_key: str = ""
     ci_repository_key: str = ""
@@ -120,6 +124,11 @@ class Settings(BaseSettings):
     otel_service_name: str = Field(default="MemoryGraphMCP")
     otel_exporter_otlp_endpoint: str | None = None
 
+    @field_validator("graph_event_producer_subject", "graph_event_project_key", mode="before")
+    @classmethod
+    def normalize_tracker_setting(cls, value: str | None) -> str | None:
+        return value.strip() or None if isinstance(value, str) else value
+
     @field_validator("mcp_mount_path")
     @classmethod
     def normalize_mcp_mount_path(cls, value: str) -> str:
@@ -167,6 +176,13 @@ class Settings(BaseSettings):
                 or self.jwt_secret_key or self.jwt_public_key
             ):
                 raise ValueError("Browser OIDC requires a UI origin, client ID, issuer, audience and JWKS")
+        if self.graph_event_producer_subject or self.graph_event_project_key:
+            if not (
+                self.auth_required
+                and self.graph_event_producer_subject
+                and self.graph_event_project_key
+            ):
+                raise ValueError("Tracker events require authentication, a producer and a project")
         return self
 
 

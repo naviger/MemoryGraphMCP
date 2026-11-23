@@ -8,6 +8,8 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from app.config.settings import Settings
+from app.domain.architecture import ArchitectureLink, Project, Task
+from app.domain.architecture_events import TaskUpserted
 from app.mcp.server import build_mcp_server
 from app.repositories.arango_repository import ArangoMemoryRepository, ArangoRepositoryConfig
 from app.services.architecture_service import ArchitectureService
@@ -301,3 +303,112 @@ async def test_architectural_constraint_writes_require_writer_and_preserve_cited
         ("customer-service", "oidc-rule", "constrained_by", "architectural-constraint:oidc-rule"),
         ("oidc-rule", "additional-tests", "validated_by", "audit:42"),
     }
+
+
+@pytest.fixture
+def tracker_graph(repository):
+    graph = repository.architecture
+    graph.ensure_storage_ready()
+    events = "architecture_events"
+
+    class TrackerQuery:
+        def execute(self, query, bind_vars):
+            assert 'row.outcome == "applied"' in query
+            times = [
+                row["occurred_at_us"]
+                for row in repository.database.collection(events).documents_by_key.values()
+                if row["source"] == bind_vars["source"]
+                and row["project_key"] == bind_vars["project"]
+                and row["task_key"] == bind_vars["task"]
+                and row["outcome"] == "applied"
+            ]
+            return [max(times)] if times else []
+
+    repository.database.aql = TrackerQuery()
+    for key in ("owned", "other"):
+        graph.put_entity(Project(key=key, name=key))
+    return graph
+
+
+async def test_tracker_events_are_scoped_replay_safe_and_ordered(
+    repository, tracker_graph, monkeypatch,
+):
+    tracker_graph.put_entity(Task(key="foreign", name="Other project task"))
+    tracker_graph.put_link(ArchitectureLink(
+        source_key="other", target_key="foreign", relationship_type="defines", source="fixture",
+    ))
+    tracker_graph.put_entity(Task(key="unlinked", name="Unlinked task"))
+    claims = {"subject": "tracker", "raw": {"roles": ["writer"]}}
+    request = SimpleNamespace(scope={"state": {"auth_claims": claims}})
+    monkeypatch.setattr("app.mcp.tools.auth.get_http_request", lambda: request)
+    server = build_mcp_server(
+        Settings(
+            _env_file=None, auth_required=True, jwt_secret_key="test-key",
+            graph_event_producer_subject="tracker", graph_event_project_key="owned",
+        ),
+        MemorySearchService(repository), StaticKnowledgeBase(),
+        architecture_service=ArchitectureService(tracker_graph, repository),
+    )
+    event = {
+        "event_id": "create", "event_type": "task.upserted", "task_key": "local",
+        "project_key": "owned", "occurred_at": "2026-11-22T11:00:00Z", "name": "Scoped task",
+    }
+    async with Client(server) as client:
+        async def send(**changes):
+            return (await client.call_tool(
+                "ingest_graph_event", {"event": {**event, **changes}},
+            )).structured_content
+
+        with pytest.raises(ToolError, match="configured tracker project"):
+            await send(project_key="other")
+        for task_key in ("foreign", "unlinked"):
+            with pytest.raises(ToolError, match="not exclusively linked"):
+                await send(task_key=task_key)
+        claims["subject"] = "another-writer"
+        with pytest.raises(ToolError, match="not the configured"):
+            await send()
+        claims["subject"] = "tracker"
+        claims["raw"]["roles"] = ["reader"]
+        with pytest.raises(ToolError, match="writer or admin"):
+            await send()
+        claims["raw"]["roles"] = ["writer"]
+        assert not repository.database.collection("architecture_events").documents_by_key
+        first = await send()
+        assert first["affected_entity_keys"] == ["local", "owned"]
+        assert first == await send()
+        with pytest.raises(ToolError, match="different payload"):
+            await send(name="Changed replay")
+        receipt = await client.call_tool("get_graph_event", {"event_id": "create"})
+        assert receipt.structured_content == first
+        complete = {k: v for k, v in event.items() if k != "name"}
+        complete.update(event_id="done", event_type="task.completed",
+                        occurred_at="2026-11-22T12:00:00Z")
+        await client.call_tool("ingest_graph_event", {"event": complete})
+        for moment in ("10:00:00", "12:00:00"):
+            stale = await send(event_id=moment, occurred_at=f"2026-11-22T{moment}Z", status="open")
+            assert stale["outcome"] == "ignored_stale" and stale["affected_entity_keys"] == []
+        assert tracker_graph.read_entity("local").status == "done"
+        assert tracker_graph.read_entity("foreign").name == "Other project task"
+        assert tracker_graph.read_entity("unlinked").name == "Unlinked task"
+
+
+def test_tracker_event_rolls_back_task_and_link_when_receipt_write_fails(
+    repository, tracker_graph, monkeypatch,
+):
+    original_insert = FakeCollection.insert
+
+    def fail_receipt(self, document, **kwargs):
+        if document.get("event_type") == "task.upserted":
+            raise RuntimeError("Simulated journal failure")
+        return original_insert(self, document, **kwargs)
+
+    monkeypatch.setattr(FakeCollection, "insert", fail_receipt)
+    event = TaskUpserted(
+        project_key="owned", task_key="rollback", name="Rollback", event_type="task.upserted",
+        event_id="rollback", occurred_at="2026-11-22T11:00:00Z",
+    )
+    with pytest.raises(RuntimeError, match="Simulated journal failure"):
+        tracker_graph.ingest_event("tracker", "owned", event)
+    assert tracker_graph.read_entity("rollback") is None
+    assert not repository.database.collection("architecture_edges").documents_by_key
+    assert not repository.database.collection("architecture_events").documents_by_key
