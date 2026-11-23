@@ -6,7 +6,11 @@ __pycache__/
 htmlcov/
 .env
 .env.*
+!.env.example
+.run/
 .dist/
 build/
 dist/
 *.pyc
+
+node_modules/

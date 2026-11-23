@@ -1,0 +1,137 @@
+services:
+  arangodb:
+    image: arangodb/arangodb:latest
+    container_name: memorygraphmcp-arangodb
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8530:8529"
+    environment:
+      ARANGO_ROOT_PASSWORD: ${ARANGO_ROOT_PASSWORD:?Set ARANGO_ROOT_PASSWORD in .env}
+    volumes:
+      - arangodb_data:/var/lib/arangodb3
+    networks:
+      - memorygraphmcp-net
+
+  mgmcp-ollama-embed:
+    image: ollama/ollama:latest
+    container_name: mgmcp-ollama-embed
+    restart: unless-stopped
+    command: serve
+    ports:
+      - "127.0.0.1:11435:11434"
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_MODELS: /root/.ollama/models
+    volumes:
+      - ollama_embed_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "OLLAMA_HOST=http://127.0.0.1:11434 ollama list >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 25s
+    networks:
+      - memorygraphmcp-net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2
+    profiles: ["local-auth"]
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    ports:
+      - "127.0.0.1:${MGMCP_LOCAL_KEYCLOAK_PORT:-8180}:8080"
+    environment:
+      KC_HOSTNAME: http://127.0.0.1:${MGMCP_LOCAL_KEYCLOAK_PORT:-8180}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${MGMCP_LOCAL_KEYCLOAK_ADMIN_USERNAME:-}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${MGMCP_LOCAL_KEYCLOAK_ADMIN_PASSWORD:-}
+      MGMCP_LOCAL_UI_ORIGIN: http://127.0.0.1:${MGMCP_REVIEW_PORT:-3200}
+      MGMCP_LOCAL_READER_PASSWORD: ${MGMCP_LOCAL_READER_PASSWORD:-}
+      MGMCP_LOCAL_WRITER_PASSWORD: ${MGMCP_LOCAL_WRITER_PASSWORD:-}
+      MGMCP_LOCAL_ADMIN_PASSWORD: ${MGMCP_LOCAL_ADMIN_PASSWORD:-}
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+      - ./deploy/keycloak/memorygraphmcp-realm.json:/opt/keycloak/data/import/memorygraphmcp-realm.json:ro
+    networks:
+      - memorygraphmcp-net
+
+  memorygraphmcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: memorygraphmcp
+    restart: unless-stopped
+    depends_on:
+      - arangodb
+      - mgmcp-ollama-embed
+    ports:
+      - "127.0.0.1:${MGMCP_HTTP_PORT:-3100}:${MGMCP_HTTP_PORT:-3100}"
+    environment:
+      KEYCLOAK_URL: ${KEYCLOAK_URL:-http://host.docker.internal:8080}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-naviger}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-memorygraphmcp}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-}
+      ARANGO_HOST: http://memorygraphmcp-arangodb:8529
+      ARANGO_DATABASE: ${ARANGO_DATABASE:-architecture}
+      ARANGO_USERNAME: root
+      ARANGO_PASSWORD: ${ARANGO_ROOT_PASSWORD:?Set ARANGO_ROOT_PASSWORD in .env}
+      MGMCP_AUTH_REQUIRED: ${MGMCP_AUTH_REQUIRED:-true}
+      MGMCP_HTTP_HOST: 0.0.0.0
+      MGMCP_HTTP_PORT: ${MGMCP_HTTP_PORT:-3100}
+      MGMCP_MCP_MOUNT_PATH: ${MGMCP_MCP_MOUNT_PATH:-/mcp}
+      MGMCP_KEYCLOAK_URL: ${KEYCLOAK_URL:-http://host.docker.internal:8080}
+      MGMCP_KEYCLOAK_REALM: ${KEYCLOAK_REALM:-naviger}
+      MGMCP_KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-memorygraphmcp}
+      MGMCP_KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-}
+      MGMCP_ARANGO_URL: http://memorygraphmcp-arangodb:8529
+      MGMCP_ARANGO_DATABASE: ${ARANGO_DATABASE:-architecture}
+      MGMCP_ARANGO_USERNAME: root
+      MGMCP_ARANGO_PASSWORD: ${ARANGO_ROOT_PASSWORD:?Set ARANGO_ROOT_PASSWORD in .env}
+      MGMCP_EMBEDDING_PROVIDER: ${MGMCP_EMBEDDING_PROVIDER:-ollama}
+      MGMCP_EMBEDDING_BASE_URL: http://mgmcp-ollama-embed:11434
+      MGMCP_EMBEDDING_MODEL: ${MGMCP_EMBED_MODEL:-nomic-embed-text}
+      MGMCP_EMBEDDING_DIMENSION: ${MGMCP_EMBEDDING_DIMENSION:-768}
+      MGMCP_EMBEDDING_VERSION: "${MGMCP_EMBEDDING_VERSION:-1}"
+      MGMCP_EMBEDDING_TIMEOUT_SECONDS: ${MGMCP_EMBED_TIMEOUT_SECONDS:-30}
+      MGMCP_EMBED_OLLAMA_BASE_URL: http://mgmcp-ollama-embed:11434
+      MGMCP_EMBED_MODEL: ${MGMCP_EMBED_MODEL:-nomic-embed-text}
+      MGMCP_EMBED_AUTO_PULL: ${MGMCP_EMBED_AUTO_PULL:-true}
+      MGMCP_EMBED_REQUIRE_READY: ${MGMCP_EMBED_REQUIRE_READY:-false}
+      MGMCP_EMBED_TIMEOUT_SECONDS: ${MGMCP_EMBED_TIMEOUT_SECONDS:-30}
+      MGMCP_OIDC_ISSUER: ${MGMCP_OIDC_ISSUER:-${KEYCLOAK_URL:-http://host.docker.internal:8080}/realms/${KEYCLOAK_REALM:-naviger}}
+      MGMCP_OIDC_AUDIENCE: ${MGMCP_OIDC_AUDIENCE:-${KEYCLOAK_CLIENT_ID:-memorygraphmcp}}
+      MGMCP_OIDC_JWKS_URI: ${MGMCP_OIDC_JWKS_URI:-${KEYCLOAK_URL:-http://host.docker.internal:8080}/realms/${KEYCLOAK_REALM:-naviger}/protocol/openid-connect/certs}
+      MGMCP_OIDC_BROWSER_ORIGIN: ${MGMCP_OIDC_BROWSER_ORIGIN:-}
+      MGMCP_OIDC_BROWSER_CLIENT_ID: ${MGMCP_OIDC_BROWSER_CLIENT_ID:-}
+      MGMCP_OIDC_BROWSER_CLIENT_SECRET: ${MGMCP_OIDC_BROWSER_CLIENT_SECRET:-}
+      MGMCP_OIDC_BROWSER_DISCOVERY_URL: ${MGMCP_OIDC_BROWSER_DISCOVERY_URL:-}
+      MGMCP_OIDC_BROWSER_TOKEN_ENDPOINT: ${MGMCP_OIDC_BROWSER_TOKEN_ENDPOINT:-}
+      MGMCP_OIDC_BROWSER_SCOPES: ${MGMCP_OIDC_BROWSER_SCOPES:-}
+      MGMCP_OIDC_BROWSER_AUDIENCE: ${MGMCP_OIDC_BROWSER_AUDIENCE:-}
+      MGMCP_OIDC_BROWSER_TOKEN_AUTH: ${MGMCP_OIDC_BROWSER_TOKEN_AUTH:-client_secret_basic}
+      MGMCP_OIDC_ROLE_CLAIM: ${MGMCP_OIDC_ROLE_CLAIM:-roles}
+    command: uvicorn app.main:app --host 0.0.0.0 --port ${MGMCP_HTTP_PORT:-3100}
+    networks:
+      - memorygraphmcp-net
+
+  review-ui:
+    restart: unless-stopped
+    build:
+      context: ./review-ui
+    depends_on:
+      - memorygraphmcp
+    ports:
+      - "127.0.0.1:${MGMCP_REVIEW_PORT:-3200}:8080"
+    environment:
+      REVIEW_API_UPSTREAM: memorygraphmcp:${MGMCP_HTTP_PORT:-3100}
+    networks:
+      - memorygraphmcp-net
+
+volumes:
+  arangodb_data:
+  ollama_embed_data:
+  keycloak_data:
+
+networks:
+  memorygraphmcp-net:
+    external: true
+    name: memorygraphmcp-net

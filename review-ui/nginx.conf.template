@@ -1,0 +1,25 @@
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy no-referrer always;
+    add_header Content-Security-Policy "default-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+
+    location ~ ^/api/(review|auth)/ {
+        set $review_upstream "http://${REVIEW_API_UPSTREAM}";
+        proxy_pass $review_upstream;
+        proxy_http_version 1.1;
+        proxy_read_timeout 195s;
+        proxy_set_header Host $http_host;
+        proxy_set_header Authorization $http_authorization;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

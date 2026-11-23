@@ -16,10 +16,13 @@ from app.domain.architecture import (
     Observation,
 )
 from app.domain.project_guidance import GuidanceScope
+from app.domain.review_details import ProjectScope
 
 
 class ArchitectureRepository(Protocol):
     def ensure_storage_ready(self) -> None: ...
+
+    def project_scope(self, key: str) -> ProjectScope: ...
 
     def guidance_scope(self, project_key: str) -> GuidanceScope: ...
 

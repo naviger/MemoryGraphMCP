@@ -8,18 +8,24 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastmcp.utilities.lifespan import combine_lifespans
 
+from app.api.review import REVIEW_API_PREFIX, build_review_router
+from app.auth.browser_oidc import BrowserOIDC
 from app.auth.jwt import JWTVerifier
 from app.auth.middleware import BearerTokenMiddleware
 from app.config.logging import configure_logging
 from app.config.settings import Settings, get_settings
 from app.config.telemetry import configure_telemetry, instrument_fastapi
+from app.domain.review_details import SearchEmbeddingDiagnostics
 from app.mcp.server import build_mcp_server
 from app.repositories.factory import build_repository
 from app.services.architecture_service import ArchitectureService
+from app.services.ask_graph import AskGraphService
 from app.services.embeddings import EmbeddingService
 from app.services.ingestion_service import MemoryIngestionService
 from app.services.knowledge_base import StaticKnowledgeBase
 from app.services.observability import MemoryObservability
+from app.services.review_details import ReviewDetailService
+from app.services.review_queue import ReviewQueueService
 from app.services.search_service import MemorySearchService
 
 logger = structlog.get_logger(__name__)
@@ -77,12 +83,26 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         version=settings.app_version,
         lifespan=combine_lifespans(lifespan, mcp_app.lifespan),
     )
+    verifier = JWTVerifier(settings)
+    browser_oidc = BrowserOIDC(settings, verifier)
+    app.include_router(browser_oidc.router())
     if settings.auth_required:
         app.add_middleware(
-            BearerTokenMiddleware,
-            verifier=JWTVerifier(settings),
-            protected_prefix=settings.mcp_mount_path,
+            BearerTokenMiddleware, verifier=verifier, protected_prefix=settings.mcp_mount_path,
+            additional_prefixes=(REVIEW_API_PREFIX,), browser=browser_oidc,
         )
+    provider = embedding_service.primary_provider
+    review_details = ReviewDetailService(
+        repository, graph,
+        SearchEmbeddingDiagnostics(
+            provider=provider.name, model=provider.model, dimension=provider.dimension,
+            version=getattr(provider, "version", None),
+        ),
+    )
+    app.include_router(build_review_router(
+        ReviewQueueService(repository), review_details,
+        AskGraphService(repository, review_details), settings.auth_required, service,
+    ))
     app.mount(settings.mcp_mount_path, mcp_app)
     instrument_fastapi(app)
 

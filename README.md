@@ -212,3 +212,68 @@ New resolutions retain the scope labels as recorded at resolution time. Earlier 
 Call `get_review_queue` for two lists: `overdue_validations` and `unresolved_adr_conflicts`. Overdue validations include applicable records with a scheduled review date earlier than the review date. They show the deadline, last validation and cited evidence when available. Conflict results include both ADRs, their overlap, and cited evidence for both records.
 
 By default, the queue uses the current UTC date for overdue reviews and includes unresolved conflicts across all overlap dates. Pass `as_of` to evaluate due dates and limit conflicts to that date. Use `limit` for each section, and `validation_offset` and `conflict_offset` to page them independently. Writers can act on entries with `revalidate_memory` or `resolve_adr_conflict`.
+
+### Review queue web client
+
+The React client is packaged in the `review-ui` container. Docker Compose starts it with the stack. Set `MGMCP_REVIEW_PORT` to change the host port. [Open the local review queue](http://127.0.0.1:3200).
+
+For an existing stack, run `docker compose up -d --build memorygraphmcp review-ui` to create the UI service and load changes. The `docker compose restart` command restarts containers that already exist.
+
+Use **Open record** on a validation or **Open ADR** on either side of a conflict to see the record's validity window, confidence history, and citations. The detail view also shows linked ADRs, services, source files, and tests. Architecture links come from the graph, so an existing ADR needs a graph entry and explicit links to show its related code and tests. Supersession links from the ADR lifecycle appear directly.
+
+Paste a bearer token accepted by the existing MemoryGraphMCP issuer and audience configuration. Readers can inspect both queues and their evidence. Writers and admins can cite evidence and optionally update confidence during revalidation, or resolve an ADR conflict with a rationale. The token stays in memory in the current tab. The container serves the UI and proxies the review API on the same origin.
+
+Use the Graph page to explore linked entities or review the supported node types and relationships. [Open Graph](http://127.0.0.1:3200/graph) · [Architecture metamodel](docs/architecture-metamodel.md).
+
+For UI development, run `npm ci` and `npm run dev` in `review-ui/` while MemoryGraphMCP is running. Vite proxies the review API to `http://127.0.0.1:3100` by default. Set `REVIEW_API_URL` if the API uses a different address.
+
+**Ask the Graph** accepts a plain-language question and an optional as-of date. It synthesizes a direct answer from matching decisions and notes, groups corroborating citations per claim, and can explain a decision using its stored rationale. Citations open the underlying detail pages. It shows unresolved ADR conflicts and gaps such as missing effective dates or dated validation evidence. Code and test links come from the current graph and carry a note about their historical coverage. The view uses stored evidence and does not require a generative model or a new provider.
+
+### Browser sign-in and local Keycloak
+
+MemoryGraphMCP supports OpenID Connect Authorization Code Flow with S256 PKCE. The review UI uses an HTTP-only session cookie. MCP clients continue using API-audience bearer access tokens. The application verifies the token issuer, audience, signature, and expiration. Readers browse and search, writers can make review changes, and admins inherit writer access. Role assignment is managed at the identity provider.
+
+For local testing, copy `.env.example` to `.env`, set `ARANGO_ROOT_PASSWORD`, and set three distinct passwords before starting Keycloak for the first time:
+
+- `MGMCP_LOCAL_READER_PASSWORD` for `mgmcp-reader`
+- `MGMCP_LOCAL_WRITER_PASSWORD` for `mgmcp-writer`
+- `MGMCP_LOCAL_ADMIN_PASSWORD` for `mgmcp-admin`
+
+Start the local profile:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.local-auth.yml \
+  --profile local-auth up -d --build
+```
+
+Open `http://127.0.0.1:3200` and select **Sign in**. Keycloak listens on `127.0.0.1:8180` by default. Its local realm is imported on first startup and persisted in the Keycloak volume. The local realm uses a public PKCE client and the distinct `memorygraphmcp-api` access-token audience. Use the same Compose files on subsequent restarts to retain the local authentication settings.
+
+The `mgmcp-admin` account has the application admin role. Keycloak's administration console signs in to the separate `master` realm. Set `MGMCP_LOCAL_KEYCLOAK_ADMIN_USERNAME` and `MGMCP_LOCAL_KEYCLOAK_ADMIN_PASSWORD` before first startup to bootstrap a temporary Keycloak administrator. For an existing local database, use the same Compose configuration and stop Keycloak before recovery:
+
+```sh
+docker compose --profile local-auth stop keycloak
+docker compose --profile local-auth run --rm --no-deps \
+  --entrypoint /opt/keycloak/bin/kc.sh keycloak bootstrap-admin user \
+  --username mgmcp-keycloak-admin --password:env KC_BOOTSTRAP_ADMIN_PASSWORD \
+  --no-prompt --db=dev-file
+docker compose --profile local-auth up -d --no-deps keycloak
+```
+
+Use the temporary account at `http://127.0.0.1:8180/admin/`. Keycloak marks bootstrap users as temporary. Once a permanent administrator is available, remove the bootstrap account.
+
+For a shared deployment, run the base Compose file with authentication enabled and configure these provider settings:
+
+| Setting | Purpose |
+| --- | --- |
+| `MGMCP_OIDC_ISSUER` | Exact OIDC issuer |
+| `MGMCP_OIDC_JWKS_URI` | Provider signing keys URL |
+| `MGMCP_OIDC_AUDIENCE` | Audience of the JWT access token for this API |
+| `MGMCP_OIDC_BROWSER_ORIGIN` | Public HTTPS origin of the review UI |
+| `MGMCP_OIDC_BROWSER_CLIENT_ID` | OIDC browser client |
+| `MGMCP_OIDC_BROWSER_CLIENT_SECRET` | Secret for a confidential client, if applicable |
+| `MGMCP_OIDC_BROWSER_TOKEN_AUTH` | `client_secret_basic` or `client_secret_post` |
+| `MGMCP_OIDC_BROWSER_SCOPES` | Additional access-token scopes, when required |
+| `MGMCP_OIDC_BROWSER_AUDIENCE` | Optional audience parameter for providers that require one |
+| `MGMCP_OIDC_ROLE_CLAIM` | Top-level access-token claim containing application role names, default `roles` |
+
+Register `<UI origin>/api/auth/callback` and `<UI origin>/` as the exact login and logout redirect URIs. The provider must issue RS256-signed JWTs. Keycloak's realm roles are also supported. If the provider advertises an end-session endpoint, sign-out ends both the local session and the provider session. Browser sessions live in the API process and expire with the provider tokens or after a service restart. Run one API worker for browser sign-in until shared session storage is configured.
