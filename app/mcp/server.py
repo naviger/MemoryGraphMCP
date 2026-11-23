@@ -7,6 +7,7 @@ from app.mcp.prompts.templates import register_prompts
 from app.mcp.resources.catalog import register_resources
 from app.mcp.tools.adrs import register_adr_tools
 from app.mcp.tools.architecture import register_architecture_tools
+from app.mcp.tools.architecture_events import register_event_tools
 from app.mcp.tools.revalidation import register_revalidation_tool
 from app.mcp.tools.review_queue import register_review_queue_tool
 from app.mcp.tools.search import register_search_tools
@@ -49,6 +50,14 @@ def build_mcp_server(
     if architecture_service is not None:
         register_architecture_tools(
             server, architecture_service, auth_required=settings.auth_required,
+        )
+    if (
+        architecture_service is not None and settings.auth_required
+        and settings.graph_event_producer_subject and settings.graph_event_project_key
+    ):
+        register_event_tools(
+            server, architecture_service.repository,
+            settings.graph_event_producer_subject, settings.graph_event_project_key,
         )
     if ingestion_service is not None:
         register_adr_tools(server, ingestion_service, auth_required=settings.auth_required)

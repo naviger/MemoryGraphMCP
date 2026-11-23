@@ -16,6 +16,7 @@ from app.domain.architecture import (
     Observation,
     Repository,
 )
+from app.domain.architecture_events import GraphEvent, GraphEventReceipt
 from app.domain.project_changes import BranchCleanup
 from app.domain.project_guidance import GuidanceScope
 from app.domain.review_details import ProjectScope
@@ -51,6 +52,12 @@ class ArchitectureRepository(Protocol):
     def add_conversation_summary(
         self, conversation: ConversationSummary
     ) -> ConversationSummary: ...
+
+    def get_event(self, source: str, project_key: str, event_id: str) -> GraphEventReceipt: ...
+
+    def ingest_event(
+        self, source: str, project_key: str, event: GraphEvent,
+    ) -> GraphEventReceipt: ...
 
     def known_test_run_ids(self, repository_key: str, run_ids: list[str]) -> set[str]: ...
 

@@ -27,8 +27,10 @@ from app.domain.architecture import (
     Project,
     RelationshipType,
     Repository,
+    Task,
     architecture_key,
 )
+from app.domain.architecture_events import GraphEvent, GraphEventReceipt, TaskUpserted
 from app.domain.exceptions import ArchitectureGraphError
 from app.domain.project_changes import BranchCleanup
 from app.domain.project_guidance import GuidanceScope
@@ -79,9 +81,11 @@ class ArangoArchitectureRepository:
 
     @contextmanager
     def _transaction(
-        self, *, with_events: bool = False, read_edges: bool = False,
+        self, *, with_events: bool = False, read_edges: bool = False, write_edges: bool = False,
     ) -> Iterator[TransactionDatabase]:
         collections = [self._entities, self._events if with_events else self._edges]
+        if with_events and write_edges:
+            collections.append(self._edges)
         options = {"read": [self._edges]} if read_edges else {}
         transaction = self._database().begin_transaction(exclusive=collections, **options)
         try:
@@ -360,6 +364,103 @@ class ArangoArchitectureRepository:
                 edges.insert(payload)
         for key in previous:
             edges.delete(key)
+
+    def get_event(self, source: str, project_key: str, event_id: str) -> GraphEventReceipt:
+        key = architecture_key("tracker-event", source, project_key, event_id)
+        row = self._database().collection(self._events).get(key)
+        if row is None:
+            raise ArchitectureGraphError(f"Event '{event_id}' was not found")
+        return GraphEventReceipt.model_validate(row)
+
+    def _task_projects(self, nodes, edges, task_key: str) -> set[str]:
+        task_id = f"{self._entities}/{task_key}"
+        owners = set()
+        for endpoint, other in (("_from", "target_key"), ("_to", "source_key")):
+            for edge in edges.find({endpoint: task_id}):
+                if edge["relationship_type"] not in {"defines", "related_to", "references"}:
+                    continue
+                node = nodes.get(edge[other])
+                if node and node["entity_type"] == "Project":
+                    owners.add(node["_key"])
+        return owners
+
+    def ingest_event(
+        self, source: str, project_key: str, event: GraphEvent,
+    ) -> GraphEventReceipt:
+        if event.project_key != project_key:
+            raise ArchitectureGraphError(
+                "Event project does not match the configured tracker project"
+            )
+        key = architecture_key("tracker-event", source, project_key, event.event_id)
+        payload = event.model_dump(mode="json")
+        with self._transaction(with_events=True, write_edges=True) as transaction:
+            journal = transaction.collection(self._events)
+            previous_event = journal.get(key)
+            if previous_event is not None:
+                if previous_event["payload"] != payload:
+                    raise ArchitectureGraphError("This event ID already has a different payload")
+                return GraphEventReceipt.model_validate(previous_event)
+
+            nodes = transaction.collection(self._entities)
+            edges = transaction.collection(self._edges)
+            self._require_entity_type(nodes, project_key, "Project")
+            task = nodes.get(event.task_key)
+            if task is not None and (
+                task["entity_type"] != "Task"
+                or self._task_projects(nodes, edges, event.task_key) != {project_key}
+            ):
+                raise ArchitectureGraphError("Task is not exclusively linked to the tracker project")
+
+            latest = next(iter(transaction.aql.execute(
+                """
+                FOR row IN @@events
+                    FILTER row.event_type IN ["task.upserted", "task.completed"]
+                    FILTER row.source == @source AND row.project_key == @project
+                    FILTER row.task_key == @task AND row.outcome == "applied"
+                    SORT row.occurred_at_us DESC
+                    LIMIT 1
+                    RETURN row.occurred_at_us
+                """,
+                bind_vars={
+                    "@events": self._events, "source": source,
+                    "project": project_key, "task": event.task_key,
+                },
+            )), None)
+            stale = latest is not None and event.occurred_at_us <= latest
+            now = datetime.now(UTC)
+            affected = []
+            if not stale:
+                affected.append(event.task_key)
+                if isinstance(event, TaskUpserted):
+                    updates = event.model_dump(
+                        include={"name", "description", "status"}, exclude_none=True,
+                    )
+                    if task is None:
+                        nodes.insert(self._entity_payload(Task(key=event.task_key, **updates)))
+                        link = ArchitectureLink(
+                            source_key=project_key, target_key=event.task_key,
+                            relationship_type="defines", source="project-tracker",
+                        )
+                        edges.insert(self._edge_payload(link, now.isoformat()))
+                        affected.append(project_key)
+                    else:
+                        nodes.update({"_key": event.task_key, **updates})
+                else:
+                    if task is None:
+                        raise ArchitectureGraphError(f"Task '{event.task_key}' was not found")
+                    nodes.update({"_key": event.task_key, "status": "done"})
+
+            receipt = GraphEventReceipt(
+                event_id=event.event_id, event_type=event.event_type,
+                source=source, project_key=project_key, task_key=event.task_key,
+                occurred_at=event.occurred_at, recorded_at=now,
+                affected_entity_keys=affected, outcome="ignored_stale" if stale else "applied",
+            )
+            journal.insert({
+                **receipt.model_dump(mode="json"), "_key": key,
+                "payload": payload, "occurred_at_us": event.occurred_at_us,
+            })
+            return receipt
 
     def known_test_run_ids(self, repository_key: str, run_ids: list[str]) -> set[str]:
         if not run_ids:
