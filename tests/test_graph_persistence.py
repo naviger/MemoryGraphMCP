@@ -509,3 +509,98 @@ def test_guidance_approval_publishes_saved_revision_and_preserves_history(reposi
     older = client.get(global_path, headers=admin, params={"before_version": 2}).json()
     assert [entry["text"] for entry in older["history"]] == ["Global baseline"]
     assert client.get(path, headers=admin).json()["published"]["text"] == "Second guidance"
+
+
+@pytest.mark.asyncio
+async def test_post_commit_capture_links_entities_and_preserves_inferences_for_review(repository, tmp_path):
+    from pathlib import Path
+    from subprocess import run
+    from sys import executable
+
+    from app.domain.architecture import ArchitectureADR, Goal, Repository, Service, SourceFile
+    from app.domain.knowledge_capture import CommitEnvelope
+    from app.domain.review_details import ProjectEntity, ProjectScope
+    from app.services.capture_worker import CaptureWorker
+    from app.services.knowledge_capture import KnowledgeCaptureService
+
+    graph = repository.architecture
+    graph.ensure_storage_ready()
+    nodes = [
+        Project(key="project", name="Project"),
+        Repository(key="repo", name="Source", role="source"),
+        SourceFile(key="file", name="service.py", source_path="service.py", repository="Source"),
+        Service(key="service", name="AssetService", source_path="service.py", repository="Source"),
+        ArchitectureADR(key="decision", name="ADR-12", memory_key="adr-12"),
+    ]
+    for node in nodes:
+        graph.put_entity(node)
+    goal = Goal(key="goal", name="Ship assets", project_key="project", service_keys=["service"])
+    closure = [*nodes[1:], goal]
+    graph.capture_goal_support = lambda changed, goals: {}
+    graph.project_scope = lambda key: ProjectScope(
+        entities=[ProjectEntity(**node.model_dump(), reason="in project") for node in closure],
+        dependencies=[], repository_names=["Source"],
+    )
+    graph.read_entity = lambda key, read=graph.read_entity: goal if key == goal.key else read(key)
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    spool = tmp_path / "spool"
+
+    def git(*args):
+        return run(["git", *args], cwd=checkout, check=True, capture_output=True, text=True)
+
+    git("init")
+    git("config", "user.name", "Capture Test")
+    git("config", "user.email", "capture@example.invalid")
+    git("config", "core.hooksPath", ".git/hooks")
+    installers = Path(__file__).resolve().parents[1] / "scripts"
+    run([executable, str(installers / "install_capture_hook.py"), str(spool)],
+        cwd=checkout, check=True, capture_output=True)
+    (checkout / "service.py").write_text("class AssetService:\n    # Implements ADR-12.\n    pass\n")
+    git("add", "service.py")
+    git("commit", "-m", "Record asset implementation")
+    envelope, = spool.glob("*.capture")
+    first_payload = envelope.read_bytes()
+    commit = CommitEnvelope.model_validate_json(first_payload).commit
+    assert commit.sha == git("rev-parse", "HEAD").stdout.strip()
+    assert commit.changed_files == ["service.py"]
+
+    capture = KnowledgeCaptureService(graph, repository)
+    worker = CaptureWorker(Settings(
+        _env_file=None, auth_required=False, capture_project_key="project", capture_repository_key="repo",
+        capture_spool=str(spool),
+    ), capture)
+    worker.read_spool()
+    assert not envelope.exists()
+    observation = capture.commit("project", "repo", commit)
+    assert "Detected additions: service, ADR reference." in observation.summary
+    assert set(observation.related_entity_keys) == {"project", "repo", "service", "file"}
+    assert ("service", "decision", "implements") in {
+        (link.source_key, link.target_key, link.relationship_type) for link in observation.suggestions
+    }
+    assert "Ship assets" in observation.summary
+    assert any(link.target_key == "goal" for link in observation.suggestions)
+    envelope.write_bytes(first_payload)
+    worker.read_spool()
+    assert capture.commit("project", "repo", commit) == observation
+    edges = repository.database.collection("architecture_edges").documents_by_key.values()
+    assert len(edges) == 4
+    assert all(edge["relationship_type"] == "related_to" for edge in edges)
+
+    server = build_mcp_server(
+        Settings(_env_file=None, auth_required=False), MemorySearchService(repository), StaticKnowledgeBase(),
+        architecture_service=ArchitectureService(graph, repository),
+    )
+    async with Client(server) as client:
+        reflected = (await client.call_tool("review_change", {"change": {
+            "project_key": "project", "diff": commit.diff, "test_results": "Two tests passed",
+            "rationale": "Implement the accepted assets decision", "linked_entities": ["service"],
+        }})).structured_content
+        assert "Two tests passed" in reflected["summary"]
+        assert "Implement the accepted assets decision" in reflected["summary"]
+        assert "ADR-12" in reflected["summary"]
+        with pytest.raises(ToolError, match="belong to the selected project"):
+            await client.call_tool("review_change", {"change": {
+                "project_key": "project", "diff": commit.diff, "linked_entities": ["unrelated"],
+            }})

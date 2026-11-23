@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from app.domain.knowledge_capture import CaptureSuggestion, Evidence
 from app.domain.models import MemoryKey
 
 EntityName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
@@ -259,6 +260,8 @@ class Observation(ArchitectureNode):
     timestamp: AwareDatetime
     related_entity_keys: list[MemoryKey] = Field(min_length=1, max_length=100)
     recorded_by: str | None = None
+    evidence: list[Evidence] = Field(default_factory=list, max_length=50)
+    suggestions: list[CaptureSuggestion] = Field(default_factory=list, max_length=50)
 
 
 ArchitectureEntity = Annotated[

@@ -14,6 +14,9 @@ from pydantic import (
     model_validator,
 )
 
+from app.domain.keys import MemoryKey as MemoryKey
+from app.domain.knowledge_capture import CaptureReviewItem
+
 MemoryKind = Literal["memory", "architecture", "adr", "design-language", "domain-concept"]
 SearchMode = Literal["lexical", "semantic", "hybrid"]
 ConfidenceScore = Annotated[float, Field(ge=0, le=1)]
@@ -82,12 +85,6 @@ class MemoryDocument(MemoryValidity):
 
 
 ADRStatus = Literal["proposed", "accepted", "superseded", "rejected"]
-
-
-MemoryKey = Annotated[
-    str,
-    Field(min_length=1, max_length=254, pattern=r"^[A-Za-z0-9_\-.$+!*'(),;=@%:]+$"),
-]
 
 
 ScopeLabel = Annotated[
@@ -210,6 +207,7 @@ class ReviewQueue(BaseModel):
     review_date: CalendarDate
     overdue_validations: list[OverdueValidation]
     unresolved_adr_conflicts: list[ADRConflict]
+    inferred_relationships: list[CaptureReviewItem] = Field(default_factory=list)
 
 
 class ADRSupersession(BaseModel):

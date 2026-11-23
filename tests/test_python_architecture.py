@@ -94,3 +94,21 @@ def test_python_index_uses_repository_scoped_keys_and_qualified_method_names():
 def test_python_index_rejects_invalid_snapshots(path, source):
     with pytest.raises(ArchitectureGraphError):
         PythonArchitectureIndexer().build("test", {path: source})
+
+
+def test_indexer_captures_literal_constraint_declarations():
+    index = PythonArchitectureIndexer().build("Example", {
+        "rules.py": """
+rule = ConstraintInput(
+    key="verified-identity", name="Verify identity", rule="Require verified tokens",
+    scope="public API", authority="Platform security", enforcement_status="enforced",
+)
+dynamic = ConstraintInput(key=identifier, name="Dynamic", rule=get_rule(), scope="API", authority="Team")
+""",
+    })
+    rule, = [entry for entry in index.entities if entry.entity_type == "Constraint"]
+    assert rule.name == "Verify identity"
+    assert rule.authority == "Platform security"
+    assert rule.enforcement_status == "proposed"
+    assert rule.metadata["declared_enforcement_status"] == "enforced"
+    assert any(link.target_key == rule.key and link.relationship_type == "defines" for link in index.links)

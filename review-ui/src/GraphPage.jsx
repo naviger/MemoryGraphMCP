@@ -121,6 +121,7 @@ export function GraphPage({ initialFocus, projectKey, token, navigate, onUnautho
     const request = new AbortController();
     const params = new URLSearchParams({ hops });
     if (requestedTypes) requestedTypes.split(',').forEach((type) => params.append('entity_types', type));
+    if (projectKey) params.set('project_key', projectKey);
     const options = { token, signal: request.signal };
     const load = focus.startsWith('record:')
       ? reviewRequest(`/records/${encodeURIComponent(focus.slice(7))}`, options).then(({ record }) => ({
@@ -137,7 +138,7 @@ export function GraphPage({ initialFocus, projectKey, token, navigate, onUnautho
         else setGraphError(error.message);
       });
     return () => request.abort();
-  }, [focus, hops, requestedTypes, token, onUnauthorized]);
+  }, [focus, hops, requestedTypes, projectKey, token, onUnauthorized]);
 
   function selectNode(entity, trigger) {
     selectionTrigger.current = trigger;

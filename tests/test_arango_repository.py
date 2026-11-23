@@ -433,6 +433,8 @@ async def test_adr_conflict_tool_returns_both_records_with_evidence(repository, 
             assert set(bind_vars) == {
                 name.removeprefix("@") for name in re.findall(r"@@?\w+", query)
             }
+            if "LENGTH(node.suggestions)" in query:
+                return []
             if "last_validation: LAST" in query:
                 assert bind_vars == {
                     "@documents": "memory_documents", "as_of": "2026-11-21",

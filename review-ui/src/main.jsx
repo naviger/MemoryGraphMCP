@@ -1,6 +1,6 @@
 import {
-  Activity, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, CircleHelp, FolderKanban, GitPullRequest,
-  House, KeyRound, LogOut, MessageCircleQuestion, Network, RefreshCw, Search, ShieldCheck,
+  Activity, BarChart3, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, CircleHelp, FolderKanban, GitPullRequest,
+  House, KeyRound, MessageCircleQuestion, Network, RefreshCw, Search, ShieldCheck,
 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -9,6 +9,8 @@ import { EffectivenessPage } from './EffectivenessPage.jsx';
 import { EntityDetailPage } from './EntityDetailPage.jsx';
 import { HomePage } from './HomePage.jsx';
 import { ProjectsPage } from './ProjectsPage.jsx';
+import { SidebarAccount } from './SidebarAccount.jsx';
+import { TokenUsagePage } from './TokenUsagePage.jsx';
 import { HelpPage } from './HelpPage.jsx';
 import ProjectGuidance from './ProjectGuidance.jsx';
 import { GraphPage } from './GraphPage.jsx';
@@ -114,6 +116,7 @@ function detailLocation() {
   if (/^\/search\/?$/.test(window.location.pathname)) return { destination: 'search' };
   if (/^\/help\/?$/.test(window.location.pathname)) return { destination: 'help' };
   if (/^\/global-guidance\/?$/.test(window.location.pathname)) return { destination: 'global-guidance' };
+  if (/^\/token-usage\/?$/.test(window.location.pathname)) return { destination: 'token-usage' };
   if (/^\/effectiveness\/?$/.test(window.location.pathname)) return { destination: 'effectiveness' };
   const review = window.location.pathname.match(/^\/review\/(validations|conflicts)\/?$/);
   if (review) return { destination: 'review', key: review[1] };
@@ -395,16 +398,6 @@ function App() {
                 {projects?.map((item) => <option key={item.key} value={item.key}>{item.name}</option>)}
               </select>
             </label>
-            <span className="access"><ShieldCheck size={16} aria-hidden="true" />
-              {session.role === 'admin' ? 'Admin access' : session.can_write ? 'Writer access' : 'Read-only'}</span>
-            {signedIn && session.display_name && (
-              <span className="subject" title={session.display_name}>{session.display_name}</span>
-            )}
-            {signedIn && <button className="button top-button"
-              onClick={session.browser_session ? signOut : () => changeToken('')}>
-              <LogOut size={16} aria-hidden="true" /> {session.browser_session ? 'Sign out' : 'Disconnect'}
-            </button>}
-            {session && authError && <span role="alert">{authError}</span>}
           </div>
         )}
       </header>
@@ -435,6 +428,11 @@ function App() {
               onClick={(event) => navigate(event, '/search')}>
               <Search size={18} aria-hidden="true" /> Search Memory
             </a>
+            {session && <a href="/token-usage" className={route?.destination === 'token-usage' ? 'nav-item active' : 'nav-item'}
+              aria-current={route?.destination === 'token-usage' ? 'page' : undefined}
+              onClick={(event) => navigate(event, '/token-usage')}>
+              <BarChart3 size={18} aria-hidden="true" /> Token usage
+            </a>}
             {session && <a href="/effectiveness" className={route?.destination === 'effectiveness' ? 'nav-item active' : 'nav-item'}
               aria-current={route?.destination === 'effectiveness' ? 'page' : undefined}
               onClick={(event) => navigate(event, '/effectiveness')}>
@@ -448,13 +446,17 @@ function App() {
               </a>
             )}
           </nav>
-          <nav className="rail-help" aria-label="Help">
-            <a href="/help" className={route?.destination === 'help' ? 'nav-item active' : 'nav-item'}
-              aria-current={route?.destination === 'help' ? 'page' : undefined}
-              onClick={(event) => navigate(event, '/help')}>
-              <CircleHelp size={18} aria-hidden="true" /> Help
-            </a>
-          </nav>
+          <div className="rail-footer">
+            <nav className="rail-help" aria-label="Help">
+              <a href="/help" className={route?.destination === 'help' ? 'nav-item active' : 'nav-item'}
+                aria-current={route?.destination === 'help' ? 'page' : undefined}
+                onClick={(event) => navigate(event, '/help')}>
+                <CircleHelp size={18} aria-hidden="true" /> Help
+              </a>
+            </nav>
+            {signedIn && <SidebarAccount key={session.subject} session={session} error={authError}
+              onSignOut={session.browser_session ? signOut : () => changeToken('')} />}
+          </div>
         </aside>
         <main className={session && route?.destination === 'graph' ? 'graph-main' : undefined}>
           {session && projectError && <p role="alert" className="status error">{projectError}</p>}
@@ -496,7 +498,9 @@ function App() {
             key={projectKey} projectKey={projectKey} projects={projects} token={token} onUnauthorized={expireSession} />}
           {session && !projects && route?.destination === 'effectiveness' && !projectError &&
             <p role="status">Loading projects…</p>}
-          {session && ['ask', 'search', 'graph', 'projects', 'help', 'global-guidance', 'effectiveness'].includes(route?.destination)
+          {session && route?.destination === 'token-usage' && <TokenUsagePage projectKey={projectKey}
+            token={token} onUnauthorized={expireSession} />}
+          {session && ['ask', 'search', 'graph', 'projects', 'help', 'global-guidance', 'token-usage', 'effectiveness'].includes(route?.destination)
             ? null : session && !isQueueRoute ? (
             <EntityDetailPage key={`${route.destination}/${route.key}`}
               route={route} token={token} navigate={navigate} onUnauthorized={expireSession}

@@ -36,8 +36,10 @@ from app.domain.architecture_events import (
     TaskUpserted,
     TrackerActivity,
 )
+from app.domain.context_usage import UsageOutcome, UsageReceipt, UsageScope
 from app.domain.effectiveness import DevelopmentOutcome, OutcomeReceipt
 from app.domain.exceptions import ArchitectureGraphError
+from app.domain.knowledge_capture import CaptureReviewItem
 from app.domain.project_changes import BranchCleanup
 from app.domain.project_guidance import (
     GuidanceDraft,
@@ -188,14 +190,16 @@ class ArangoArchitectureRepository:
             "updated_at": now,
         }
 
-    def add_observation(self, observation: Observation) -> Observation:
+    def add_observation(self, observation: Observation, *, replay: bool = False) -> Observation:
         with self._transaction() as transaction:
             nodes = transaction.collection(self._entities)
             existing = nodes.get(observation.key)
             if existing is not None:
                 if existing["entity_type"] == "Observation":
                     previous = Observation.model_validate(existing)
-                    if previous.model_dump(exclude={"timestamp"}) == observation.model_dump(
+                    if (replay and previous.metadata == observation.metadata) or previous.model_dump(
+                        exclude={"timestamp"}
+                    ) == observation.model_dump(
                         exclude={"timestamp"}
                     ):
                         return previous
@@ -219,6 +223,78 @@ class ArangoArchitectureRepository:
                 )
                 edges.insert(self._edge_payload(link, observation.timestamp.isoformat()))
             return Observation.model_validate(result["new"])
+
+    def last_index_revision(self, repository_key: str) -> str | None:
+        row = self._database().collection(self._entities).get(repository_key)
+        return row.get("last_indexed_at") if row else None
+
+    def capture_goal_support(self, changed_keys: list[str], goal_keys: list[str]) -> dict[str, list[str]]:
+        if not changed_keys or not goal_keys:
+            return {}
+        rows = self._database().aql.execute(
+            """
+            FOR edge IN @@edges
+                FILTER edge.relationship_type == "supports_goal"
+                FILTER edge.source_key IN @changed AND edge.target_key IN @goals
+                COLLECT goal = edge.target_key INTO sources = edge.source_key
+                RETURN {goal, sources: UNIQUE(sources)}
+            """,
+            bind_vars={"@edges": self._edges, "changed": changed_keys, "goals": goal_keys},
+        )
+        return {row["goal"]: row["sources"] for row in rows}
+
+    def capture_conversations(self, entity_keys: list[str]) -> list[ConversationSummary]:
+        rows = self._database().aql.execute(
+            """
+            FOR node IN @@entities
+                FILTER node.entity_type == "ConversationSummary"
+                LET outcomes = UNION_DISTINCT(node.decision_keys, node.risk_keys, node.task_keys)
+                FILTER LENGTH(outcomes) > 0
+                FILTER LENGTH(MINUS(outcomes, @keys)) == 0
+                RETURN node
+            """,
+            bind_vars={"@entities": self._entities, "keys": entity_keys},
+        )
+        return [ConversationSummary.model_validate(row) for row in rows]
+
+    def capture_journal(self, project_key: str, limit: int) -> list[dict]:
+        return list(self._database().aql.execute(
+            """
+            FOR event IN @@events
+                FILTER event.project_key == @project
+                FILTER event.event_type == "test.run.finished" OR event.outcome == "applied"
+                FILTER DOCUMENT(@entities, CONCAT("capture-", event._key)) == null
+                SORT event.recorded_at, event._key
+                LIMIT @limit
+                RETURN event
+            """,
+            bind_vars={
+                "@events": self._events, "entities": self._entities,
+                "project": project_key, "limit": limit,
+            },
+        ))
+
+    def capture_review(
+        self, project_key: str | None, limit: int, as_of: str | None,
+    ) -> list[CaptureReviewItem]:
+        rows = self._database().aql.execute(
+            """
+            FOR node IN @@entities
+                FILTER node.entity_type == "Observation" AND LENGTH(node.suggestions) > 0
+                LET project = node.metadata.capture_project
+                FILTER IS_STRING(project) AND (@project == null OR project == @project)
+                FILTER @as_of == null OR LEFT(node.timestamp, 10) <= @as_of
+                SORT node.timestamp DESC, node._key DESC
+                LIMIT @limit
+                RETURN {key: node._key, project_key: project, summary: node.summary,
+                        timestamp: node.timestamp, suggestions: node.suggestions}
+            """,
+            bind_vars={
+                "@entities": self._entities, "project": project_key,
+                "limit": limit, "as_of": as_of,
+            },
+        )
+        return [CaptureReviewItem.model_validate(row) for row in rows]
 
     def save_project_goal(self, goal: Goal) -> Goal:
         if goal.project_key is None:
@@ -765,7 +841,9 @@ class ArangoArchitectureRepository:
             }
         )
 
-    def replace_index(self, index: ArchitectureIndex) -> int:
+    def replace_index(
+        self, index: ArchitectureIndex, *, capture_order: str | None = None,
+    ) -> int:
         entities = [
             {**self._entity_payload(node), "repository": index.repository, "index_state": "current"}
             for node in index.entities
@@ -796,6 +874,18 @@ class ArangoArchitectureRepository:
             edges[payload["_key"]] = {**payload, "index_repository": index.repository}
 
         with self._transaction() as transaction:
+            if capture_order and root_key:
+                root = transaction.collection(self._entities).get(root_key) or {}
+                if root.get("capture_index_order", "") > capture_order:
+                    return 0
+                for node in entities:
+                    if node["_key"] == root_key:
+                        node["capture_index_order"] = capture_order
+            elif root_key:
+                root = transaction.collection(self._entities).get(root_key) or {}
+                for node in entities:
+                    if node["_key"] == root_key and "capture_index_order" in root:
+                        node["capture_index_order"] = root["capture_index_order"]
             collision = list(
                 transaction.aql.execute(
                     """
@@ -958,6 +1048,70 @@ class ArangoArchitectureRepository:
             if row["url"] not in cleanups:
                 cleanups[row["url"]] = BranchCleanup.model_validate(row)
         return cleanups
+
+    def record_usage(self, receipt: UsageReceipt, owner: str, session: str | None) -> None:
+        self._database().collection(self._events).insert({
+            "_key": f"usage-{receipt.request_id}", "event_type": "retrieval.usage",
+            "owner": owner, "usage_session": session, **receipt.model_dump(mode="json"),
+        })
+
+    def read_usage(self, request_id: str, owner: str) -> UsageReceipt | None:
+        row = self._database().collection(self._events).get(f"usage-{request_id}")
+        if not row or row.get("owner") != owner or row.get("event_type") != "retrieval.usage":
+            return None
+        return UsageReceipt.model_validate(row)
+
+    def report_usage(self, request_id: str, owner: str, outcome: UsageOutcome) -> UsageReceipt | None:
+        key = f"usage-{request_id}"
+        with self._transaction(with_events=True) as transaction:
+            journal = transaction.collection(self._events)
+            row = journal.get(key)
+            if not row or row.get("owner") != owner or row.get("event_type") != "retrieval.usage":
+                return None
+            result = UsageReceipt.model_validate(row)
+            result.outcome = outcome
+            result.response_tokens = outcome.response_tokens
+            result.total_tokens = result.query_tokens + result.context_tokens + (outcome.response_tokens or 0)
+            if result.savings_tokens is not None:
+                result.naive_rag_tokens = result.total_tokens + result.savings_tokens
+            journal.update({"_key": key, **result.model_dump(mode="json")})
+            return result
+
+    def query_usage(
+        self, scope: UsageScope, project: str | None, session: str | None,
+    ) -> tuple[list[dict], list[UsageReceipt]]:
+        if (scope == "session" and not session) or (scope == "project" and not project):
+            return [], []
+        database = self._database()
+        bindings = {"@events": self._events, "scope": scope, "project": project, "session": session}
+        selection = """
+        FOR row IN @@events
+            FILTER row.event_type == "retrieval.usage"
+            FILTER @scope != "project" OR row.project_key == @project
+            FILTER @scope != "session" OR row.usage_session == @session
+        """
+        groups = list(database.aql.execute(selection + """
+            COLLECT day = LEFT(row.timestamp, 10), method = row.method
+                AGGREGATE requests = COUNT(row),
+                    query_tokens = SUM(row.query_tokens),
+                    context_tokens = SUM(row.context_tokens),
+                    response_tokens = SUM(NOT_NULL(row.response_tokens, 0)),
+                    total_tokens = SUM(row.total_tokens),
+                    savings_tokens = SUM(NOT_NULL(row.savings_tokens, 0)),
+                    measured_savings_requests = SUM(row.savings_tokens == null ? 0 : 1),
+                    reported_outcomes = SUM(row.outcome == null ? 0 : 1),
+                    successful_completions = SUM(row.outcome.completed == true ? 1 : 0),
+                    retries = SUM(NOT_NULL(row.outcome.follow_up_retries, 0))
+            RETURN {day, method, requests, query_tokens, context_tokens, response_tokens,
+                    total_tokens, savings_tokens, measured_savings_requests, reported_outcomes,
+                    successful_completions, retries}
+        """, bind_vars=bindings))
+        recent = database.aql.execute(selection + """
+            SORT row.timestamp DESC, row.request_id DESC
+            LIMIT 20
+            RETURN row
+        """, bind_vars=bindings)
+        return groups, [UsageReceipt.model_validate(row) for row in recent]
 
     def save_development_outcome(self, outcome: DevelopmentOutcome, actor: str) -> OutcomeReceipt:
         key = architecture_key("development-outcome", outcome.project_key, outcome.repository_key, outcome.change_id)

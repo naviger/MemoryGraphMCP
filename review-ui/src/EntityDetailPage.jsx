@@ -171,6 +171,10 @@ export function EntityDetailPage({ route, token, navigate, onUnauthorized, retur
                 <>
                   {entity.source_path && <dl className="facts"><div><dt>Source path</dt><dd><code>{entity.source_path}</code></dd></div></dl>}
                   {entity.description && <p className="record-content">{entity.description}</p>}
+                  {entity.evidence?.length > 0 && <section>
+                    <h3>Evidence</h3>
+                    <ul>{entity.evidence.map((citation, index) => <li key={index}>{citation}</li>)}</ul>
+                  </section>}
                   {!entity.source_path && !entity.description && <p className="muted">No additional details recorded.</p>}
                 </>
               )}

@@ -405,6 +405,80 @@ contains project instructions. Each field is null until its first publication.
 Drafts stay in the editors. Current accepted ADRs and active constraints,
 including validating test keys, are returned alongside both guidance fields.
 
+### Automated knowledge capture
+
+The capture worker creates project-linked observations from commits, pull
+requests, ADRs, CI attempts, task updates, architecture indexes, constraints,
+and existing conversation summaries. **Projects → Review → Suggested
+relationships** shows tentative links with confidence and evidence. Capture
+links each observation to the project and directly matched entities.
+Suggestions do not create confirmed architecture edges.
+
+Set `MGMCP_CAPTURE_PROJECT_KEY` and `MGMCP_CAPTURE_REPOSITORY_KEY` for an
+existing project and its linked source repository. For Compose, set
+`MGMCP_CAPTURE_HOST_SPOOL` to an absolute local directory and add
+`-f docker-compose.capture.yml` alongside your existing Compose files. From
+each participating Git checkout, install the post-commit hook once:
+
+```sh
+python /path/to/MemoryGraphMCP/scripts/install_capture_hook.py /path/to/capture-spool
+```
+
+The hook queues the commit SHA, changed files, and a bounded diff. It does
+not need GitHub or MCP credentials. The worker retries unprocessed files
+and removes an envelope after capture. Keep the spool private because
+unprocessed envelopes contain source diffs. Pass `--index-branch main` when
+installing the hook in an authoritative checkout if local commits on that
+branch should also refresh the complete Python architecture index. Use
+one capture worker and one authoritative checkout per indexed repository.
+
+Set `MGMCP_CAPTURE_GITHUB_REPOSITORY=owner/repo` to also capture recent
+GitHub commits and pull requests. Private repositories use the existing
+read-only GitHub credential. GitHub polling uses a bounded recent history
+and follows the configured CI branch for commits. To refresh the full Python
+index at that branch's GitHub head, set `MGMCP_CAPTURE_INDEX_GITHUB=true`.
+Choose one authoritative index source per repository. Python indexing can
+capture literal `ConstraintInput` declarations with a key, name, rule, scope,
+and authority as proposed evidence. Active architectural constraints are
+managed through the constraint tool. CI and tracker events
+come from the graph journal. ADRs, constraints, indexes, standalone tasks,
+and existing conversation summaries are observed as project-scoped snapshots.
+
+Writers can call `review_change` with the project key, diff, optional test
+results, optional rationale, and linked entities. The tool records what changed, any supplied
+rationale, and related ADRs, goals, and constraints. It uses stored evidence
+and static heuristics, so missing rationale stays unknown.
+
+### Graph context packages and token usage
+
+Call `build_context_package` with a question and optionally a project, entity,
+ADR, goal, or service key. An ADR anchor can use its graph key or stored record
+key. The tool uses graph anchors and direct relationships to collect compact
+decisions, active constraints, services, tests, and citations. Use `as_of` to
+filter decisions by date and `max_context_tokens` to limit the estimated size.
+Graph links describe the currently indexed architecture. Pass
+`include_full_adrs: true` to request full ADR text when it fits the same budget.
+Send the context fields to your LLM and retain the `usage` receipt separately.
+Ask the Graph uses the graph evidence first and falls back to lexical evidence
+when it finds no applicable linked decisions.
+
+**Token usage** in the sidebar shows recent retrievals, daily history, and
+session, project, and lifetime summaries. An MCP retrieval returns its receipt
+in result metadata or, for context packages, in the structured result.
+Review API searches and graph requests expose estimates and a request ID in
+`X-MemoryGraph-*` headers. Use `get_retrieval_usage` for an individual receipt
+and `get_token_usage` for rollups. For bearer clients without a server session,
+send a consistent `X-MemoryGraph-Session` value to group requests.
+
+The estimator is model-independent. The counterfactual uses full text for the
+same retrieved documents or candidate ADRs where available, with the same
+question and reported response tokens. A missing baseline produces no savings
+estimate. Use `report_retrieval_outcome` to add completion, follow-up retries,
+and optional provider-counted response tokens to your request. The dashboard
+compares average reported retries for graph and document retrieval when both
+groups have outcomes. It does not infer success or claim a causal reduction.
+The journal stores metrics, not query text, retrieved text, or model output.
+
 ### Engineering effectiveness
 
 Open **Effectiveness** in the sidebar. Compare projects, linked source

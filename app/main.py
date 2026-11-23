@@ -22,17 +22,21 @@ from app.mcp.server import build_mcp_server
 from app.repositories.factory import build_repository
 from app.services.architecture_service import ArchitectureService
 from app.services.ask_graph import AskGraphService
+from app.services.capture_worker import CaptureWorker
+from app.services.context_package import ContextPackageService
 from app.services.effectiveness import EffectivenessService
 from app.services.embeddings import EmbeddingService
 from app.services.github_test_runs import GitHubBranchHead, poll_test_runs
 from app.services.ingestion_service import MemoryIngestionService
 from app.services.knowledge_base import StaticKnowledgeBase
+from app.services.knowledge_capture import KnowledgeCaptureService
 from app.services.observability import MemoryObservability
 from app.services.project_changes import ProjectChangesService
 from app.services.review_details import ReviewDetailService
 from app.services.review_queue import ReviewQueueService
 from app.services.search_service import MemorySearchService
 from app.services.test_fix import TestFixService
+from app.services.token_usage import TokenUsageService
 
 logger = structlog.get_logger(__name__)
 
@@ -91,6 +95,9 @@ def create_application(settings: Settings | None = None) -> FastAPI:
                 settings.ci_repository_key,
             )):
                 background.start_soon(poll_test_runs, settings, graph_repository, ci_head)
+            if graph_repository and settings.capture_project_key:
+                worker = CaptureWorker(settings, KnowledgeCaptureService(graph_repository, repository))
+                background.start_soon(worker.run)
             try:
                 yield
             finally:
@@ -124,9 +131,10 @@ def create_application(settings: Settings | None = None) -> FastAPI:
             version=getattr(provider, "version", None),
         ),
     )
+    context_packages = ContextPackageService(graph_repository, repository) if graph_repository else None
     app.include_router(build_review_router(
         ReviewQueueService(repository), review_details,
-        AskGraphService(repository, review_details), settings.auth_required, service,
+        AskGraphService(repository, review_details, context_packages), settings.auth_required, service,
         ci_github_repository=settings.ci_github_repository,
         ci_project_key=settings.ci_project_key,
         ci_head=ci_head.current,
@@ -135,6 +143,8 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         test_fixes=TestFixService(settings, graph_repository, repository)
         if graph_repository else None,
         changes=ProjectChangesService(settings, graph_repository) if graph_repository else None,
+        context_packages=context_packages,
+        usage=TokenUsageService(graph_repository) if graph_repository and hasattr(graph_repository, "record_usage") else None,
     ))
     if graph_repository is not None and hasattr(graph_repository, "effectiveness_graph"):
         app.include_router(build_effectiveness_router(
