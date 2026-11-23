@@ -75,7 +75,8 @@ class ProjectGuidance(BaseModel):
     as_of: date
     decisions: list[GuidanceDecision]
     constraints: list[GuidanceConstraint]
-    published_guidance: PublishedGuidance | None = None
+    global_guidance: PublishedGuidance | None = None
+    published_guidance: PublishedGuidance | None = Field(default=None, description="Published project guidance")
 
 
 class GuidanceScope(BaseModel):

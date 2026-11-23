@@ -110,6 +110,12 @@ def _require_writer(request: Request) -> str:
     return subject
 
 
+def _require_guidance_admin(request: Request) -> str:
+    if access_role(getattr(request.state, "auth_claims", {})) != "admin":
+        raise HTTPException(403, "An administrator must manage global guidance")
+    return _require_writer(request)
+
+
 def build_review_router(
     service: ReviewQueueService,
     details: ReviewDetailService,
@@ -274,6 +280,40 @@ def build_review_router(
         except ArchitectureGraphError as exc:
             raise HTTPException(409, str(exc)) from exc
         return await get_guidance_editor(key, request, response)
+
+    @router.get("/guidance/global")
+    async def get_global_guidance_editor(
+        request: Request, response: Response,
+        before_version: Annotated[int | None, Query(ge=1)] = None,
+    ) -> GuidanceEditor:
+        _require_guidance_admin(request)
+        result = await details.get_guidance_editor(None, True, True, before_version)
+        if result is None:
+            raise HTTPException(503, "Global guidance is unavailable")
+        response.headers["Cache-Control"] = "no-store"
+        return result
+
+    async def change_global_guidance(
+        request: Request, response: Response, revision: int, *, text: str | None = None,
+    ) -> GuidanceEditor:
+        actor = _require_guidance_admin(request)
+        try:
+            await details.change_guidance(None, revision, actor, text=text)
+        except ArchitectureGraphError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return await get_global_guidance_editor(request, response)
+
+    @router.post("/guidance/global/draft")
+    async def save_global_guidance_draft(
+        draft: GuidanceDraftInput, request: Request, response: Response,
+    ) -> GuidanceEditor:
+        return await change_global_guidance(request, response, draft.revision, text=draft.text)
+
+    @router.post("/guidance/global/approve")
+    async def approve_global_guidance(
+        approval: GuidanceApproval, request: Request, response: Response,
+    ) -> GuidanceEditor:
+        return await change_global_guidance(request, response, approval.revision)
 
     @router.get("/projects/{key}/tracker")
     async def get_tracker_overview(key: MemoryKey, response: Response) -> TrackerOverview:

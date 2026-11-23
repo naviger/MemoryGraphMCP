@@ -429,7 +429,7 @@ def test_guidance_approval_publishes_saved_revision_and_preserves_history(reposi
             rows = repository.database.collection("architecture_events").documents_by_key.values()
             versions = [
                 entry for entry in rows
-                if entry["event_type"] == "project.guidance.published"
+                if entry["event_type"] == bind_vars["event_type"]
                 and entry["project_key"] == bind_vars["project"]
                 and entry["version"] < bind_vars["before"]
             ]
@@ -473,3 +473,39 @@ def test_guidance_approval_publishes_saved_revision_and_preserves_history(reposi
     assert [entry["text"] for entry in second["history"]] == ["Second guidance", "First guidance"]
     older = client.get(path, headers=auth("reader"), params={"before_version": 2}).json()
     assert [entry["version"] for entry in older["history"]] == [1]
+
+    global_path = "/api/review/guidance/global"
+    assert client.get(global_path).status_code == 401
+    for role in ("reader", "writer"):
+        assert client.get(global_path, headers=auth(role)).status_code == 403
+        assert client.post(f"{global_path}/draft", headers=auth(role), json=draft).status_code == 403
+        assert client.post(f"{global_path}/approve", headers=auth(role), json=approval).status_code == 403
+
+    admin = auth("admin")
+    response = client.get(global_path, headers=admin)
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["revision"] == 0
+    for revision, content in ((0, "Global baseline"), (2, "Updated global baseline")):
+        saved = client.post(f"{global_path}/draft", headers=admin, json={
+            "revision": revision, "text": content,
+        })
+        assert saved.status_code == 200
+        assert saved.json()["draft"]["edited_by"] == "admin"
+        if revision:
+            stale = client.post(f"{global_path}/approve", headers=admin, json={
+                "revision": revision, "approve": True,
+            })
+            assert stale.status_code == 409
+        published = client.post(f"{global_path}/approve", headers=admin, json={
+            "revision": revision + 1, "approve": True,
+        })
+        assert published.status_code == 200
+        assert published.json()["published"]["approved_by"] == "admin"
+
+    assert [entry["text"] for entry in published.json()["history"]] == [
+        "Updated global baseline", "Global baseline",
+    ]
+    assert published.json()["draft"] is None
+    older = client.get(global_path, headers=admin, params={"before_version": 2}).json()
+    assert [entry["text"] for entry in older["history"]] == ["Global baseline"]
+    assert client.get(path, headers=admin).json()["published"]["text"] == "Second guidance"

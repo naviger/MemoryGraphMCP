@@ -58,36 +58,12 @@ function NodeTypeFilters({ types, hiddenTypes, onToggle, onToggleCategory, onRes
   );
 }
 
-function Metamodel({ model }) {
-  return (
-    <section className="graph-panel">
-      <h2>Node types</h2>
-      <ul className="graph-types">
-        {model.entity_types.map((type) => <li key={type}>{type}</li>)}
-      </ul>
-      <p><code>Repository</code> has two roles: <code>source</code> for codebases and <code>persistence</code> for repository components.</p>
-      <h2>Relationships</h2>
-      <p>The graph stores a forward edge. Traversal in the opposite direction uses its inverse.</p>
-      <div className="table-scroll">
-        <table className="confidence-history">
-          <thead><tr><th scope="col">Stored relationship</th><th scope="col">Inverse</th></tr></thead>
-          <tbody>{Object.entries(model.relationships).map(([forward, inverse]) => (
-            <tr key={forward}><td><code>{forward}</code></td><td><code>{inverse}</code></td></tr>
-          ))}</tbody>
-        </table>
-      </div>
-      <p>Each edge carries its source, confidence, creation time, and last update time.</p>
-    </section>
-  );
-}
-
 function EntityName({ entity }) {
   return <><span className="graph-kind">{entity.entity_type}{entity.role && ` · ${entity.role}`}</span>
     <strong>{entity.name}</strong>{entity.source_path && <small>{entity.source_path}</small>}</>;
 }
 
 export function GraphPage({ initialFocus, projectKey, token, navigate, onUnauthorized, returnTo }) {
-  const [mode, setMode] = useState('explore');
   const [model, setModel] = useState(null);
   const [modelError, setModelError] = useState('');
   const [query, setQuery] = useState('');
@@ -196,69 +172,63 @@ export function GraphPage({ initialFocus, projectKey, token, navigate, onUnautho
       </nav>}
       <header className="page-heading"><div><h1>Graph</h1>
         <p>Explore architecture nodes and follow their relationships.</p></div></header>
-      <div className="graph-modes" role="group" aria-label="Graph view">
-        <button type="button" className="button outlined" aria-pressed={mode === 'explore'} onClick={() => setMode('explore')}>Explore</button>
-        <button type="button" className="button outlined" aria-pressed={mode === 'schema'} onClick={() => setMode('schema')}>Metamodel</button>
-      </div>
       {modelError && <p role="alert">{modelError}</p>}
-      {mode === 'schema' ? (model ? <Metamodel model={model} /> : !modelError && <p role="status">Loading metamodel…</p>) : (
-        <div className="graph-workspace">
-          <section className="graph-panel graph-sidebar" aria-label="Find nodes">
-            <div className="graph-picker">
-              <h2>Find nodes</h2>
-              <form className="graph-search" onSubmit={(event) => {
-                event.preventDefault();
-                setResults(null);
-                setSearchError('');
-                setFilter({ query: query.trim(), type: '' });
-              }}>
-                <label>Search <input type="search" maxLength={500} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-                <button type="submit" className="button primary">Find nodes</button>
-              </form>
-              {searchError ? <p role="alert">{searchError}</p> : results === null ? <p role="status">Loading nodes…</p> : (
-                results.length ? <ul className="graph-results">{results.map((entity) => (
-                  <li key={entity.key}><button type="button" className="graph-node" aria-pressed={selected?.node?.key === entity.key}
-                    onClick={(event) => { selectNode(entity, event.currentTarget); focusNode(entity.key); }}><EntityName entity={entity} /></button></li>
-                ))}</ul> : <p className="muted">No matching nodes. Try another search.</p>
-              )}
-            </div>
-            {types.length > 0 && (
-              <div className="graph-filter-scroll">
-                <NodeTypeFilters types={types} hiddenTypes={hiddenTypes}
-                  onToggle={(type) => setHiddenTypes((current) => current.includes(type)
-                    ? current.filter((item) => item !== type) : [...current, type])}
-                  onToggleCategory={(members, enabled) => setHiddenTypes((current) => enabled
-                    ? current.filter((type) => !members.includes(type))
-                    : [...new Set([...current, ...members])])}
-                  onReset={setHiddenTypes} />
-              </div>
+      <div className="graph-workspace">
+        <section className="graph-panel graph-sidebar" aria-label="Find nodes">
+          <div className="graph-picker">
+            <h2>Find nodes</h2>
+            <form className="graph-search" onSubmit={(event) => {
+              event.preventDefault();
+              setResults(null);
+              setSearchError('');
+              setFilter({ query: query.trim(), type: '' });
+            }}>
+              <label>Search <input type="search" maxLength={500} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+              <button type="submit" className="button primary">Find nodes</button>
+            </form>
+            {searchError ? <p role="alert">{searchError}</p> : results === null ? <p role="status">Loading nodes…</p> : (
+              results.length ? <ul className="graph-results">{results.map((entity) => (
+                <li key={entity.key}><button type="button" className="graph-node" aria-pressed={selected?.node?.key === entity.key}
+                  onClick={(event) => { selectNode(entity, event.currentTarget); focusNode(entity.key); }}><EntityName entity={entity} /></button></li>
+              ))}</ul> : <p className="muted">No matching nodes. Try another search.</p>
             )}
-          </section>
-          <section className="graph-panel graph-view" aria-label="Node neighborhood">
-            <div className="graph-view-heading">
-              <h2>Neighborhood</h2>
-              <div className="graph-controls">
-              <label>Maximum hops
-                <select value={hops} onChange={(event) => {
-                  setGraph(null);
-                  setGraphError('');
-                  setHops(event.target.value);
-                }}>
-                  {Array.from({ length: 10 }, (_, index) => index + 1)
-                    .map((count) => <option key={count}>{count}</option>)}
-                </select>
-              </label>
-              </div>
+          </div>
+          {types.length > 0 && (
+            <div className="graph-filter-scroll">
+              <NodeTypeFilters types={types} hiddenTypes={hiddenTypes}
+                onToggle={(type) => setHiddenTypes((current) => current.includes(type)
+                  ? current.filter((item) => item !== type) : [...current, type])}
+                onToggleCategory={(members, enabled) => setHiddenTypes((current) => enabled
+                  ? current.filter((type) => !members.includes(type))
+                  : [...new Set([...current, ...members])])}
+                onReset={setHiddenTypes} />
             </div>
-            {graphError ? <p role="alert">{graphError}</p> : graph ? (
-              <GraphDiagram graph={graph} relationships={model?.relationships ?? NO_RELATIONSHIPS}
-                hiddenTypes={hiddenTypes} selected={selected} onSelect={selectNode}
-                onSelectEdge={selectEdge} onClose={closeDetails} onFocus={focusNode} navigate={navigate}
-                token={token} onUnauthorized={onUnauthorized} />
-            ) : <p role="status">{focus ? 'Loading relationships…' : 'Choose a node to explore its relationships.'}</p>}
-          </section>
-        </div>
-      )}
+          )}
+        </section>
+        <section className="graph-panel graph-view" aria-label="Node neighborhood">
+          <div className="graph-view-heading">
+            <h2>Neighborhood</h2>
+            <div className="graph-controls">
+            <label>Maximum hops
+              <select value={hops} onChange={(event) => {
+                setGraph(null);
+                setGraphError('');
+                setHops(event.target.value);
+              }}>
+                {Array.from({ length: 10 }, (_, index) => index + 1)
+                  .map((count) => <option key={count}>{count}</option>)}
+              </select>
+            </label>
+            </div>
+          </div>
+          {graphError ? <p role="alert">{graphError}</p> : graph ? (
+            <GraphDiagram graph={graph} relationships={model?.relationships ?? NO_RELATIONSHIPS}
+              hiddenTypes={hiddenTypes} selected={selected} onSelect={selectNode}
+              onSelectEdge={selectEdge} onClose={closeDetails} onFocus={focusNode} navigate={navigate}
+              token={token} onUnauthorized={onUnauthorized} />
+          ) : <p role="status">{focus ? 'Loading relationships…' : 'Choose a node to explore its relationships.'}</p>}
+        </section>
+      </div>
     </div>
   );
 }
