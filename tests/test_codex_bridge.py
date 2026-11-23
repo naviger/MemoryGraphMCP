@@ -109,3 +109,27 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(json.dumps({
     result = bridge.run(identity, "execute", prompt)
     assert result["completed"]
     assert result["files_modified"] == ["partial.txt"]
+
+
+def test_reported_usage_prices_failed_and_successful_turns():
+    from scripts.codex_bridge import reported_usage
+
+    events = "\n".join(
+        json.dumps({"type": event, "usage": usage})
+        for event, usage in (
+            (
+                "turn.completed",
+                {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 20},
+            ),
+            ("turn.failed", {"input_tokens": 50, "cached_input_tokens": 10, "output_tokens": 5}),
+            ("error", {}),
+        )
+    )
+    assert reported_usage(events, {"input": 2, "cached_input": 1, "output": 4}) == {
+        "input_tokens": 150,
+        "cached_input_tokens": 50,
+        "output_tokens": 25,
+        "estimated_cost_usd": 0.00035,
+    }
+    assert reported_usage(events)["estimated_cost_usd"] is None
+    assert reported_usage('{"type":"turn.failed"}') is None

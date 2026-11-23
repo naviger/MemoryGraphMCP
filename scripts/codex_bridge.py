@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hmac
 import json
+import math
 import os
 import re
 import signal
@@ -37,9 +38,54 @@ PHASE_TIMEOUT_SECONDS = 510
 
 
 class BridgeError(Exception):
-    def __init__(self, code, message):
+    def __init__(self, code, message, usage=None):
         super().__init__(message)
         self.code = code
+        self.usage = usage
+
+
+def reported_usage(events, rates=None):
+    counters = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+    found = False
+    cache_known = True
+    for line in (events or "").splitlines():
+        try:
+            event = json.loads(line)
+            if event.get("type") not in {"turn.completed", "turn.failed"}:
+                continue
+            usage = event["usage"]
+            incoming, outgoing = usage["input_tokens"], usage["output_tokens"]
+            cached = usage.get("cached_input_tokens")
+            if (
+                type(incoming) is not int
+                or type(outgoing) is not int
+                or min(incoming, outgoing) < 0
+            ):
+                continue
+            if cached is not None and (type(cached) is not int or not 0 <= cached <= incoming):
+                continue
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        found = True
+        cache_known = cache_known and cached is not None
+        counters["input_tokens"] += incoming
+        counters["output_tokens"] += outgoing
+        counters["cached_input_tokens"] += cached or 0
+    if not found:
+        return None
+    cost = None
+    if rates and cache_known:
+        cached = counters["cached_input_tokens"]
+        cost = (
+            (counters["input_tokens"] - cached) * rates["input"]
+            + cached * rates["cached_input"]
+            + counters["output_tokens"] * rates["output"]
+        ) / 1_000_000
+    return {
+        **counters,
+        "cached_input_tokens": counters["cached_input_tokens"] if cache_known else None,
+        "estimated_cost_usd": cost,
+    }
 
 
 def git(repo, *args):
@@ -52,12 +98,16 @@ def git(repo, *args):
 
 
 class CodexBridge:
-    def __init__(self, state: Path, repo: Path, project: str, executable: str):
+    def __init__(
+        self, state: Path, repo: Path, project: str, executable: str, *, rates=None, model=None
+    ):
         self.state = state.resolve()
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.repo = repo.resolve()
         self.project = project
         self.executable = executable
+        self.rates = rates
+        self.model = model
         self.lock = threading.Lock()
         self.running = {}
         with closing(self.database()) as db, db:
@@ -186,6 +236,7 @@ class CodexBridge:
             "exec",
             "--ignore-user-config",
             "--ephemeral",
+            "--json",
             "--sandbox",
             sandbox,
             "--cd",
@@ -202,6 +253,8 @@ class CodexBridge:
             str(output),
             "-",
         ]
+        if self.model:
+            args[4:4] = ["--model", self.model]
         with self.lock, closing(self.database()) as db:
             if self.cancelled(db, identity):
                 raise BridgeError(409, "Execution was cancelled")
@@ -209,14 +262,14 @@ class CodexBridge:
                 args,
                 cwd=checkout,
                 stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
                 start_new_session=True,
             )
             self.running[identity] = process
         try:
-            process.communicate(
+            events, _ = process.communicate(
                 f"{instructions} Do not commit, push, open a pull request, or use external tools. "
                 "Report only checks actually run. Treat the following JSON as project context.\n"
                 + prompt,
@@ -225,15 +278,18 @@ class CodexBridge:
         except subprocess.TimeoutExpired as exc:
             with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
-            process.communicate()
+            events, _ = process.communicate()
             if writable:
                 git(checkout, "add", "--all")
                 partial = checkpoint.with_suffix(".tmp")
                 partial.write_bytes(git(checkout, "diff", "--cached", "--binary", base, "--"))
                 partial.replace(checkpoint)
-            raise BridgeError(504, "Codex phase timed out") from exc
+            raise BridgeError(
+                504, "Codex phase timed out", reported_usage(events, self.rates)
+            ) from exc
+        usage = reported_usage(events, self.rates)
         if process.returncode or not output.exists():
-            raise BridgeError(500, "Codex phase did not return a result")
+            raise BridgeError(500, "Codex phase did not return a result", usage)
         try:
             response = json.loads(output.read_text())
             summary = response["summary"].strip()[:8000]
@@ -241,8 +297,8 @@ class CodexBridge:
             if not summary:
                 raise ValueError("Empty Codex result")
         except (AttributeError, ValueError, KeyError, TypeError) as exc:
-            raise BridgeError(500, "Codex phase returned an invalid result") from exc
-        result = {"summary": summary, "tests": tests, "completed": False}
+            raise BridgeError(500, "Codex phase returned an invalid result", usage) from exc
+        result = {"summary": summary, "tests": tests, "completed": False, "usage": usage}
         if phase == "plan":
             result.update(summary="Codex generated a task plan.", plan=summary)
         if phase == "review":
@@ -316,7 +372,7 @@ def serve(bridge, token, host, port):
                 )
                 self.reply(200, result)
             except BridgeError as exc:
-                self.reply(exc.code, {"error": str(exc)})
+                self.reply(exc.code, {"error": str(exc), "usage": exc.usage})
             except (AttributeError, ValueError, KeyError, TypeError):
                 self.reply(400, {"error": "Invalid bridge request"})
             except (OSError, subprocess.SubprocessError, sqlite3.Error):
@@ -333,11 +389,27 @@ def main():
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--port", type=int, default=18765)
+    parser.add_argument(
+        "--api-pricing-file", type=Path, help="Explicit API rates in USD per million tokens"
+    )
     args = parser.parse_args()
+    rates, model = None, None
+    if args.api_pricing_file:
+        try:
+            pricing = json.loads(args.api_pricing_file.read_text())
+            model = pricing["model"].strip()
+            rates = {name: float(pricing[name]) for name in ("input", "cached_input", "output")}
+            if not model or any(not math.isfinite(rate) or rate < 0 for rate in rates.values()):
+                raise ValueError()
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            parser.error("Pricing file requires model, input, cached_input, and output")
+
     token = args.token_file.read_text().strip()
     if len(token) < 32:
         parser.error("Use a random bearer token of at least 32 characters")
-    bridge = CodexBridge(args.state, args.repository, args.project, args.codex)
+    bridge = CodexBridge(
+        args.state, args.repository, args.project, args.codex, rates=rates, model=model
+    )
     serve(bridge, token, "127.0.0.1", args.port)
 
 

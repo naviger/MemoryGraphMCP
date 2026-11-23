@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.domain.architecture import EntityName, TaskStatus
+from app.domain.execution_usage import ExecutionUsage
 from app.domain.models import MemoryKey
 
 WorkType = Literal["Task", "Goal", "Risk", "Constraint"]
@@ -65,3 +66,4 @@ class AgentResult(BaseModel):
     lesson: WorkText | None = None
     related_keys: list[MemoryKey] = Field(default_factory=list, max_length=50)
     completed: bool = False
+    usage: ExecutionUsage | None = None

@@ -314,6 +314,41 @@ def test_arango_recovery_and_workspace():
     assert saved.metadata["memories_created"] == 1
     assert "service" in saved.context_keys
 
+    from app.domain.execution_usage import ExecutionUsage
+
+    third = workspace.create(
+        "alpha",
+        WorkDraft(kind="Task", name="Retry fixture", description="Record retry usage"),
+        "writer",
+    )
+    retry_job = workspace.start(
+        "alpha",
+        third.key,
+        StartExecution(
+            request_id=uuid4().hex,
+            agent="codex",
+            mode="PLAN_ONLY",
+        ),
+        "writer",
+    )
+    running = workspace.transition(retry_job, "RUNNING")
+    usage = ExecutionUsage(input_tokens=300, cached_input_tokens=20, output_tokens=150)
+    blocked = workspace.transition(running, "BLOCKED", failure="Phase timed out", usage=usage)
+    assert blocked.lease_until is not None
+    assert blocked.attempts[0].state == "failed"
+    assert blocked.attempts[0].usage == usage
+    with pytest.raises(ArchitectureGraphError):
+        workspace.retry_execution("beta", third.key, retry_job.key, "writer")
+    queued = workspace.retry_execution("alpha", third.key, retry_job.key, "writer")
+    assert queued.key == retry_job.key and queued.phase == blocked.phase
+    assert queued.lease_until is None and queued.timeline[-1]["action"] == "retry"
+    with pytest.raises(ArchitectureGraphError):
+        workspace.retry_execution("alpha", third.key, retry_job.key, "writer")
+    running_again = workspace.transition(queued, "RUNNING")
+    failure = workspace.transition(running_again, "FAILED", failure="Adapter rejected operation")
+    assert failure.attempts[1].usage is None
+    assert workspace.retry_execution("alpha", third.key, retry_job.key, "writer").state == "READY"
+
 
 def test_workspace_routes_require_project_and_writer_grants():
     from types import SimpleNamespace
@@ -347,6 +382,7 @@ def test_workspace_routes_require_project_and_writer_grants():
     workspace = SimpleNamespace(
         entities=lambda project: [], create=lambda project, data, actor: data
     )
+
     async def refresh():
         return None
 

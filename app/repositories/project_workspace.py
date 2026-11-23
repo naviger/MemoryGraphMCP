@@ -16,6 +16,7 @@ from app.domain.architecture import (
     architecture_key,
 )
 from app.domain.exceptions import ArchitectureGraphError
+from app.domain.execution_usage import ExecutionAttempt, ExecutionUsage
 from app.domain.project_workspace import (
     AgentArtifact,
     AgentResult,
@@ -230,6 +231,60 @@ class ProjectWorkspaceRepository:
             )
         ]
 
+    def retry_execution(self, project, task_key, execution_key, actor):
+        task = self.task(project, task_key)
+        now = datetime.now(UTC)
+        with self.graph._transaction() as tx:
+            task = self._task_in_transaction(tx, project, task)
+            row = self.graph._require_entity_type(
+                tx.collection(self.graph._entities),
+                execution_key,
+                "Execution",
+            )
+            job = Execution.model_validate(row)
+            if job.project_key != project or job.task_key != task_key:
+                raise ArchitectureGraphError("Execution does not belong to this task")
+            active = task.metadata.get("active_execution")
+            if (
+                job.state not in {"BLOCKED", "FAILED"}
+                or active
+                and active != job.key
+                or task.status in {"done", "cancelled"}
+            ):
+                raise ArchitectureGraphError(
+                    "This execution cannot be retried in its current state"
+                )
+            self.put(
+                tx,
+                task.model_copy(
+                    update={
+                        "status": "in_progress",
+                        "metadata": {**task.metadata, "active_execution": job.key},
+                    }
+                ),
+            )
+            updated = job.model_copy(
+                update={
+                    "state": "READY",
+                    "failure": None,
+                    "lease_until": None,
+                    "updated_at": now,
+                    "revision": job.revision + 1,
+                    "timeline": [
+                        *job.timeline,
+                        {
+                            "state": "READY",
+                            "timestamp": now.isoformat(),
+                            "phase": job.phase,
+                            "actor": actor,
+                            "action": "retry",
+                        },
+                    ][-100:],
+                }
+            )
+            self.put(tx, updated)
+            return updated
+
     def transition(
         self,
         job,
@@ -238,6 +293,7 @@ class ProjectWorkspaceRepository:
         context_keys=None,
         result: AgentResult | None = None,
         failure=None,
+        usage: ExecutionUsage | None = None,
         actor="execution-worker",
     ):
         now = datetime.now(UTC)
@@ -266,6 +322,31 @@ class ProjectWorkspaceRepository:
                     },
                 ][-100:],
             }
+            attempts = list(prior.attempts)
+            if state == "RUNNING" and context_keys is None:
+                if attempts and attempts[-1].state == "running":
+                    attempts[-1] = attempts[-1].model_copy(
+                        update={
+                            "state": "interrupted",
+                            "ended_at": now,
+                        }
+                    )
+                attempts.append(ExecutionAttempt(phase=prior.phase, started_at=now))
+            elif state != "RUNNING" and attempts and attempts[-1].state == "running":
+                attempt_state = (
+                    "succeeded"
+                    if result
+                    else ("interrupted" if state.startswith("CANCEL") else "failed")
+                )
+                attempts[-1] = attempts[-1].model_copy(
+                    update={
+                        "state": attempt_state,
+                        "ended_at": now,
+                        "failure": failure,
+                        "usage": result.usage if result else usage,
+                    }
+                )
+            updates["attempts"] = attempts
             if context_keys is not None:
                 updates["context_keys"] = context_keys
                 for key in context_keys:

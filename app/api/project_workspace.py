@@ -90,6 +90,11 @@ def build_workspace_router(prefix, workspace, executor, capture):
             raise HTTPException(422, "This agent does not support the selected mode")
         return await invoke(workspace.start, project, task, command, actor)
 
+    @router.post("/{project}/workspace/tasks/{task}/executions/{execution}/retry")
+    async def retry(project: MemoryKey, task: MemoryKey, execution: MemoryKey, request: Request):
+        actor = authorize(project, request, write=True)
+        return await invoke(workspace.retry_execution, project, task, execution, actor)
+
     @router.post("/{project}/workspace/tasks/{task}/executions/{execution}/cancel")
     async def cancel(project: MemoryKey, task: MemoryKey, execution: MemoryKey, request: Request):
         actor = authorize(project, request, write=True)

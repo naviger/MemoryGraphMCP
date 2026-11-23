@@ -50,6 +50,57 @@ function WorkEditor({ kind, send, close, draftAvailable, refresh }) {
   </form>;
 }
 
+const PHASES = {
+  PLAN_ONLY: ['Plan'], IMPLEMENT: ['Implement'], REVIEW: ['Review'],
+  FULL_LIFECYCLE: ['Plan', 'Implement', 'Review'],
+};
+
+const number = (value) => value.toLocaleString();
+const dollars = (value) => value.toLocaleString(undefined, {
+  style: 'currency', currency: 'USD', maximumFractionDigits: 6,
+});
+
+function UsageTotals({ attempts }) {
+  const finished = attempts.filter((attempt) => attempt.ended_at);
+  const reported = finished.map((attempt) => attempt.usage).filter(Boolean);
+  const priced = reported.filter((usage) => usage.estimated_cost_usd != null);
+  const total = reported.reduce((sum, usage) => sum + usage.input_tokens + usage.output_tokens, 0);
+  const cost = priced.reduce((sum, usage) => sum + usage.estimated_cost_usd, 0);
+  if (!finished.length) return <span>Usage pending</span>;
+  return <span>
+    {reported.length ? `${number(total)} reported tokens` : 'Tokens unavailable'}
+    {reported.length > 0 && reported.length < finished.length ? ` (${reported.length} of ${finished.length} attempts)` : ''}
+    {' · '}{priced.length ? `${dollars(cost)} estimated` : 'Cost unavailable'}
+    {priced.length > 0 && priced.length < finished.length ? ` (${priced.length} of ${finished.length} attempts)` : ''}
+  </span>;
+}
+
+function ExecutionUsage({ job }) {
+  const attempts = job.attempts || [];
+  if (!attempts.length) return <p className="muted">No usage was recorded for this execution.</p>;
+  return <section aria-label="Execution token usage">
+    <p><strong>Execution usage</strong> · <UsageTotals attempts={attempts} /></p>
+    {PHASES[job.mode]?.map((label, phase) => {
+      const entries = attempts.filter((attempt) => attempt.phase === phase);
+      if (!entries.length) return null;
+      return <details key={label}>
+        <summary>{label} · <UsageTotals attempts={entries} /></summary>
+        <div className="table-scroll"><table className="change-table">
+          <thead><tr><th>Attempt</th><th>Outcome</th><th>Input</th><th>Cached input</th><th>Output</th><th>Estimated cost</th></tr></thead>
+          <tbody>{entries.map((entry, index) => <tr key={entry.started_at}>
+            <td>{index + 1} · {stamp(entry.started_at)}</td><td>{entry.state}{entry.failure && <p>{entry.failure}</p>}</td>
+            <td>{entry.usage ? number(entry.usage.input_tokens) : '—'}</td>
+            <td>{entry.usage?.cached_input_tokens != null ? number(entry.usage.cached_input_tokens) : '—'}</td>
+            <td>{entry.usage ? number(entry.usage.output_tokens) : '—'}</td>
+            <td>{entry.usage?.estimated_cost_usd != null ? dollars(entry.usage.estimated_cost_usd) : 'Unavailable'}</td>
+          </tr>)}</tbody>
+        </table></div>
+      </details>;
+    })}
+    <p className="muted">Totals include reported usage from failed attempts. Cached tokens are part of input tokens.</p>
+  </section>;
+}
+
 function TaskExecution({ task, send, agents, close, navigate, canWrite }) {
   const [jobs, setJobs] = useState(null);
   const [agent, setAgent] = useState(Object.keys(agents)[0] || '');
@@ -66,11 +117,11 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite }) {
   }, [reload]);
   const active = (jobs || []).some((job) => ACTIVE.includes(job.state));
   const selectedMode = mode || agents[agent]?.[0] || '';
-  async function submit(job) {
+  async function submit(job, action = 'cancel') {
     setBusy(true);
     setError('');
     try {
-      if (job) await send(`${path}/${job.key}/cancel`, {});
+      if (job) await send(`${path}/${job.key}/${action}`, {});
       else {
         await send(path, { request_id: requested, agent, mode: selectedMode });
         setRequested(crypto.randomUUID());
@@ -101,8 +152,13 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite }) {
       {canWrite && job.state !== 'CANCEL_REQUESTED' && ACTIVE.includes(job.state) && <button className="button outlined" type="button" disabled={busy}
         onClick={() => submit(job)}>Cancel execution</button>}
       {job.failure && <p role="alert">{job.failure}</p>}
+      {job.state === 'BLOCKED' && job.lease_until && <p>Automatic retry scheduled for {stamp(job.lease_until)}.</p>}
+      {canWrite && ['BLOCKED', 'FAILED'].includes(job.state) && !['done', 'cancelled'].includes(task.status) &&
+        <button className="button primary" type="button"
+          disabled={busy || (job.state === 'FAILED' && active)} onClick={() => submit(job, 'retry')}>Retry now</button>}
+      <ExecutionUsage job={job} />
       <ol>{job.timeline.map((item, eventIndex) => <li key={eventIndex}>
-        {item.state} · {stamp(item.timestamp)} · {item.actor}
+        {item.action === 'retry' ? 'Retry requested' : item.state} · {stamp(item.timestamp)} · {item.actor}
       </li>)}</ol>
       {job.results.map((result, resultIndex) => <div key={resultIndex}>
         <p>{result.summary}</p>

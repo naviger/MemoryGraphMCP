@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from app.domain.execution_usage import ExecutionAttempt
 from app.domain.knowledge_capture import CaptureSuggestion, Evidence
 from app.domain.models import MemoryKey
 
@@ -286,6 +287,7 @@ class Execution(ArchitectureNode):
     timeline: list[dict[str, Any]] = Field(default_factory=list)
     context_keys: list[MemoryKey] = Field(default_factory=list)
     results: list[dict[str, Any]] = Field(default_factory=list)
+    attempts: list[ExecutionAttempt] = Field(default_factory=list)
     failure: str | None = None
 
 
