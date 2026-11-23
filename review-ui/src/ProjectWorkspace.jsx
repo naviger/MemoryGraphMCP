@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { reviewRequest } from './api.js';
 import { PreviewLink } from './RecordInspector.jsx';
+import { PHASES, elapsedRuntime, executionSteps, reviewBlocked } from './executionSteps.js';
 
 const TYPES = { Task: 'Tasks', Goal: 'Goals', Risk: 'Risks', Constraint: 'Constraints' };
 const STATES = { open: 'Open', in_progress: 'In progress', done: 'Completed', cancelled: 'Cancelled' };
@@ -50,11 +51,6 @@ function WorkEditor({ kind, send, close, draftAvailable, refresh }) {
   </form>;
 }
 
-const PHASES = {
-  PLAN_ONLY: ['Plan'], IMPLEMENT: ['Implement'], REVIEW: ['Review'],
-  FULL_LIFECYCLE: ['Plan', 'Implement', 'Review'],
-};
-
 const number = (value) => value.toLocaleString();
 const dollars = (value) => value.toLocaleString(undefined, {
   style: 'currency', currency: 'USD', maximumFractionDigits: 6,
@@ -75,16 +71,17 @@ function UsageTotals({ attempts }) {
   </span>;
 }
 
-function ExecutionUsage({ job }) {
+function ExecutionUsage({ job, phaseIndex }) {
   const attempts = job.attempts || [];
   if (!attempts.length) return <p className="muted">No usage was recorded for this execution.</p>;
   return <section aria-label="Execution token usage">
     <p><strong>Execution usage</strong> · <UsageTotals attempts={attempts} /></p>
     {PHASES[job.mode]?.map((label, phase) => {
+      if (phase !== phaseIndex) return null;
       const entries = attempts.filter((attempt) => attempt.phase === phase);
       if (!entries.length) return null;
-      return <details key={label}>
-        <summary>{label} · <UsageTotals attempts={entries} /></summary>
+      return <details key={label} open>
+        <summary>{label} attempts · <UsageTotals attempts={entries} /></summary>
         <div className="table-scroll"><table className="change-table">
           <thead><tr><th>Attempt</th><th>Outcome</th><th>Input</th><th>Cached input</th><th>Output</th><th>Estimated cost</th></tr></thead>
           <tbody>{entries.map((entry, index) => <tr key={entry.started_at}>
@@ -101,9 +98,6 @@ function ExecutionUsage({ job }) {
   </section>;
 }
 
-const reviewBlocked = (result) => result.review_verdict === 'blocking' ||
-  (!result.review_verdict && /^blocking finding:/i.test(result.summary || ''));
-
 function ReviewResult({ result, navigate }) {
   const target = result.reviewed_target;
   if (!target) return reviewBlocked(result) ? <div className="status error">
@@ -119,8 +113,67 @@ function ReviewResult({ result, navigate }) {
   </div>;
 }
 
+function stepTitle(step) {
+  if (step.phase === 'Review' && step.job.patch_execution_key) return 'Review patch';
+  if (step.phase === 'Implement' && step.job.repair_review_key) return 'Fix review findings';
+  return step.phase;
+}
+
+function StepTimes({ step, now, compact = false }) {
+  if (compact) return <span className="execution-times compact">
+    <span><span>Started</span> {stamp(step.start)}</span>
+    <span><span>Ended</span> {stamp(step.end)}</span>
+    <span><span>Runtime</span> {elapsedRuntime(step, now)}</span>
+  </span>;
+  return <dl className="execution-times">
+    <div><dt>Started</dt><dd>{stamp(step.start)}</dd></div>
+    <div><dt>Ended</dt><dd>{stamp(step.end)}</dd></div>
+    <div><dt>Runtime</dt><dd>{elapsedRuntime(step, now)}</dd></div>
+  </dl>;
+}
+
+function StepDetails({ step, now, navigate }) {
+  const { job, result } = step;
+  return <section className="execution-inspector" aria-label="Selected phase">
+    <header>
+      <h4>{stepTitle(step)}</h4>
+      <p>{MODES[job.mode]} · {job.agent} · {step.state}</p>
+    </header>
+    <StepTimes step={step} now={now} />
+    <p><PreviewLink destination="entities" entityKey={job.key} navigate={navigate}>Open execution in the graph</PreviewLink></p>
+    {step.current && job.failure && <p role="alert" className="status error">{job.failure}</p>}
+    {step.current && job.state === 'BLOCKED' && job.lease_until && <p>Automatic retry scheduled for {stamp(job.lease_until)}.</p>}
+    {result && <section>
+      <ReviewResult result={result} navigate={navigate} />
+      <p>{result.summary}</p>
+      {result.plan && <section><h5>Plan</h5><p className="execution-text">{result.plan}</p></section>}
+      {result.pull_request && <p><strong>Pull request</strong> {result.pull_request}</p>}
+      {result.lesson && <p>{result.lesson}</p>}
+      {[
+        ['Checks', result.tests],
+        ['Files changed', result.files_modified],
+        ['Review findings', result.review_comments.filter((item) => item !== result.summary)],
+        ['Artifacts', result.artifacts.map((item) => `${item.name} — ${item.reference}`)],
+      ].map(([title, entries]) => entries.length > 0 && <section key={title}>
+        <h5>{title}</h5><ul>{entries.map((entry, index) => <li key={index}>{entry}</li>)}</ul>
+      </section>)}
+      {result.logs.length > 0 && <details><summary>Execution log</summary><pre>{result.logs.join('\n')}</pre></details>}
+    </section>}
+    <ExecutionUsage job={job} phaseIndex={step.index} />
+    {step.events.length > 0 && <section>
+      <h5>Phase activity</h5>
+      <ol className="execution-events">{step.events.slice().reverse().map((event, index) => <li key={index}>
+        <strong>{event.action === 'retry' ? 'Retry requested' : event.state}</strong>
+        <span>{stamp(event.timestamp)} · {event.actor}</span>
+      </li>)}</ol>
+    </section>}
+  </section>;
+}
+
 function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAvailable }) {
   const [jobs, setJobs] = useState(null);
+  const [selection, setSelection] = useState(null);
+  const [now, setNow] = useState(Date.now);
   const [agent, setAgent] = useState(Object.keys(agents)[0] || '');
   const [mode, setMode] = useState('');
   const [recommendation, setRecommendation] = useState(null);
@@ -141,6 +194,13 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
     return () => window.clearInterval(timer);
   }, [reload]);
   const active = (jobs || []).some((job) => ACTIVE.includes(job.state));
+  useEffect(() => {
+    if (!active) return;
+    const clock = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(clock);
+  }, [active]);
+  const steps = executionSteps(jobs || []);
+  const selected = steps.find((step) => step.key === selection) || steps[0];
   const workflows = Object.keys(MODES).filter((value) => Object.values(agents).some((allowed) => allowed.includes(value)));
   const selectedMode = workflows.includes(mode) ? mode : workflows[0] || '';
   const eligible = Object.keys(agents).filter((value) => agents[value].includes(selectedMode));
@@ -167,12 +227,13 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
     if (!repair?.prompt.trim()) return;
     setBusy(true); setError('');
     try {
-      await send(path, {
+      const started = await send(path, {
         request_id: requested, agent: repair.agent, mode: 'IMPLEMENT',
         repair_review_key: repair.review, repair_prompt: repair.prompt,
       });
       setRequested(crypto.randomUUID());
       setRepair(null);
+      setSelection(`${started.key}/0`);
       await reload();
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
@@ -182,11 +243,13 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
     setError('');
     try {
       if (action === 'review-patch') {
-        await send(path, { request_id: requested, agent: 'codex', mode: 'REVIEW', patch_execution_key: job.key });
+        const started = await send(path, { request_id: requested, agent: 'codex', mode: 'REVIEW', patch_execution_key: job.key });
+        setSelection(`${started.key}/0`);
         setRequested(crypto.randomUUID());
       } else if (job) await send(`${path}/${job.key}/${action}`, {});
       else {
-        await send(path, { request_id: requested, agent: selectedAgent, mode: selectedMode });
+        const started = await send(path, { request_id: requested, agent: selectedAgent, mode: selectedMode });
+        setSelection(`${started.key}/0`);
         setRequested(crypto.randomUUID());
       }
       await reload();
@@ -227,41 +290,41 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
     </form>}
     {jobs === null && !error && <p role="status">Loading execution history…</p>}
     {jobs?.length === 0 && <p>No executions yet.</p>}
-    {jobs?.map((job, index) => <details key={job.key} open={index === 0 ? true : undefined}>
-      <summary>{job.repair_review_key ? 'Fix review findings' : job.patch_execution_key ? 'Review patch' : MODES[job.mode]} · {job.agent} · {job.state} · {stamp(job.created_at)}{job.results.some(reviewBlocked) && <strong className="status error"> · Changes required</strong>}</summary>
-      <p><PreviewLink destination="entities" entityKey={job.key} navigate={navigate}>Open execution in the graph</PreviewLink></p>
-      {canWrite && job.state !== 'CANCEL_REQUESTED' && ACTIVE.includes(job.state) && <button className="button outlined" type="button" disabled={busy}
-        onClick={() => submit(job)}>Cancel execution</button>}
-      {job.failure && <p role="alert">{job.failure}</p>}
-      {job.state === 'BLOCKED' && job.lease_until && <p>Automatic retry scheduled for {stamp(job.lease_until)}.</p>}
-      {canWrite && ['BLOCKED', 'FAILED'].includes(job.state) && !['done', 'cancelled'].includes(task.status) &&
-        <button className="button primary" type="button"
-          disabled={busy || (job.state === 'FAILED' && active)} onClick={() => submit(job, 'retry')}>Retry now</button>}
-      <ol className="workspace-actions" aria-label="Workflow phases">{PHASES[job.mode]?.map((phase, phaseIndex) => (
-        <li key={phase}>{phase} · {phaseIndex < job.phase ? (job.results[phaseIndex]?.review_verdict === 'blocking' ? 'Blocked' : 'Finished') :
-          phaseIndex === job.phase ? job.state : 'Waiting'}</li>
-      ))}</ol>
-      {canWrite && !active && task.status !== 'cancelled' && agents.codex?.includes('REVIEW') &&
-        job.agent === 'codex' && job.results.some((result) => result.artifacts.some((artifact) => artifact.name === 'Local implementation patch')) &&
-        <button className="button primary" type="button" disabled={busy} onClick={() => submit(job, 'review-patch')}>Review this patch</button>}
-      {canWrite && !active && task.status !== 'cancelled' && agents.codex?.includes('IMPLEMENT') &&
-        job.results.some((result) => result.review_verdict === 'blocking' && result.reviewed_target?.kind === 'implementation patch') &&
-        <button className="button primary" type="button" disabled={busy} onClick={() => prepareRepair(job)}>Fix review findings</button>}
-      <ExecutionUsage job={job} />
-      <ol>{job.timeline.map((item, eventIndex) => <li key={eventIndex}>
-        {item.action === 'retry' ? 'Retry requested' : item.state} · {stamp(item.timestamp)} · {item.actor}
-      </li>)}</ol>
-      {job.results.map((result, resultIndex) => <div key={resultIndex}>
-        <ReviewResult result={result} navigate={navigate} />
-        <p>{result.summary}</p>
-        {result.plan && <p><strong>Plan</strong> {result.plan}</p>}
-        {result.pull_request && <p><strong>Pull request</strong> {result.pull_request}</p>}
-        {result.lesson && <p>{result.lesson}</p>}
-        {result.logs.length > 0 && <details><summary>Execution log</summary><pre>{result.logs.join('\n')}</pre></details>}
-        <ul>{[...result.tests, ...result.files_modified, ...result.review_comments, ...result.artifacts.map((item) => `${item.name} — ${item.reference}`)]
-          .map((entry, entryIndex) => <li key={entryIndex}>{entry}</li>)}</ul>
-      </div>)}
-    </details>)}
+    {steps.length > 0 && <div className="execution-layout">
+      <ol className="execution-steps" aria-label="Execution steps, newest first">
+        {steps.map((step) => {
+          const { job, result, current } = step;
+          const mayChange = canWrite && task.status !== 'cancelled';
+          const mayCancel = mayChange && current && job.state !== 'CANCEL_REQUESTED' && ACTIVE.includes(job.state);
+          const mayRetry = mayChange && current && ['BLOCKED', 'FAILED'].includes(job.state) && task.status !== 'done';
+          const mayReview = mayChange && !active && agents.codex?.includes('REVIEW') &&
+            job.agent === 'codex' && result?.artifacts.some((item) => item.name === 'Local implementation patch');
+          const mayRepair = mayChange && !active && agents.codex?.includes('IMPLEMENT') &&
+            result?.review_verdict === 'blocking' && result.reviewed_target?.kind === 'implementation patch';
+          return <li key={step.key} className="execution-step" data-selected={selected?.key === step.key}>
+            <button type="button" className="execution-step-select" aria-pressed={selected?.key === step.key}
+              onClick={() => setSelection(step.key)}>
+              <span className="execution-step-heading"><strong>{stepTitle(step)}</strong>
+                <span className={step.attention ? 'execution-badge attention' : 'execution-badge'}>{step.state}</span></span>
+              <span className="muted">{job.agent} · {MODES[job.mode]}{step.attempts.length > 0 ?
+                ` · ${step.attempts.length} ${step.attempts.length === 1 ? 'attempt' : 'attempts'}` : ''}</span>
+              <StepTimes step={step} now={now} compact />
+            </button>
+            {(mayCancel || mayRetry || mayReview || mayRepair) && <div className="execution-step-actions">
+              {mayRetry && <button type="button" className="button primary" disabled={busy || (job.state === 'FAILED' && active)}
+                onClick={() => submit(job, 'retry')}>Retry now</button>}
+              {mayCancel && <button type="button" className="button outlined" disabled={busy}
+                onClick={() => submit(job)}>Cancel execution</button>}
+              {mayReview && <button type="button" className="button outlined" disabled={busy}
+                onClick={() => submit(job, 'review-patch')}>Review this patch</button>}
+              {mayRepair && <button type="button" className="button primary" disabled={busy}
+                onClick={() => { setSelection(step.key); prepareRepair(job); }}>Fix review findings</button>}
+            </div>}
+          </li>;
+        })}
+      </ol>
+      {selected && <StepDetails step={selected} now={now} navigate={navigate} />}
+    </div>}
     {error && <p className="status error" role="alert">{error}</p>}
   </section>;
 }
