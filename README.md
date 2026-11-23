@@ -332,3 +332,7 @@ Existing tasks must link directly and exclusively to that project through a
 `defines`, `related_to`, or `references` edge. Replaying the same payload returns
 its original receipt. Reusing its ID with a different payload is rejected.
 Events at or before the last applied time are recorded without changing the task.
+
+Project Overview shows tracker configuration status and the last ten receipts
+in processing order. It links to tasks still associated with the project and
+labels stale events. Readers can inspect activity through the Review UI.

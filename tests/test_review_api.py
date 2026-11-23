@@ -16,6 +16,7 @@ from app.domain.architecture import (
     Service,
     SourceFile,
 )
+from app.domain.architecture_events import TrackerActivity
 from app.domain.exceptions import ADRError
 from app.domain.models import (
     ADRConflict,
@@ -67,7 +68,18 @@ def review_api(monkeypatch, request):
             return {
                 "graph-adr": adr, "service": service,
                 "project": Project(key="project", name="Identity"),
+                "other": Project(key="other", name="Other"),
             }.get(key)
+
+        def recent_tracker_activity(self, key, limit):
+            assert limit == 10
+            if key != "project":
+                return []
+            return [TrackerActivity(
+                event_id="sync-2", event_type="task.upserted", task_key="task",
+                task_name="Identity backlog", occurred_at="2026-11-22T09:00:00Z",
+                recorded_at="2026-11-22T10:00:00Z", outcome="ignored_stale",
+            )]
 
         def latest_test_run(self, project_key):
             assert project_key == "project"
@@ -300,6 +312,8 @@ def review_api(monkeypatch, request):
                 auth_required=True,
                 jwt_secret_key=_SECRET,
                 jwt_audience=_AUDIENCE,
+                graph_event_producer_subject="tracker",
+                graph_event_project_key="project",
                 ci_github_repository="example/project" if with_failed_run else "",
                 ci_repository_key="repo" if with_failed_run else "",
             )
@@ -661,3 +675,21 @@ def test_draft_approval_requires_writer_and_explicit_confirmation(review_api):
     assert review_api.post(
         publish, headers=auth("writer", "writer"), json={**commit, "approve": False},
     ).status_code == 422
+
+def test_tracker_overview_is_read_only_and_scoped_to_selected_project(review_api):
+    path = "/api/review/projects/project/tracker"
+    assert review_api.get(path).status_code == 401
+    reader = auth("reader", "reader")
+    response = review_api.get(path, headers=reader)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["configured"] is True
+    assert response.json()["recent_events"] == [{
+        "event_id": "sync-2", "event_type": "task.upserted", "task_key": "task",
+        "task_name": "Identity backlog", "occurred_at": "2026-11-22T09:00:00Z",
+        "recorded_at": "2026-11-22T10:00:00Z", "outcome": "ignored_stale",
+    }]
+    other = review_api.get("/api/review/projects/other/tracker", headers=reader)
+    assert other.json() == {"configured": False, "recent_events": []}
+    assert review_api.get("/api/review/projects/missing/tracker", headers=reader).status_code == 404
+    assert review_api.post(path, headers=reader, json={}).status_code == 405

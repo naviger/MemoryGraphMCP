@@ -30,7 +30,12 @@ from app.domain.architecture import (
     Task,
     architecture_key,
 )
-from app.domain.architecture_events import GraphEvent, GraphEventReceipt, TaskUpserted
+from app.domain.architecture_events import (
+    GraphEvent,
+    GraphEventReceipt,
+    TaskUpserted,
+    TrackerActivity,
+)
 from app.domain.exceptions import ArchitectureGraphError
 from app.domain.project_changes import BranchCleanup
 from app.domain.project_guidance import GuidanceScope
@@ -364,6 +369,33 @@ class ArangoArchitectureRepository:
                 edges.insert(payload)
         for key in previous:
             edges.delete(key)
+
+    def recent_tracker_activity(self, project_key: str, limit: int) -> list[TrackerActivity]:
+        rows = self._database().aql.execute(
+            """
+            WITH @@entities
+            FOR row IN @@events
+                FILTER row.project_key == @project
+                FILTER row.event_type IN ["task.upserted", "task.completed"]
+                SORT DATE_TIMESTAMP(row.recorded_at) DESC, row._key DESC
+                LIMIT @limit
+                LET task_name = FIRST(
+                    FOR task, edge IN 1..1 ANY @seed @@edges
+                        FILTER task._key == row.task_key AND task.entity_type == "Task"
+                        FILTER edge.relationship_type IN ["defines", "related_to", "references"]
+                        LIMIT 1
+                        RETURN task.name
+                )
+                RETURN MERGE(KEEP(row, [
+                    "event_id", "event_type", "task_key", "occurred_at", "recorded_at", "outcome"
+                ]), {task_name})
+            """,
+            bind_vars={
+                "@events": self._events, "@entities": self._entities, "@edges": self._edges,
+                "project": project_key, "seed": f"{self._entities}/{project_key}", "limit": limit,
+            },
+        )
+        return [TrackerActivity.model_validate(row) for row in rows]
 
     def get_event(self, source: str, project_key: str, event_id: str) -> GraphEventReceipt:
         key = architecture_key("tracker-event", source, project_key, event_id)

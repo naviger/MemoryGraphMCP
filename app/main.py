@@ -128,6 +128,7 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         ci_github_repository=settings.ci_github_repository,
         ci_project_key=settings.ci_project_key,
         ci_head=ci_head.current,
+        tracker_project_key=settings.graph_event_project_key,
         ci_repository_key=settings.ci_repository_key,
         test_fixes=TestFixService(settings, graph_repository, repository)
         if graph_repository else None,

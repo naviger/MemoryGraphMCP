@@ -477,3 +477,11 @@ select {
 }
 .change-table td:first-child { min-width: 14rem; }
 .change-table td code { overflow-wrap: anywhere; }
+
+.tracker-activity { width: 100%; border-collapse: collapse; text-align: left; }
+.tracker-activity th, .tracker-activity td {
+  padding: .55rem;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+.tracker-activity td code { overflow-wrap: anywhere; }

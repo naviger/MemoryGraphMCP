@@ -57,3 +57,18 @@ class GraphEventReceipt(BaseModel):
     recorded_at: AwareDatetime
     affected_entity_keys: list[MemoryKey]
     outcome: Literal["applied", "ignored_stale"]
+
+
+class TrackerActivity(BaseModel):
+    event_id: EntityName
+    event_type: GraphEventType
+    task_key: MemoryKey
+    task_name: EntityName | None = None
+    occurred_at: AwareDatetime
+    recorded_at: AwareDatetime
+    outcome: Literal["applied", "ignored_stale"]
+
+
+class TrackerOverview(BaseModel):
+    configured: bool
+    recent_events: list[TrackerActivity]

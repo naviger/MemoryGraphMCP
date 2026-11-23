@@ -19,6 +19,7 @@ from app.domain.architecture import (
     ArchitectureSearch,
     EntityType,
 )
+from app.domain.architecture_events import TrackerOverview
 from app.domain.ask_graph import AskGraphAnswer, AskGraphQuery
 from app.domain.exceptions import ADRError, ArchitectureGraphError, RevalidationError
 from app.domain.models import (
@@ -117,6 +118,7 @@ def build_review_router(
     *,
     ci_github_repository: str = "",
     ci_project_key: str = "",
+    tracker_project_key: str | None = None,
     ci_head: Callable[[], str | None] | None = None,
     ci_repository_key: str = "",
     test_fixes: TestFixService | None = None,
@@ -228,6 +230,14 @@ def build_review_router(
             raise HTTPException(status_code=404, detail="Project not found")
         response.headers["Cache-Control"] = "no-store"
         return summary
+
+    @router.get("/projects/{key}/tracker")
+    async def get_tracker_overview(key: MemoryKey, response: Response) -> TrackerOverview:
+        result = await details.get_tracker_overview(key, tracker_project_key)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        response.headers["Cache-Control"] = "no-store"
+        return result
 
     @router.get("/projects/{key}/changes")
     async def get_project_changes(
