@@ -11,7 +11,7 @@ function Published({ entry }) {
   </>;
 }
 
-export default function ProjectGuidance({ projectKey, token, active, onUnauthorized }) {
+export default function ProjectGuidance({ projectKey, token, active, onUnauthorized, global = false }) {
   const [data, setData] = useState(null);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -19,7 +19,7 @@ export default function ProjectGuidance({ projectKey, token, active, onUnauthori
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [reload, setReload] = useState(0);
-  const path = `/projects/${encodeURIComponent(projectKey)}/guidance`;
+  const path = global ? '/guidance/global' : `/projects/${encodeURIComponent(projectKey)}/guidance`;
   const handleError = (err) => {
     if (err.status === 401) onUnauthorized();
     else setError(err.message);
@@ -78,7 +78,7 @@ export default function ProjectGuidance({ projectKey, token, active, onUnauthori
 
   const dirty = data && text.trim() !== (data.draft?.text ?? data.published?.text ?? '');
   return <section className="detail" aria-busy={busy}>
-    <h3>Project Guidance</h3>
+    {!global && <h3>Project Guidance</h3>}
     {busy && <p role="status">Working…</p>}
     {notice && <p role="status">{notice}</p>}
     {error && <div role="alert">

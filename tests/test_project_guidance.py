@@ -18,11 +18,12 @@ async def test_project_guidance_is_read_only_and_uses_project_sources():
             return Project(key=key, name="Example") if key == "example" else None
 
         def read_guidance_state(self, key):
-            assert key == "example"
+            assert key in ("example", None)
             return GuidanceState.model_validate({
-                "draft": {"text": "Unapproved draft", "edited_by": "writer",
+                "draft": {"text": "Unapproved global draft" if key is None else "Unapproved project draft", "edited_by": "writer",
                           "edited_at": "2026-11-22T10:00:00Z"},
-                "published": {"text": "Published instructions", "version": 1,
+                "published": {"text": "Published global" if key is None else "Published project",
+                              "version": 1,
                               "edited_by": "writer", "approved_by": "admin",
                               "edited_at": "2026-11-22T09:00:00Z",
                               "published_at": "2026-11-22T09:30:00Z"},
@@ -66,8 +67,9 @@ async def test_project_guidance_is_read_only_and_uses_project_sources():
         result = (await client.call_tool(
             tool.name, {"project_key": "example"},
         )).structured_content
-        assert result["published_guidance"]["text"] == "Published instructions"
-        assert "Unapproved draft" not in str(result)
+        assert result["published_guidance"]["text"] == "Published project"
+        assert result["global_guidance"]["text"] == "Published global"
+        assert "Unapproved" not in str(result)
         assert [adr["record_key"] for adr in result["decisions"]] == ["adr"]
         assert result["decisions"][0]["evidence"] == ["tests/test_service.py"]
         assert [rule["entity_key"] for rule in result["constraints"]] == ["rule"]

@@ -958,19 +958,19 @@ class ArangoArchitectureRepository:
                 cleanups[row["url"]] = BranchCleanup.model_validate(row)
         return cleanups
 
-    def read_guidance_state(self, project_key: str) -> GuidanceState:
-        key = architecture_key("project-guidance", project_key)
+    def read_guidance_state(self, project_key: str | None) -> GuidanceState:
+        key = _guidance_key(project_key)
         return GuidanceState.model_validate(
             self._database().collection(self._events).get(key) or {},
         )
 
     def list_guidance_versions(
-        self, project_key: str, before: int, limit: int,
+        self, project_key: str | None, before: int, limit: int,
     ) -> list[PublishedGuidance]:
         rows = self._database().aql.execute(
             """
             FOR event IN @@events
-                FILTER event.event_type == "project.guidance.published"
+                FILTER event.event_type == @event_type
                 FILTER event.project_key == @project AND event.version < @before
                 SORT event.version DESC
                 LIMIT @limit
@@ -978,24 +978,26 @@ class ArangoArchitectureRepository:
             """,
             bind_vars={
                 "@events": self._events, "project": project_key, "before": before, "limit": limit,
+                "event_type": _guidance_event_type(project_key, "published"),
             },
         )
         return [PublishedGuidance.model_validate(row) for row in rows]
 
     def save_guidance_draft(
-        self, project_key: str, revision: int, text: str, actor: str,
+        self, project_key: str | None, revision: int, text: str, actor: str,
     ) -> None:
         self._change_guidance(project_key, revision, actor, text=text)
 
-    def approve_guidance(self, project_key: str, revision: int, actor: str) -> None:
+    def approve_guidance(self, project_key: str | None, revision: int, actor: str) -> None:
         self._change_guidance(project_key, revision, actor, text=None)
 
     def _change_guidance(
-        self, project_key: str, revision: int, actor: str, *, text: str | None,
+        self, project_key: str | None, revision: int, actor: str, *, text: str | None,
     ) -> None:
-        key = architecture_key("project-guidance", project_key)
+        key = _guidance_key(project_key)
         with self._transaction(with_events=True) as transaction:
-            self._require_entity_type(transaction.collection(self._entities), project_key, "Project")
+            if project_key is not None:
+                self._require_entity_type(transaction.collection(self._entities), project_key, "Project")
             journal = transaction.collection(self._events)
             state = GuidanceState.model_validate(journal.get(key) or {})
             if revision != state.revision:
@@ -1012,13 +1014,15 @@ class ArangoArchitectureRepository:
                     **state.draft.model_dump(), version=version, approved_by=actor, published_at=now,
                 )
                 journal.insert({
-                    "_key": architecture_key("project-guidance-version", project_key, str(version)),
-                    "event_type": "project.guidance.published", "project_key": project_key,
+                    "_key": _guidance_key(project_key, version),
+                    "event_type": _guidance_event_type(project_key, "published"),
+                    "project_key": project_key,
                     **state.published.model_dump(mode="json"),
                 })
                 state.draft = None
             journal.insert({
-                "_key": key, "event_type": "project.guidance.state", "project_key": project_key,
+                "_key": key, "event_type": _guidance_event_type(project_key, "state"),
+                "project_key": project_key,
                 **state.model_dump(mode="json"),
             }, overwrite_mode="replace")
 
@@ -1311,3 +1315,17 @@ class ArangoArchitectureRepository:
             },
         )
         return [ArchitecturePath.model_validate(row) for row in rows]
+
+
+
+def _guidance_key(project_key: str | None, version: int | None = None) -> str:
+    scope = ("global-guidance",) if project_key is None else ("project-guidance", project_key)
+    prefix, *parts = scope
+    if version is None:
+        return architecture_key(prefix, *parts)
+    return architecture_key(f"{prefix}-version", *parts, str(version))
+
+
+def _guidance_event_type(project_key: str | None, event: str) -> str:
+    scope = "global" if project_key is None else "project"
+    return f"{scope}.guidance.{event}"

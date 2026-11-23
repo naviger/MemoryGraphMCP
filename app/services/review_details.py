@@ -84,16 +84,18 @@ class ReviewDetailService:
         return await anyio.to_thread.run_sync(self._get_project_summary, key)
 
     async def get_guidance_editor(
-        self, key: str, can_edit: bool, can_publish: bool, before_version: int | None,
+        self, key: str | None, can_edit: bool, can_publish: bool, before_version: int | None,
     ) -> GuidanceEditor | None:
         return await anyio.to_thread.run_sync(
             self._get_guidance_editor, key, can_edit, can_publish, before_version,
         )
 
     def _get_guidance_editor(
-        self, key: str, can_edit: bool, can_publish: bool, before_version: int | None,
+        self, key: str | None, can_edit: bool, can_publish: bool, before_version: int | None,
     ) -> GuidanceEditor | None:
-        if self.architecture is None or not isinstance(self.architecture.read_entity(key), Project):
+        if self.architecture is None:
+            return None
+        if key is not None and not isinstance(self.architecture.read_entity(key), Project):
             return None
         state = self.architecture.read_guidance_state(key)
         cutoff = (state.published.version if state.published else 0) + 1
@@ -107,10 +109,10 @@ class ReviewDetailService:
         )
 
     async def change_guidance(
-        self, key: str, revision: int, actor: str, *, text: str | None = None,
+        self, key: str | None, revision: int, actor: str, *, text: str | None = None,
     ) -> None:
         if self.architecture is None:
-            raise ArchitectureGraphError("Project guidance is unavailable")
+            raise ArchitectureGraphError("Guidance is unavailable")
         if text is None:
             await anyio.to_thread.run_sync(self.architecture.approve_guidance, key, revision, actor)
         else:
