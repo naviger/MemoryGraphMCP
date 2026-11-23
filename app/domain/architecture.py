@@ -9,6 +9,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstrai
 from app.domain.execution_usage import ExecutionAttempt
 from app.domain.knowledge_capture import CaptureSuggestion, Evidence
 from app.domain.models import MemoryKey
+from app.domain.repair_contract import RepairContract
 
 EntityName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
 EntityType = Literal[
@@ -277,6 +278,9 @@ class Execution(ArchitectureNode):
     repair_patch_sha256: str | None = None
     repair_prompt: str | None = None
     repair_direction: str | None = None
+    repair_contract: RepairContract | None = None
+    repair_token_ceiling: int | None = None
+    additional_review_tokens: int | None = None
     agent: Literal["local", "codex", "claude-code", "openhands"]
     mode: Literal["PLAN_ONLY", "IMPLEMENT", "REVIEW", "FULL_LIFECYCLE"]
     state: Literal[

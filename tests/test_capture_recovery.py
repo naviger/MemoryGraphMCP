@@ -411,16 +411,24 @@ def test_arango_recovery_and_workspace():
     assert "Validate the source" in draft["prompt"]
     with pytest.raises(ArchitectureGraphError):
         workspace.repair_draft("beta", repair_task.key, review.key)
+    from app.domain.repair_contract import RepairContract
+
     request = StartExecution(
         request_id=uuid4().hex,
         agent="codex",
         mode="IMPLEMENT",
         repair_review_key=review.key,
         repair_prompt="Edited repair prompt",
+        repair_contract=RepairContract(
+            acceptance_criteria=["Preserve source identity"],
+            test_paths=["tests/test_arango_repository.py"],
+            additional_tokens=100,
+        ),
     )
     repair = workspace.start("alpha", repair_task.key, request, "writer")
     assert repair.patch_execution_key == original.key and repair.repair_patch_sha256 == "a" * 64
     assert repair.repair_prompt == "Edited repair prompt"
+    assert repair.repair_token_ceiling == 100
     assert workspace.start("alpha", repair_task.key, request, "writer").key == repair.key
 
     repairing = workspace.transition(repair, "RUNNING")
@@ -429,6 +437,8 @@ def test_arango_recovery_and_workspace():
         "REVIEW",
         result=AgentResult(
             summary="Saved new patch",
+            usage=ExecutionUsage(input_tokens=90, output_tokens=10),
+            verification={"passed": True},
             artifacts=[
                 AgentArtifact(
                     name="Local implementation patch",
@@ -448,17 +458,21 @@ def test_arango_recovery_and_workspace():
             ),
             "writer",
         )
+    review_request = StartExecution(
+        request_id=uuid4().hex,
+        agent="codex",
+        mode="REVIEW",
+        patch_execution_key=repair.key,
+    )
+    with pytest.raises(ArchitectureGraphError, match="budget is exhausted"):
+        workspace.start("alpha", repair_task.key, review_request, "writer")
     second_review = workspace.start(
         "alpha",
         repair_task.key,
-        StartExecution(
-            request_id=uuid4().hex,
-            agent="codex",
-            mode="REVIEW",
-            patch_execution_key=repair.key,
-        ),
+        review_request.model_copy(update={"additional_review_tokens": 50}),
         "writer",
     )
+    assert second_review.repair_token_ceiling == 150
     examining = workspace.transition(second_review, "RUNNING")
     workspace.transition(
         examining,
@@ -484,12 +498,30 @@ def test_arango_recovery_and_workspace():
     )
     with pytest.raises(ArchitectureGraphError, match="design direction"):
         workspace.start("alpha", repair_task.key, next_request, "writer")
+    with pytest.raises(ArchitectureGraphError, match="criteria or test"):
+        workspace.start(
+            "alpha",
+            repair_task.key,
+            next_request.model_copy(
+                update={
+                    "repair_direction": "Retry against the same checks.",
+                }
+            ),
+            "writer",
+        )
     directed = workspace.start(
         "alpha",
         repair_task.key,
         next_request.model_copy(
             update={
                 "repair_direction": "Keep legacy resolution behavior covered by end-to-end tests.",
+                "repair_contract": request.repair_contract.model_copy(
+                    update={
+                        "acceptance_criteria": [
+                            "Preserve legacy resolution and repository ownership"
+                        ],
+                    }
+                ),
             }
         ),
         "writer",

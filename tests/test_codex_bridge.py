@@ -231,3 +231,39 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(json.dumps({
     assert result["repaired_target"]["patch_sha256"] == original_digest
     assert b"+repaired in a new clone" in Path(result["artifacts"][0]["reference"]).read_bytes()
     assert sha256(original.read_bytes()).hexdigest() == original_digest
+
+
+def test_required_regression_failure_skips_the_model_reviewer(bridge, monkeypatch):
+    implementation = bridge.run(
+        "4" * 64,
+        "execute",
+        json.dumps(
+            {
+                "project_key": "target-project",
+                "mode": "IMPLEMENT",
+            }
+        ),
+    )
+
+    def fail_required_test(checkout, contract):
+        assert (checkout / "fixture.txt").read_text().strip() == "changed by adapter"
+        return {"passed": False, "command": "pytest tests/test_regression.py", "output": "failed"}
+
+    monkeypatch.setattr(bridge, "verify_contract", fail_required_test)
+    Path(bridge.executable).unlink()
+    result = bridge.run(
+        "5" * 64,
+        "review",
+        json.dumps(
+            {
+                "project_key": "target-project",
+                "mode": "REVIEW",
+                "patch_execution_key": "4" * 64,
+                "repair_contract": {"test_paths": ["tests/test_regression.py"]},
+            }
+        ),
+    )
+    assert result["review_verdict"] == "blocking"
+    assert result["reviewed_target"]["patch_sha256"] == implementation["artifacts"][0]["sha256"]
+    assert not result["verification"]["passed"]
+    assert "usage" not in result

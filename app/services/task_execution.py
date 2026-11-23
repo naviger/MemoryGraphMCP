@@ -343,6 +343,8 @@ class TaskExecutor:
                 "repair_patch_sha256": job.repair_patch_sha256,
                 "repair_prompt": job.repair_prompt,
                 "repair_direction": job.repair_direction,
+                "repair_contract": job.repair_contract
+                and job.repair_contract.model_dump(mode="json"),
                 "task": {
                     "key": task.key,
                     "name": task.name,
@@ -392,6 +394,22 @@ class TaskExecutor:
         if claimed is None:
             return
         try:
+            if claimed.repair_token_ceiling is not None:
+                used = await anyio.to_thread.run_sync(
+                    self.workspace.task_token_total,
+                    claimed.project_key,
+                    claimed.task_key,
+                )
+                if used >= claimed.repair_token_ceiling:
+                    await anyio.to_thread.run_sync(
+                        partial(
+                            move,
+                            claimed,
+                            "FAILED",
+                            failure="The approved repair token budget is exhausted",
+                        )
+                    )
+                    return
             keys, prompt = await anyio.to_thread.run_sync(self.context, claimed)
             claimed = await anyio.to_thread.run_sync(
                 partial(move, claimed, "RUNNING", context_keys=keys)
@@ -402,6 +420,17 @@ class TaskExecutor:
             phase = phases[claimed.phase]
             with anyio.fail_after(570):
                 result = await provider.perform(phase, claimed.key, prompt)
+            if claimed.repair_contract and not result.verification:
+                await anyio.to_thread.run_sync(
+                    partial(
+                        move,
+                        claimed,
+                        "FAILED",
+                        usage=result.usage,
+                        failure="The bridge did not report the required deterministic tests",
+                    )
+                )
+                return
             if claimed.repair_review_key:
                 target = result.repaired_target or {}
                 if (
@@ -444,6 +473,17 @@ class TaskExecutor:
                 503,
                 504,
             }
+            if retryable and claimed.repair_contract:
+                await anyio.to_thread.run_sync(
+                    partial(
+                        move,
+                        claimed,
+                        "FAILED",
+                        usage=failure_usage(exc),
+                        failure="The metered phase stopped. Inspect usage before retrying.",
+                    )
+                )
+                return
             if retryable:
                 timed_out = isinstance(exc, (TimeoutError, httpx.TimeoutException)) or (
                     isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 504

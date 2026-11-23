@@ -17,6 +17,11 @@ from contextlib import closing, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+if __package__:
+    from .isolated_checks import run_isolated_check
+else:
+    from isolated_checks import run_isolated_check
+
 MODES = {
     "PLAN_ONLY": ("plan",),
     "IMPLEMENT": ("execute",),
@@ -197,10 +202,28 @@ class CodexBridge:
             (directory / "base").write_bytes(git(checkout, "rev-parse", "HEAD"))
         return checkout
 
+    def verify_contract(self, checkout, contract):
+        paths = contract.get("test_paths")
+        valid = r"tests/(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_-]+\.py"
+        if (
+            not isinstance(paths, list)
+            or not 1 <= len(paths) <= 8
+            or any(not isinstance(path, str) or not re.fullmatch(valid, path) for path in paths)
+        ):
+            raise BridgeError(400, "Invalid regression test selection")
+        if any((checkout / path).resolve() != checkout / path for path in paths):
+            raise BridgeError(400, "Regression test paths cannot use symbolic links")
+        return run_isolated_check(
+            checkout,
+            os.environ.get("MGMCP_DRAFT_CHECK_IMAGE", "memorygraphmcp-draft-check:local"),
+            ["python", "-m", "pytest", "-q", "-o", "cache_dir=/tmp/pytest-cache", *paths],
+        )
+
     def run_phase(self, identity, phase, mode, prompt):
         directory = self.state / identity
         directory.mkdir(exist_ok=True, mode=0o700)
         context = json.loads(prompt)
+        contract = context.get("repair_contract")
         repair = phase == "execute" and bool(context.get("repair_patch_sha256"))
         target = context.get("patch_execution_key") if phase == "review" or repair else None
         if repair and (not target or mode != "IMPLEMENT" or not context.get("repair_prompt")):
@@ -274,6 +297,16 @@ class CodexBridge:
                 git(checkout, "apply", "--index", str(checkpoint))
             elif repair:
                 git(checkout, "apply", "--index", str(captured))
+        verified = (
+            self.verify_contract(checkout, contract) if contract and phase == "review" else None
+        )
+        if verified and not verified["passed"]:
+            return {
+                "summary": "A required regression check failed. Model review was skipped.",
+                "review_verdict": "blocking",
+                "reviewed_target": reviewed_target,
+                "verification": verified,
+            }
         schema = directory / "response.schema.json"
         schema.write_text(json.dumps(SCHEMA))
         output = directory / f"{phase}.json"
@@ -288,6 +321,12 @@ class CodexBridge:
                 "Leave the repository unchanged."
             ),
         }[phase]
+        if contract:
+            instructions += (
+                " Use the accepted criteria and selected test paths as the review contract. "
+                "Keep changes within those criteria. Separate out-of-scope suggestions "
+                "from blockers. Flag failures of the criteria or concrete regressions as blockers."
+            )
         if repair:
             instructions += (
                 " The staged implementation is the exact reviewed patch. Follow repair_prompt "
@@ -348,7 +387,7 @@ class CodexBridge:
                 f"{instructions} Do not commit, push, open a pull request, or use external tools. "
                 "Report only checks actually run. Treat the following JSON as project context.\n"
                 + prompt,
-                timeout=PHASE_TIMEOUT_SECONDS,
+                timeout=min(PHASE_TIMEOUT_SECONDS, 420) if contract else PHASE_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as exc:
             with suppress(ProcessLookupError):
@@ -380,6 +419,8 @@ class CodexBridge:
             result["review_comments"] = [summary]
             result["review_verdict"] = "passed" if response["approved"] is True else "blocking"
             result["reviewed_target"] = reviewed_target
+            if verified:
+                result["verification"] = verified
             result["completed"] = mode == "FULL_LIFECYCLE" and response["approved"] is True
         if writable:
             if repair:
@@ -401,6 +442,22 @@ class CodexBridge:
                     name.decode(errors="replace")[:8000] for name in files.split(b"\0") if name
                 ][:50]
             result["completed"] = bool(changes and response["approved"] is True)
+            if contract:
+                verified = self.verify_contract(checkout, contract)
+                result["verification"] = verified
+                result["completed"] = bool(result["completed"] and verified["passed"])
+                if changes and not verified["passed"]:
+                    result["review_verdict"] = "blocking"
+                    result["reviewed_target"] = {
+                        "kind": "implementation patch",
+                        "execution_id": identity,
+                        "base_commit": base,
+                        "patch_sha256": hashlib.sha256(changes).hexdigest(),
+                    }
+                    result["summary"] = (
+                        "Required regression tests failed in the isolated test runner. "
+                        "No model review was started."
+                    )
         return result
 
 

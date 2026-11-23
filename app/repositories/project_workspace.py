@@ -182,6 +182,38 @@ class ProjectWorkspaceRepository:
         result, _ = self.repair_target(earlier, project, task_key)
         return {"execution_key": earlier.key, "findings": result["summary"]}
 
+    def _usage(self, database, project, task_key):
+        return next(
+            iter(
+                database.aql.execute(
+                    """
+            FOR job IN @@nodes
+                FILTER job.entity_type == "Execution" AND job.task_key == @task
+                FILTER job.project_key == @project
+                LET attempts = (FOR attempt IN (IS_ARRAY(job.attempts) ? job.attempts : [])
+                    FILTER attempt.ended_at != null RETURN attempt)
+                LET tokens = SUM(
+                    FOR attempt IN attempts FILTER attempt.usage != null
+                    RETURN attempt.usage.input_tokens + attempt.usage.output_tokens
+                )
+                LET missing = LENGTH(FOR attempt IN attempts FILTER attempt.usage == null RETURN 1)
+                LET legacy = LENGTH(attempts) == 0 AND LENGTH(job.results) > 0 ? 1 : 0
+                COLLECT AGGREGATE total = SUM(tokens), unknown = SUM(missing + legacy)
+                RETURN {tokens: total, unknown}
+            """,
+                    bind_vars={
+                        "@nodes": self.graph._entities,
+                        "project": project,
+                        "task": task_key,
+                    },
+                )
+            ),
+            {"tokens": 0, "unknown": 0},
+        )
+
+    def task_token_total(self, project, task_key):
+        return self._usage(self.graph._database(), project, task_key)["tokens"]
+
     def repair_draft(self, project, task_key, review_key):
         self.task(project, task_key)
         review = self.graph.read_entity(review_key)
@@ -194,6 +226,8 @@ class ProjectWorkspaceRepository:
         earlier = self.previous_blocking_review(source, project, task_key, self.graph.read_entity)
         return {
             "needs_design_review": earlier is not None,
+            "usage": self._usage(self.graph._database(), project, task_key),
+            "previous_contract": source.repair_contract,
             "previous_review": earlier,
             "agent": "codex",
             "model": "Codex CLI default",
@@ -225,6 +259,8 @@ class ProjectWorkspaceRepository:
                     execution.repair_review_key,
                     execution.repair_prompt,
                     execution.repair_direction,
+                    execution.repair_contract if execution.repair_review_key else None,
+                    execution.additional_review_tokens,
                 ) != (
                     command.agent,
                     command.mode,
@@ -233,6 +269,8 @@ class ProjectWorkspaceRepository:
                     command.repair_review_key,
                     command.repair_prompt,
                     command.repair_direction,
+                    command.repair_contract,
+                    command.additional_review_tokens,
                 ):
                     raise ArchitectureGraphError("Execution request ID was already used")
                 return execution
@@ -246,8 +284,14 @@ class ProjectWorkspaceRepository:
                 )
             ):
                 raise ArchitectureGraphError("Task must be open and have no active execution")
+            if command.additional_review_tokens and (
+                not command.patch_execution_key or command.mode != "REVIEW"
+            ):
+                raise ArchitectureGraphError("Extra review tokens apply only to exact patch review")
             source_key = command.patch_execution_key
             patch_hash = None
+            contract = command.repair_contract
+            ceiling = None
             if command.repair_review_key:
                 if source_key or command.mode != "IMPLEMENT" or command.agent != "codex":
                     raise ArchitectureGraphError("Repair requires the Codex Implement workflow")
@@ -262,7 +306,7 @@ class ProjectWorkspaceRepository:
                 )
                 _, target = self.repair_target(review, project, key)
                 source_key, patch_hash = target["execution_id"], target["patch_sha256"]
-            elif command.repair_prompt or command.repair_direction:
+            elif command.repair_prompt or command.repair_direction or contract:
                 raise ArchitectureGraphError("A repair prompt requires a blocking review")
             if source_key:
                 if not command.repair_review_key and (
@@ -302,6 +346,23 @@ class ProjectWorkspaceRepository:
                         raise ArchitectureGraphError(
                             "This revised patch is blocked again. Record design direction first."
                         )
+                    if not contract:
+                        raise ArchitectureGraphError(
+                            "Set acceptance criteria, regression tests, and a token budget first."
+                        )
+                    if (
+                        earlier
+                        and source.repair_contract
+                        and (
+                            source.repair_contract.acceptance_criteria
+                            == contract.acceptance_criteria
+                            and source.repair_contract.test_paths == contract.test_paths
+                        )
+                    ):
+                        raise ArchitectureGraphError(
+                            "Revise the acceptance criteria or test selection before continuing."
+                        )
+                    ceiling = self._usage(tx, project, key)["tokens"] + contract.additional_tokens
                     superseded = tx.aql.execute(
                         """
                         FOR job IN @@nodes
@@ -323,6 +384,24 @@ class ProjectWorkspaceRepository:
                     )
                     if next(iter(superseded), False):
                         raise ArchitectureGraphError("A newer patch has superseded this review")
+                elif source.repair_contract:
+                    implementation = next(
+                        (value for value in reversed(source.results) if value.get("verification")),
+                        {},
+                    )
+                    if not implementation.get("verification", {}).get("passed"):
+                        raise ArchitectureGraphError("Required tests must pass before model review")
+                    contract = source.repair_contract
+                    ceiling = source.repair_token_ceiling
+                    used = self._usage(tx, project, key)["tokens"]
+                    if command.additional_review_tokens:
+                        ceiling = max(used, ceiling or 0) + command.additional_review_tokens
+                    if ceiling is not None and used >= ceiling:
+                        raise ArchitectureGraphError(
+                            "The approved repair token budget is exhausted"
+                        )
+                elif command.additional_review_tokens:
+                    raise ArchitectureGraphError("This patch has no repair token budget to extend")
             job = Execution(
                 key=execution_key,
                 name=f"{task.name} execution"[:500],
@@ -333,6 +412,9 @@ class ProjectWorkspaceRepository:
                 repair_patch_sha256=patch_hash,
                 repair_prompt=command.repair_prompt,
                 repair_direction=command.repair_direction,
+                repair_contract=contract,
+                repair_token_ceiling=ceiling,
+                additional_review_tokens=command.additional_review_tokens,
                 requested_by=actor,
                 agent=command.agent,
                 mode=command.mode,
@@ -400,6 +482,11 @@ class ProjectWorkspaceRepository:
             job = Execution.model_validate(row)
             if job.project_key != project or job.task_key != task_key:
                 raise ArchitectureGraphError("Execution does not belong to this task")
+            if (
+                job.repair_token_ceiling is not None
+                and self._usage(tx, project, task_key)["tokens"] >= job.repair_token_ceiling
+            ):
+                raise ArchitectureGraphError("The approved repair token budget is exhausted")
             active = task.metadata.get("active_execution")
             if (
                 job.state not in {"BLOCKED", "FAILED"}

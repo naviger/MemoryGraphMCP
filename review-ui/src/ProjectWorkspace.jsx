@@ -145,6 +145,11 @@ function StepDetails({ step, now, navigate, children }) {
     {step.current && job.state === 'BLOCKED' && job.lease_until && <p>Automatic retry scheduled for {stamp(job.lease_until)}.</p>}
     {result && <section>
       <ReviewResult result={result} navigate={navigate} />
+      {result.verification && <details open={!result.verification.passed}>
+        <summary>{result.verification.passed ? 'Required regression tests passed' : 'Required regression tests failed'}</summary>
+        <p><code>{result.verification.command}</code></p>
+        <pre>{result.verification.output}</pre>
+      </details>}
       <p>{result.summary}</p>
       {result.plan && <section><h5>Plan</h5><p className="execution-text">{result.plan}</p></section>}
       {result.pull_request && <p><strong>Pull request</strong> {result.pull_request}</p>}
@@ -179,6 +184,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
   const [mode, setMode] = useState('');
   const [recommendation, setRecommendation] = useState(null);
   const [repair, setRepair] = useState(null);
+  const [reviewBudget, setReviewBudget] = useState(null);
   const repairPrompt = useRef(null);
   const repairReview = repair?.review;
   useEffect(() => {
@@ -227,19 +233,37 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
     setBusy(true); setError('');
     try {
       const draft = await send(`${path}/${job.key}/repair-draft`);
-      setRepair({ ...draft, review: job.key, direction: '' });
+      setRepair({ ...draft, review: job.key, direction: '', tokenBudget: '',
+        criteria: draft.previous_contract?.acceptance_criteria.join('\n') || '',
+        tests: draft.previous_contract?.test_paths.join('\n') || '',
+      });
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
   }
+  const criteria = repair?.criteria.split('\n').map((line) => line.trim()).filter(Boolean) || [];
+  const testPaths = repair?.tests.split('\n').map((line) => line.trim()).filter(Boolean) || [];
+  const tokenBudget = Number(repair?.tokenBudget);
+  const previousContract = repair?.previous_contract;
+  const contractChanged = !repair?.needs_design_review || !previousContract ||
+    JSON.stringify(criteria) !== JSON.stringify(previousContract.acceptance_criteria) ||
+    JSON.stringify(testPaths) !== JSON.stringify(previousContract.test_paths);
+  const contractReady = criteria.length > 0 && criteria.length <= 8 && criteria.every((line) => line.length <= 1000) &&
+    testPaths.length > 0 && testPaths.length <= 8 &&
+    testPaths.every((path) => /^tests\/(?:[A-Za-z0-9_-]+\/)*test_[A-Za-z0-9_-]+\.py$/.test(path)) &&
+    Number.isInteger(tokenBudget) && tokenBudget > 0 && tokenBudget <= 20000000 && contractChanged;
+
   async function startRepair(event) {
     event.preventDefault();
-    if (!repair?.prompt.trim() || (repair.needs_design_review && !repair.direction.trim())) return;
+    if (!contractReady || !repair?.prompt.trim() || (repair.needs_design_review && !repair.direction.trim())) return;
     setBusy(true); setError('');
     try {
       const started = await send(path, {
         request_id: requested, agent: repair.agent, mode: 'IMPLEMENT',
         repair_review_key: repair.review, repair_prompt: repair.prompt,
         repair_direction: repair.direction.trim() || null,
+        repair_contract: {
+          acceptance_criteria: criteria, test_paths: testPaths, additional_tokens: tokenBudget,
+        },
       });
       setRequested(crypto.randomUUID());
       setRepair(null);
@@ -248,12 +272,16 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
   }
-  async function submit(job, action = 'cancel') {
+  async function submit(job, action = 'cancel', additionalReviewTokens = null) {
     setBusy(true);
     setError('');
     try {
       if (action === 'review-patch') {
-        const started = await send(path, { request_id: requested, agent: 'codex', mode: 'REVIEW', patch_execution_key: job.key });
+        const started = await send(path, {
+          request_id: requested, agent: 'codex', mode: 'REVIEW',
+          patch_execution_key: job.key, additional_review_tokens: additionalReviewTokens,
+        });
+        setReviewBudget(null);
         setSelection(`${started.key}/0`);
         setRequested(crypto.randomUUID());
       } else if (job) await send(`${path}/${job.key}/${action}`, {});
@@ -263,7 +291,13 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
         setRequested(crypto.randomUUID());
       }
       await reload();
-    } catch (err) { setError(err.message); }
+    } catch (err) {
+      if (action === 'review-patch' && err.message.includes('token budget is exhausted')) {
+        setReviewBudget({ job, tokens: '' });
+        setSelection(steps.find((step) => step.job.key === job.key && step.phase === 'Implement')?.key);
+      }
+      setError(err.message);
+    }
     finally { setBusy(false); }
   }
   return <section className="detail workspace-form">
@@ -297,6 +331,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
           const mayRetry = mayChange && current && ['BLOCKED', 'FAILED'].includes(job.state) && task.status !== 'done';
           const mayReview = mayChange && !active && agents.codex?.includes('REVIEW') &&
             job.agent === 'codex' && !progress.reviewed.has(job.key) && !progress.superseded.has(job.key) &&
+            (!job.repair_contract || result?.verification?.passed) &&
             result?.artifacts.some((item) => item.name === 'Local implementation patch');
           const escalated = step.key === latestBlocker?.key && needsDirection(step);
           const mayRepair = mayChange && !active && agents.codex?.includes('IMPLEMENT') &&
@@ -328,6 +363,14 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
         })}
       </ol>
       {selected && <StepDetails step={selected} now={now} navigate={navigate}>
+    {reviewBudget?.job.key === selected.job.key && <form className="detail workspace-form"
+      onSubmit={(event) => { event.preventDefault(); submit(reviewBudget.job, 'review-patch', Number(reviewBudget.tokens)); }}>
+      <h5>Approve additional tokens for this review</h5>
+      <label>Additional tokens<input type="number" min={1} max={20000000} step={1} required
+        value={reviewBudget.tokens} onChange={(event) => setReviewBudget({ ...reviewBudget, tokens: event.target.value })} /></label>
+      <div className="workspace-actions"><button className="button primary" disabled={busy}>Review the same patch</button>
+        <button type="button" className="button outlined" onClick={() => setReviewBudget(null)}>Close</button></div>
+    </form>}
     {repair?.review === selected.job.key && <form className="detail workspace-form" onSubmit={startRepair}>
       <h5>{repair.needs_design_review ? 'Needs design review' : 'Revise this patch'}</h5>
       {repair.needs_design_review && <>
@@ -343,10 +386,28 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
       <p><strong>Recommended agent and model</strong> · Codex · {repair.model}</p>
       <p>{repair.reason} The new patch will return to Review.</p>
       <p>Source patch SHA-256 <code>{repair.patch_sha256}</code></p>
+      <p><strong>Usage so far</strong> · {number(repair.usage.tokens)} reported tokens
+        {repair.usage.unknown > 0 && ` · ${repair.usage.unknown} attempts without usage`}</p>
+      <label>Acceptance criteria <span className="muted">One observable result per line</span>
+        <textarea value={repair.criteria} rows={4} disabled={busy} required
+          onChange={(event) => setRepair({ ...repair, criteria: event.target.value })} />
+      </label>
+      <label>Required test files <span className="muted">One Python test path under tests/ per line</span>
+        <textarea value={repair.tests} rows={3} disabled={busy} required
+          placeholder="tests/test_example.py"
+          onChange={(event) => setRepair({ ...repair, tests: event.target.value })} />
+      </label>
+      <label>Additional reported-token budget
+        <input type="number" min={1} max={20000000} step={1} required disabled={busy}
+          value={repair.tokenBudget} onChange={(event) => setRepair({ ...repair, tokenBudget: event.target.value })} />
+      </label>
+      <p className="muted">The budget is checked between phases. A running model call can exceed it.
+        Required tests must pass before model review.</p>
+      {!contractChanged && <p role="status">Change the acceptance criteria or tests before continuing.</p>}
       <label>Repair prompt<textarea ref={repairPrompt} rows={8} maxLength={8000} required disabled={busy}
         value={repair.prompt} onChange={(event) => setRepair({ ...repair, prompt: event.target.value })} /></label>
       <div className="workspace-actions">
-        <button className="button primary" disabled={busy || active || !repair.prompt.trim() || (repair.needs_design_review && !repair.direction.trim())}>
+        <button className="button primary" disabled={busy || active || !contractReady || !repair.prompt.trim() || (repair.needs_design_review && !repair.direction.trim())}>
           {repair.needs_design_review ? 'Continue with this direction' : 'Generate revised patch'}</button>
         <button className="button outlined" type="button" disabled={busy} onClick={() => setRepair(null)}>Close</button>
       </div>
