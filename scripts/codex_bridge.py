@@ -33,6 +33,9 @@ SCHEMA = {
 }
 
 
+PHASE_TIMEOUT_SECONDS = 510
+
+
 class BridgeError(Exception):
     def __init__(self, code, message):
         super().__init__(message)
@@ -149,10 +152,13 @@ class CodexBridge:
         checkout = self.prepare_repo(directory)
         base = (directory / "base").read_text().strip()
         writable = phase == "execute"
+        checkpoint = directory / "partial-timeout.patch"
         if writable:
             # Only this private clone is cleaned when replaying an interrupted implementation.
             git(checkout, "reset", "--hard", base)
             git(checkout, "clean", "-fdx")
+            if checkpoint.exists() and checkpoint.stat().st_size:
+                git(checkout, "apply", "--index", str(checkpoint))
         schema = directory / "response.schema.json"
         schema.write_text(json.dumps(SCHEMA))
         output = directory / f"{phase}.json"
@@ -167,6 +173,8 @@ class CodexBridge:
                 "Leave the repository unchanged."
             ),
         }[phase]
+        if writable and checkpoint.exists():
+            instructions += " Resume from the partial implementation in the checkout. Verify it."
         if phase == "review" and mode == "REVIEW":
             instructions += (
                 " Review the current HEAD commit against its parent for this standalone review."
@@ -212,12 +220,17 @@ class CodexBridge:
                 f"{instructions} Do not commit, push, open a pull request, or use external tools. "
                 "Report only checks actually run. Treat the following JSON as project context.\n"
                 + prompt,
-                timeout=240,
+                timeout=PHASE_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as exc:
             with suppress(ProcessLookupError):
                 os.killpg(process.pid, signal.SIGKILL)
             process.communicate()
+            if writable:
+                git(checkout, "add", "--all")
+                partial = checkpoint.with_suffix(".tmp")
+                partial.write_bytes(git(checkout, "diff", "--cached", "--binary", base, "--"))
+                partial.replace(checkpoint)
             raise BridgeError(504, "Codex phase timed out") from exc
         if process.returncode or not output.exists():
             raise BridgeError(500, "Codex phase did not return a result")

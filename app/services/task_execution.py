@@ -60,7 +60,9 @@ class BridgeProvider:
         headers = {"Idempotency-Key": f"{execution_key}:{phase}"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token.get_secret_value()}"
-        async with httpx.AsyncClient(timeout=300, follow_redirects=False, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            timeout=555, follow_redirects=False, trust_env=False
+        ) as client:
             response = await client.post(f"{self.url}/{phase}", json=payload, headers=headers)
             response.raise_for_status()
             return response
@@ -83,7 +85,9 @@ class LocalProvider:
     async def generate(self, instruction, prompt):
         if not self.url:
             raise ArchitectureGraphError("Local writing assistance is unavailable")
-        async with httpx.AsyncClient(timeout=240, follow_redirects=False, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            timeout=240, follow_redirects=False, trust_env=False
+        ) as client:
             response = await client.post(
                 f"{self.url}/api/chat",
                 json={
@@ -165,7 +169,9 @@ class TaskExecutor:
                 local.url, local.model = config.url, config.model
                 providers[name] = local
             else:
-                providers[name] = BridgeProvider(config.url, self.registry.bridge_token(name, config.url))
+                providers[name] = BridgeProvider(
+                    config.url, self.registry.bridge_token(name, config.url)
+                )
             modes[name] = config.modes
         self.local, self.providers, self.registered_modes = local, providers, modes
         self.registry_revision = revision
@@ -321,7 +327,7 @@ class TaskExecutor:
                 return
             phases = PHASES[claimed.mode]
             phase = phases[claimed.phase]
-            with anyio.fail_after(480):
+            with anyio.fail_after(570):
                 result = await provider.perform(phase, claimed.key, prompt)
         except (TimeoutError, httpx.TransportError, httpx.HTTPStatusError) as exc:
             retryable = isinstance(
@@ -333,13 +339,21 @@ class TaskExecutor:
                 504,
             }
             if retryable:
+                timed_out = isinstance(exc, (TimeoutError, httpx.TimeoutException)) or (
+                    isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 504
+                )
+                failure = (
+                    "The agent phase reached its time limit. A retry is scheduled."
+                    if timed_out
+                    else "Agent temporarily unavailable. A retry is scheduled."
+                )
                 # The adapter must return the same operation when the stored lease expires.
                 await anyio.to_thread.run_sync(
                     partial(
                         move,
                         claimed,
                         "BLOCKED",
-                        failure="Agent temporarily unavailable. A retry is scheduled.",
+                        failure=failure,
                     )
                 )
                 return

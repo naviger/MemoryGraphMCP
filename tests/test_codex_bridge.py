@@ -80,3 +80,32 @@ def test_scope_cancel_and_phase_order(bridge):
         assert pool.submit(bridge.cancel, identity).result()["cancelled"]
     with pytest.raises(BridgeError, match="cancelled"):
         bridge.run(identity, "plan", prompt)
+
+
+def test_timeout_preserves_and_restores_partial_implementation(bridge, monkeypatch):
+    import scripts.codex_bridge as module
+
+    identity = "c" * 64
+    prompt = json.dumps({"project_key": "target-project", "mode": "IMPLEMENT"})
+    monkeypatch.setattr(module, "PHASE_TIMEOUT_SECONDS", 1)
+    bridge_cli = Path(bridge.executable)
+    bridge_cli.write_text("""#!/usr/bin/env python3
+import pathlib, time
+pathlib.Path("partial.txt").write_text("retained")
+time.sleep(20)
+""")
+    with pytest.raises(BridgeError) as error:
+        bridge.run(identity, "execute", prompt)
+    assert error.value.code == 504
+    checkpoint = bridge.state / identity / "partial-timeout.patch"
+    assert b"+retained" in checkpoint.read_bytes()
+    bridge_cli.write_text("""#!/usr/bin/env python3
+import json, pathlib, sys
+assert pathlib.Path("partial.txt").read_text() == "retained"
+pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(json.dumps({
+    "summary": "Resumed from the checkpoint.", "tests": [], "approved": True,
+}))
+""")
+    result = bridge.run(identity, "execute", prompt)
+    assert result["completed"]
+    assert result["files_modified"] == ["partial.txt"]
