@@ -1,5 +1,5 @@
 import {
-  CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, CircleHelp, FolderKanban, GitPullRequest,
+  BarChart3, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, CircleHelp, FolderKanban, GitPullRequest,
   House, KeyRound, MessageCircleQuestion, Network, RefreshCw, Search, ShieldCheck,
 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -9,6 +9,7 @@ import { EntityDetailPage } from './EntityDetailPage.jsx';
 import { HomePage } from './HomePage.jsx';
 import { ProjectsPage } from './ProjectsPage.jsx';
 import { SidebarAccount } from './SidebarAccount.jsx';
+import { TokenUsagePage } from './TokenUsagePage.jsx';
 import { HelpPage } from './HelpPage.jsx';
 import ProjectGuidance from './ProjectGuidance.jsx';
 import { GraphPage } from './GraphPage.jsx';
@@ -114,6 +115,7 @@ function detailLocation() {
   if (/^\/search\/?$/.test(window.location.pathname)) return { destination: 'search' };
   if (/^\/help\/?$/.test(window.location.pathname)) return { destination: 'help' };
   if (/^\/global-guidance\/?$/.test(window.location.pathname)) return { destination: 'global-guidance' };
+  if (/^\/token-usage\/?$/.test(window.location.pathname)) return { destination: 'token-usage' };
   const review = window.location.pathname.match(/^\/review\/(validations|conflicts)\/?$/);
   if (review) return { destination: 'review', key: review[1] };
   if (/^\/projects\/?$/.test(window.location.pathname)) return { destination: 'projects' };
@@ -424,6 +426,11 @@ function App() {
               onClick={(event) => navigate(event, '/search')}>
               <Search size={18} aria-hidden="true" /> Search Memory
             </a>
+            {session && <a href="/token-usage" className={route?.destination === 'token-usage' ? 'nav-item active' : 'nav-item'}
+              aria-current={route?.destination === 'token-usage' ? 'page' : undefined}
+              onClick={(event) => navigate(event, '/token-usage')}>
+              <BarChart3 size={18} aria-hidden="true" /> Token usage
+            </a>}
             {session?.role === 'admin' && (
               <a href="/global-guidance" className={route?.destination === 'global-guidance' ? 'nav-item active' : 'nav-item'}
                 aria-current={route?.destination === 'global-guidance' ? 'page' : undefined}
@@ -480,7 +487,9 @@ function App() {
               ? <ProjectGuidance global active token={token} onUnauthorized={expireSession} />
               : <p role="alert">Administrator access is required.</p>}
           </>}
-          {session && ['ask', 'search', 'graph', 'projects', 'help', 'global-guidance'].includes(route?.destination)
+          {session && route?.destination === 'token-usage' && <TokenUsagePage projectKey={projectKey}
+            token={token} onUnauthorized={expireSession} />}
+          {session && ['ask', 'search', 'graph', 'projects', 'help', 'global-guidance', 'token-usage'].includes(route?.destination)
             ? null : session && !isQueueRoute ? (
             <EntityDetailPage key={`${route.destination}/${route.key}`}
               route={route} token={token} navigate={navigate} onUnauthorized={expireSession}

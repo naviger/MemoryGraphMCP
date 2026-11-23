@@ -448,3 +448,33 @@ Writers can call `review_change` with the project key, diff, optional test
 results, optional rationale, and linked entities. The tool records what changed, any supplied
 rationale, and related ADRs, goals, and constraints. It uses stored evidence
 and static heuristics, so missing rationale stays unknown.
+
+### Graph context packages and token usage
+
+Call `build_context_package` with a question and optionally a project, entity,
+ADR, goal, or service key. An ADR anchor can use its graph key or stored record
+key. The tool uses graph anchors and direct relationships to collect compact
+decisions, active constraints, services, tests, and citations. Use `as_of` to
+filter decisions by date and `max_context_tokens` to limit the estimated size.
+Graph links describe the currently indexed architecture. Pass
+`include_full_adrs: true` to request full ADR text when it fits the same budget.
+Send the context fields to your LLM and retain the `usage` receipt separately.
+Ask the Graph uses the graph evidence first and falls back to lexical evidence
+when it finds no applicable linked decisions.
+
+**Token usage** in the sidebar shows recent retrievals, daily history, and
+session, project, and lifetime summaries. An MCP retrieval returns its receipt
+in result metadata or, for context packages, in the structured result.
+Review API searches and graph requests expose estimates and a request ID in
+`X-MemoryGraph-*` headers. Use `get_retrieval_usage` for an individual receipt
+and `get_token_usage` for rollups. For bearer clients without a server session,
+send a consistent `X-MemoryGraph-Session` value to group requests.
+
+The estimator is model-independent. The counterfactual uses full text for the
+same retrieved documents or candidate ADRs where available, with the same
+question and reported response tokens. A missing baseline produces no savings
+estimate. Use `report_retrieval_outcome` to add completion, follow-up retries,
+and optional provider-counted response tokens to your request. The dashboard
+compares average reported retries for graph and document retrieval when both
+groups have outcomes. It does not infer success or claim a causal reduction.
+The journal stores metrics, not query text, retrieved text, or model output.

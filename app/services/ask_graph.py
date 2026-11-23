@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from functools import partial
 
@@ -9,6 +10,8 @@ import anyio
 
 from app.domain.architecture import EntityType
 from app.domain.ask_graph import AnswerCitation, AnswerFinding, AskGraphAnswer, AskGraphQuery
+from app.domain.context_usage import ContextQuery
+from app.domain.exceptions import ArchitectureGraphError
 from app.domain.models import (
     ADRConflict,
     ADRConflictQuery,
@@ -18,7 +21,9 @@ from app.domain.models import (
 )
 from app.domain.review_details import ProjectOverview
 from app.repositories.protocol import MemoryRepository
+from app.services.context_package import ContextPackageService
 from app.services.review_details import ReviewDetailService
+from app.services.token_usage import document_baseline
 
 _IGNORE = set(
     "a an and are as at be by can could current did do does for from get give how i in is it its "
@@ -82,13 +87,25 @@ def _add_claim(
             existing.add(identity)
 
 
+@dataclass
+class AskEvidence:
+    path: str = "graph inventory"
+    baseline: int | None = None
+    lexical: bool = False
+
+
 class AskGraphService:
-    def __init__(self, repository: MemoryRepository, details: ReviewDetailService) -> None:
+    def __init__(
+        self, repository: MemoryRepository, details: ReviewDetailService,
+        context: ContextPackageService | None = None,
+    ) -> None:
         self.repository = repository
         self.details = details
+        self.context = context
 
     async def answer(
-        self, query: AskGraphQuery, project: ProjectOverview | None = None
+        self, query: AskGraphQuery, project: ProjectOverview | None = None,
+        *, evidence: AskEvidence | None = None,
     ) -> AskGraphAnswer:
         as_of = query.as_of or datetime.now(UTC).date()
         question = " ".join(query.question.casefold().rstrip("?.!").split())
@@ -101,6 +118,8 @@ class AskGraphService:
         topics = words - _IGNORE - _LINK_INTENTS.keys()
         terms = sorted(topics or words - _IGNORE)
         if not terms:
+            if evidence is not None:
+                evidence.path = "no relevant search terms"
             return AskGraphAnswer(
                 as_of=as_of,
                 summary="The question needs a topic to search.",
@@ -108,15 +127,35 @@ class AskGraphService:
                 conflicts=[],
                 gaps=["Name a decision, service, or architecture topic."],
             )
-        search = self.repository.search_question_documents
-        if project is not None:
-            search = partial(search, document_keys=[doc.key for doc in project.documents])
-        records = await anyio.to_thread.run_sync(
-            search,
-            " ".join(terms),
-            as_of,
-            _LIMIT,
-        )
+        records = []
+        if self.context:
+            try:
+                package, _, _ = await self.context.build(ContextQuery(
+                    question=query.question, project_key=query.project_key,
+                    as_of=as_of, max_context_tokens=1800,
+                ))
+                keys = [item.key for item in package.relevant_adrs]
+                if keys:
+                    records = await anyio.to_thread.run_sync(
+                        lambda: [doc for key in keys if (doc := self.repository.read_document(key))],
+                    )
+            except ArchitectureGraphError:
+                pass
+        if records:
+            if evidence is not None:
+                evidence.path = "graph anchors → direct ADRs → evidence synthesis"
+        else:
+            search = self.repository.search_question_documents
+            if project is not None:
+                search = partial(search, document_keys=[doc.key for doc in project.documents])
+            records = await anyio.to_thread.run_sync(search, " ".join(terms), as_of, _LIMIT)
+            if evidence is not None:
+                evidence.lexical = True
+                evidence.path = "graph lookup → lexical evidence → evidence synthesis" if self.context else (
+                    "lexical evidence → evidence synthesis"
+                )
+        if evidence is not None:
+            evidence.baseline = document_baseline(records)
         if not records:
             return AskGraphAnswer(
                 as_of=as_of,

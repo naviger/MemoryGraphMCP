@@ -1,4 +1,21 @@
 const BASE = '/api/review';
+let usageSession;
+
+function newSessionId() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function tokenUsageSession() {
+  if (!usageSession) {
+    try {
+      usageSession = sessionStorage.getItem('memorygraph.usageSession') || newSessionId();
+      sessionStorage.setItem('memorygraph.usageSession', usageSession);
+    } catch {
+      usageSession ||= newSessionId();
+    }
+  }
+  return usageSession;
+}
 
 export class ApiError extends Error {
   constructor(status, message) {
@@ -12,7 +29,7 @@ export async function reviewRequest(path, { token, body, signal } = {}) {
     method: body === undefined ? 'GET' : 'POST',
     headers: {
       Accept: 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(token ? { Authorization: `Bearer ${token}`, 'X-MemoryGraph-Session': tokenUsageSession() } : {}),
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),

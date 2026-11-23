@@ -8,14 +8,17 @@ from app.mcp.resources.catalog import register_resources
 from app.mcp.tools.adrs import register_adr_tools
 from app.mcp.tools.architecture import register_architecture_tools
 from app.mcp.tools.architecture_events import register_event_tools
+from app.mcp.tools.context_usage import register_context_usage
 from app.mcp.tools.revalidation import register_revalidation_tool
 from app.mcp.tools.review_queue import register_review_queue_tool
 from app.mcp.tools.search import register_search_tools
 from app.services.architecture_service import ArchitectureService
+from app.services.context_package import ContextPackageService
 from app.services.ingestion_service import MemoryIngestionService
 from app.services.knowledge_base import StaticKnowledgeBase
 from app.services.review_queue import ReviewQueueService
 from app.services.search_service import MemorySearchService
+from app.services.token_usage import TokenUsageService
 
 
 def build_mcp_server(
@@ -33,6 +36,7 @@ def build_mcp_server(
             + (
                 "Resolve the project key with search_architecture_entities, then call "
                 "get_project_guidance for its current ADRs and constraints. "
+                "Use build_context_package for compact, question-specific graph evidence. "
                 "Follow the repository's own instructions."
                 if architecture_service is not None else ""
             )
@@ -51,6 +55,11 @@ def build_mcp_server(
         register_architecture_tools(
             server, architecture_service, auth_required=settings.auth_required,
         )
+        if hasattr(architecture_service.repository, "record_usage"):
+            register_context_usage(
+                server, ContextPackageService(architecture_service.repository, architecture_service.memory),
+                TokenUsageService(architecture_service.repository),
+            )
     if (
         architecture_service is not None and settings.auth_required
         and settings.graph_event_producer_subject and settings.graph_event_project_key
