@@ -29,6 +29,9 @@ EntityType = Literal[
     "Project",
     "Task",
     "ConversationSummary",
+    "Execution",
+    "Artifact",
+    "Agent",
 ]
 RelationshipType = Literal[
     "implements",
@@ -264,6 +267,39 @@ class Observation(ArchitectureNode):
     suggestions: list[CaptureSuggestion] = Field(default_factory=list, max_length=50)
 
 
+class Execution(ArchitectureNode):
+    entity_type: Literal["Execution"] = "Execution"
+    project_key: MemoryKey
+    task_key: MemoryKey
+    agent: Literal["local", "codex", "claude-code", "openhands"]
+    mode: Literal["PLAN_ONLY", "IMPLEMENT", "REVIEW", "FULL_LIFECYCLE"]
+    state: Literal[
+        "BACKLOG", "PLANNED", "READY", "RUNNING", "BLOCKED", "REVIEW", "COMPLETED", "FAILED",
+        "CANCEL_REQUESTED", "CANCELLED",
+    ] = "READY"
+    phase: int = 0
+    revision: int = 0
+    requested_by: str
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
+    lease_until: AwareDatetime | None = None
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
+    context_keys: list[MemoryKey] = Field(default_factory=list)
+    results: list[dict[str, Any]] = Field(default_factory=list)
+    failure: str | None = None
+
+
+class Artifact(ArchitectureNode):
+    entity_type: Literal["Artifact"] = "Artifact"
+    project_key: MemoryKey
+    reference: str
+
+
+class Agent(ArchitectureNode):
+    entity_type: Literal["Agent"] = "Agent"
+    project_key: MemoryKey
+
+
 ArchitectureEntity = Annotated[
     ArchitectureADR
     | DomainConcept
@@ -282,7 +318,10 @@ ArchitectureEntity = Annotated[
     | Observation
     | Project
     | Task
-    | ConversationSummary,
+    | ConversationSummary
+    | Execution
+    | Artifact
+    | Agent,
     Field(discriminator="entity_type"),
 ]
 

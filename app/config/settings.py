@@ -90,6 +90,8 @@ class Settings(BaseSettings):
     ci_github_publish_token: SecretStr | None = None
     test_fix_ollama_url: str = ""
     test_fix_ollama_model: str = "qwen3-coder:30b"
+    workspace_agent_urls: dict[str, str] = Field(default_factory=dict)
+    workspace_agent_token: SecretStr | None = None
     draft_worker_url: str = ""
     draft_worker_token: SecretStr | None = None
     arango_documents_collection: str = Field(default="memory_documents")

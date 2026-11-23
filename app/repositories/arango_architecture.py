@@ -36,6 +36,7 @@ from app.domain.architecture_events import (
     TaskUpserted,
     TrackerActivity,
 )
+from app.domain.capture_checkpoint import CaptureCheckpoint, CaptureStream
 from app.domain.context_usage import UsageOutcome, UsageReceipt, UsageScope
 from app.domain.effectiveness import DevelopmentOutcome, OutcomeReceipt
 from app.domain.exceptions import ArchitectureGraphError
@@ -256,6 +257,45 @@ class ArangoArchitectureRepository:
             bind_vars={"@entities": self._entities, "keys": entity_keys},
         )
         return [ConversationSummary.model_validate(row) for row in rows]
+
+    def read_capture_checkpoint(
+        self, project: str, scope: str, stream: CaptureStream,
+    ) -> CaptureCheckpoint:
+        key = architecture_key("capture-checkpoint", project, scope, stream)
+        row = self._database().collection(self._events).get(key)
+        return CaptureCheckpoint.model_validate(row["payload"]) if row else CaptureCheckpoint(stream=stream)
+
+    def save_capture_checkpoint(
+        self, project: str, scope: str, checkpoint: CaptureCheckpoint,
+    ) -> CaptureCheckpoint:
+        key = architecture_key("capture-checkpoint", project, scope, checkpoint.stream)
+        with self._transaction(with_events=True) as transaction:
+            events = transaction.collection(self._events)
+            row = events.get(key)
+            revision = row["payload"]["revision"] if row else 0
+            if revision != checkpoint.revision:
+                raise ArchitectureGraphError("Capture checkpoint changed concurrently")
+            updated = checkpoint.model_copy(update={"revision": revision + 1})
+            events.insert({
+                "_key": key, "event_type": "capture.checkpoint", "project_key": project,
+                "payload": updated.model_dump(mode="json"),
+            }, overwrite_mode="replace")
+        return updated
+
+    def capture_journal_lag(self, project_key: str) -> tuple[int, datetime | None]:
+        rows = self._database().aql.execute(
+            """
+            FOR event IN @@events
+                FILTER event.project_key == @project
+                FILTER event.event_type == "test.run.finished" OR event.outcome == "applied"
+                FILTER DOCUMENT(@entities, CONCAT("capture-", event._key)) == null
+                COLLECT AGGREGATE count = LENGTH(1), oldest = MIN(event.recorded_at)
+                RETURN {count, oldest}
+            """,
+            bind_vars={"@events": self._events, "entities": self._entities, "project": project_key},
+        )
+        row = next(iter(rows), {"count": 0, "oldest": None})
+        return row["count"], datetime.fromisoformat(row["oldest"]) if row["oldest"] else None
 
     def capture_journal(self, project_key: str, limit: int) -> list[dict]:
         return list(self._database().aql.execute(

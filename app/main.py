@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from fastmcp.utilities.lifespan import combine_lifespans
 
 from app.api.effectiveness import build_effectiveness_router
+from app.api.project_workspace import build_workspace_router
 from app.api.review import REVIEW_API_PREFIX, build_review_router
 from app.api.test_runs import build_test_run_router
 from app.auth.browser_oidc import BrowserOIDC
@@ -22,6 +23,7 @@ from app.config.telemetry import configure_telemetry, instrument_fastapi
 from app.domain.review_details import SearchEmbeddingDiagnostics
 from app.mcp.server import build_mcp_server
 from app.repositories.factory import build_repository
+from app.repositories.project_workspace import ProjectWorkspaceRepository
 from app.repositories.scoped import ScopedRepositories
 from app.services.architecture_service import ArchitectureService
 from app.services.ask_graph import AskGraphService
@@ -38,6 +40,7 @@ from app.services.project_changes import ProjectChangesService
 from app.services.review_details import ReviewDetailService
 from app.services.review_queue import ReviewQueueService
 from app.services.search_service import MemorySearchService
+from app.services.task_execution import TaskExecutor
 from app.services.test_fix import TestFixService
 from app.services.token_usage import TokenUsageService
 
@@ -71,6 +74,11 @@ def create_application(settings: Settings | None = None) -> FastAPI:
     # A project-scoped tool call must use the bearer token for that HTTP request.
     mcp_app = mcp.http_app(path="/", stateless_http=True) if scoped else mcp.http_app(path="/")
 
+    workspace = ProjectWorkspaceRepository(graph_repository) if hasattr(graph_repository, "_transaction") else None
+    executor = TaskExecutor(settings, workspace, repository) if workspace else None
+    capture = (CaptureWorker(settings, KnowledgeCaptureService(graph_repository, repository))
+               if graph_repository and settings.capture_project_key else None)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.settings = settings
@@ -103,9 +111,10 @@ def create_application(settings: Settings | None = None) -> FastAPI:
                 settings.ci_repository_key,
             )):
                 background.start_soon(poll_test_runs, settings, graph_repository, ci_head)
-            if graph_repository and settings.capture_project_key:
-                worker = CaptureWorker(settings, KnowledgeCaptureService(graph_repository, repository))
-                background.start_soon(worker.run)
+            if capture:
+                background.start_soon(capture.run)
+            if executor:
+                background.start_soon(executor.run)
             try:
                 yield
             finally:
@@ -163,6 +172,8 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         app.include_router(build_effectiveness_router(
             EffectivenessService(request_graph, request_memory), REVIEW_API_PREFIX,
         ))
+    if workspace:
+        app.include_router(build_workspace_router(REVIEW_API_PREFIX, workspace, executor, capture))
     app.include_router(build_test_run_router(settings, graph_repository))
     app.mount(settings.mcp_mount_path, mcp_app)
     instrument_fastapi(app)
