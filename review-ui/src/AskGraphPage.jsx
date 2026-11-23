@@ -1,3 +1,4 @@
+import { ContextHelp } from './ContextHelp.jsx';
 import { CircleAlert, FileText, GitPullRequest, Search } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { reviewRequest } from './api.js';
@@ -95,7 +96,7 @@ export function AskGraphPage({ token, navigate, onUnauthorized, projectKey }) {
   return (
     <>
       <header className="page-heading">
-        <div><h1>Ask the Graph</h1><p>Ask about architecture decisions, implementation, or validation evidence.</p></div>
+        <div><div className="heading-with-help"><h1>Ask the Graph</h1><ContextHelp topic="ask" /></div><p>Ask about architecture decisions, implementation, or validation evidence.</p></div>
       </header>
       <form className="detail ask-form" onSubmit={ask}>
         <label>Question

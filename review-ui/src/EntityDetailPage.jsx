@@ -1,3 +1,4 @@
+import { ContextHelp } from './ContextHelp.jsx';
 import { SimilarRecords } from './SimilarRecords.jsx';
 import { CircleAlert, FileCode2, FileText, FlaskConical, Link2, Waypoints } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -160,7 +161,7 @@ export function EntityDetailPage({ route, token, navigate, onUnauthorized, retur
           <header className="page-heading record-heading">
             <div>
               <p className="item-key">{record?.key ?? entity.key}</p>
-              <h1>{record?.title ?? entity.name}</h1>
+              <div className="heading-with-help"><h1>{record?.title ?? entity.name}</h1><ContextHelp topic="records" /></div>
               <p>{record?.kind === 'adr' ? 'ADR' : record?.kind ?? ENTITY_NAMES[entity?.entity_type] ?? entity?.entity_type}
                 {record?.status ? ` · ${record.status}` : ''}{entity?.index_state === 'stale' ? ' · Stale index' : ''}</p>
             </div>

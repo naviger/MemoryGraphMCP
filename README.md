@@ -504,3 +504,11 @@ repository key contribute only to project totals. No token or effort estimate
 is extrapolated across missing samples. For model cost avoidance, enter a USD
 price per million input tokens. The result estimates input cost at that price,
 and negative net savings indicate extra tokens or cost.
+
+### Help center
+
+Open **Help** at the bottom of the sidebar to search or browse task guides.
+Each guide has its own URL and links to related topics. Use the circled
+question mark beside a screen or project tab heading for a short explanation,
+then choose **More** to open the matching guide. The graph metamodel guide
+shows the node and relationship types supported by the running API.
