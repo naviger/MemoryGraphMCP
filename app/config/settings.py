@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     arango_architecture_events_collection: str = "architecture_events"
     graph_event_producer_subject: str | None = None
     graph_event_project_key: MemoryKey | None = None
+    capture_project_key: MemoryKey | None = None
+    capture_repository_key: MemoryKey | None = None
+    capture_spool: str = ""
+    capture_interval: int = Field(default=60, ge=5, le=3600)
+    capture_index_github: bool = False
+    capture_github_repository: str = Field(default="", pattern=r"^(?:[\w.-]+/[\w.-]+)?$")
     ci_test_run_token: SecretStr | None = None
     ci_project_key: str = ""
     ci_repository_key: str = ""

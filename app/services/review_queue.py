@@ -27,6 +27,13 @@ class ReviewQueueService:
     ) -> ReviewQueue:
         return await anyio.to_thread.run_sync(self._get_queue, request, document_keys)
 
+    async def document_keys(self, project_key: str) -> list[str]:
+        def keys() -> list[str]:
+            graph = getattr(self.repository, "architecture", None)
+            return [node.memory_key for node in graph.project_scope(project_key).entities
+                    if node.memory_key] if graph else []
+        return await anyio.to_thread.run_sync(keys)
+
     async def revalidate(
         self,
         key: str,
@@ -72,7 +79,12 @@ class ReviewQueueService:
     ) -> ReviewQueue:
         scope = {"document_keys": document_keys} if document_keys is not None else {}
         review_date = request.as_of or datetime.now(UTC).date()
+        graph = getattr(self.repository, "architecture", None)
+        list_inferences = getattr(graph, "capture_review", None)
         return ReviewQueue(
+            inferred_relationships=list_inferences(
+                request.project_key, request.limit, request.as_of.isoformat() if request.as_of else None,
+            ) if list_inferences else [],
             review_date=review_date,
             overdue_validations=self.repository.list_overdue_validations(
                 review_date,

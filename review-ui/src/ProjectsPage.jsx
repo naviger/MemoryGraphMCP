@@ -164,6 +164,22 @@ function ProjectReview({ projectKey, asOf, token, navigate, onUnauthorized, acti
           {' and '}<PreviewLink entityKey={item.competing.key} navigate={navigate}>{item.competing.title}</PreviewLink></>
       )} />
     <a href="/review/conflicts" onClick={(event) => navigate(event, '/review/conflicts')}>Open conflict queue</a>
+    <InventoryGroup title="Suggested relationships" items={queue.inferred_relationships ?? []} open
+      renderItem={(item) => (
+        <details>
+          <summary>{item.summary.split('\n')[0]} · {item.suggestions.length} suggestions</summary>
+          <ul>{item.suggestions.map((link) => (
+            <li key={`${link.source_key}/${link.relationship_type}/${link.target_key}`}>
+              <PreviewLink destination="entities" entityKey={link.source_key} navigate={navigate}>Source</PreviewLink>
+              {' '}{link.relationship_type}{' '}
+              <PreviewLink destination="entities" entityKey={link.target_key} navigate={navigate}>Target</PreviewLink>
+              {' · '}{Math.round(link.confidence * 100)}% confidence
+              <p className="muted">{link.evidence}</p>
+            </li>
+          ))}</ul>
+          <PreviewLink destination="entities" entityKey={item.key} navigate={navigate}>Open observation</PreviewLink>
+        </details>
+      )} />
   </>;
 }
 

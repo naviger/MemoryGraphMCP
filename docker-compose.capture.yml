@@ -1,0 +1,15 @@
+services:
+  memorygraphmcp:
+    environment:
+      MGMCP_CAPTURE_PROJECT_KEY: ${MGMCP_CAPTURE_PROJECT_KEY:?Set the capture project key}
+      MGMCP_CAPTURE_REPOSITORY_KEY: ${MGMCP_CAPTURE_REPOSITORY_KEY:?Set the capture repository key}
+      MGMCP_CAPTURE_GITHUB_REPOSITORY: ${MGMCP_CAPTURE_GITHUB_REPOSITORY:-}
+      MGMCP_CAPTURE_INDEX_GITHUB: ${MGMCP_CAPTURE_INDEX_GITHUB:-false}
+      MGMCP_CAPTURE_INTERVAL: ${MGMCP_CAPTURE_INTERVAL:-60}
+      MGMCP_CAPTURE_SPOOL: /var/lib/memorygraphmcp/capture
+    volumes:
+      - type: bind
+        source: ${MGMCP_CAPTURE_HOST_SPOOL:?Set the local capture spool path}
+        target: /var/lib/memorygraphmcp/capture
+        bind:
+          create_host_path: false
