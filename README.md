@@ -404,3 +404,29 @@ The read-only MCP tool returns the two published scopes separately.
 contains project instructions. Each field is null until its first publication.
 Drafts stay in the editors. Current accepted ADRs and active constraints,
 including validating test keys, are returned alongside both guidance fields.
+
+### Engineering effectiveness
+
+Open **Effectiveness** in the sidebar. Compare projects, linked source
+repositories, or inclusive UTC date ranges side by side. Inventory and health
+are current snapshots. Regenerating a historical activity report uses today's
+inventory and links, with the selected dates applied to activity. The dashboard
+shows score denominators, evidence counts, and calculation methods.
+
+Writers can call `report_development_outcome` (or POST to
+`/api/review/effectiveness/outcomes`) with a project and source repository,
+stable change ID, author category (`agent` or `human`), time, and citation.
+Replaying the same report returns its receipt. Outcome reports can include a
+task finish and start time, first-pass result, retry count, violations of linked
+constraints, and separate rework, review, or onboarding estimates. Each effort
+estimate requires hours, confidence from 0 to 1, and evidence. Keep categories
+non-overlapping. Actor category is reported explicitly. GitHub account names
+are insufficient evidence for attribution. If an agent report uses the exact
+commit SHA, missing check outcomes can use imported CI attempts for that commit.
+
+Analytics read the existing tracker, observation, and retrieval journals when
+those features have produced data. Project-wide retrieval events without a
+repository key contribute only to project totals. No token or effort estimate
+is extrapolated across missing samples. For model cost avoidance, enter a USD
+price per million input tokens. The result estimates input cost at that price,
+and negative net savings indicate extra tokens or cost.

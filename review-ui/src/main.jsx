@@ -1,10 +1,11 @@
 import {
-  CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, CircleHelp, FolderKanban, GitPullRequest,
+  Activity, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, CircleHelp, FolderKanban, GitPullRequest,
   House, KeyRound, LogOut, MessageCircleQuestion, Network, RefreshCw, Search, ShieldCheck,
 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ApiError, reviewRequest } from './api.js';
+import { EffectivenessPage } from './EffectivenessPage.jsx';
 import { EntityDetailPage } from './EntityDetailPage.jsx';
 import { HomePage } from './HomePage.jsx';
 import { ProjectsPage } from './ProjectsPage.jsx';
@@ -113,6 +114,7 @@ function detailLocation() {
   if (/^\/search\/?$/.test(window.location.pathname)) return { destination: 'search' };
   if (/^\/help\/?$/.test(window.location.pathname)) return { destination: 'help' };
   if (/^\/global-guidance\/?$/.test(window.location.pathname)) return { destination: 'global-guidance' };
+  if (/^\/effectiveness\/?$/.test(window.location.pathname)) return { destination: 'effectiveness' };
   const review = window.location.pathname.match(/^\/review\/(validations|conflicts)\/?$/);
   if (review) return { destination: 'review', key: review[1] };
   if (/^\/projects\/?$/.test(window.location.pathname)) return { destination: 'projects' };
@@ -433,6 +435,11 @@ function App() {
               onClick={(event) => navigate(event, '/search')}>
               <Search size={18} aria-hidden="true" /> Search Memory
             </a>
+            {session && <a href="/effectiveness" className={route?.destination === 'effectiveness' ? 'nav-item active' : 'nav-item'}
+              aria-current={route?.destination === 'effectiveness' ? 'page' : undefined}
+              onClick={(event) => navigate(event, '/effectiveness')}>
+              <Activity size={18} aria-hidden="true" /> Effectiveness
+            </a>}
             {session?.role === 'admin' && (
               <a href="/global-guidance" className={route?.destination === 'global-guidance' ? 'nav-item active' : 'nav-item'}
                 aria-current={route?.destination === 'global-guidance' ? 'page' : undefined}
@@ -485,7 +492,11 @@ function App() {
               ? <ProjectGuidance global active token={token} onUnauthorized={expireSession} />
               : <p role="alert">Administrator access is required.</p>}
           </>}
-          {session && ['ask', 'search', 'graph', 'projects', 'help', 'global-guidance'].includes(route?.destination)
+          {session && projects && route?.destination === 'effectiveness' && <EffectivenessPage
+            key={projectKey} projectKey={projectKey} projects={projects} token={token} onUnauthorized={expireSession} />}
+          {session && !projects && route?.destination === 'effectiveness' && !projectError &&
+            <p role="status">Loading projects…</p>}
+          {session && ['ask', 'search', 'graph', 'projects', 'help', 'global-guidance', 'effectiveness'].includes(route?.destination)
             ? null : session && !isQueueRoute ? (
             <EntityDetailPage key={`${route.destination}/${route.key}`}
               route={route} token={token} navigate={navigate} onUnauthorized={expireSession}

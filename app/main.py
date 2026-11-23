@@ -8,6 +8,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastmcp.utilities.lifespan import combine_lifespans
 
+from app.api.effectiveness import build_effectiveness_router
 from app.api.review import REVIEW_API_PREFIX, build_review_router
 from app.api.test_runs import build_test_run_router
 from app.auth.browser_oidc import BrowserOIDC
@@ -21,6 +22,7 @@ from app.mcp.server import build_mcp_server
 from app.repositories.factory import build_repository
 from app.services.architecture_service import ArchitectureService
 from app.services.ask_graph import AskGraphService
+from app.services.effectiveness import EffectivenessService
 from app.services.embeddings import EmbeddingService
 from app.services.github_test_runs import GitHubBranchHead, poll_test_runs
 from app.services.ingestion_service import MemoryIngestionService
@@ -134,6 +136,10 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         if graph_repository else None,
         changes=ProjectChangesService(settings, graph_repository) if graph_repository else None,
     ))
+    if graph_repository is not None and hasattr(graph_repository, "effectiveness_graph"):
+        app.include_router(build_effectiveness_router(
+            EffectivenessService(graph_repository, repository), REVIEW_API_PREFIX,
+        ))
     app.include_router(build_test_run_router(settings, graph_repository))
     app.mount(settings.mcp_mount_path, mcp_app)
     instrument_fastapi(app)

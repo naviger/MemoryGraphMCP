@@ -489,3 +489,14 @@ select {
 
 .guidance-text { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: .75rem; }
 .guidance-editor { display: block; width: 100%; margin: .35rem 0 .6rem; }
+
+.effectiveness-filters, .effectiveness-metrics { margin-bottom: 15px; }
+.effectiveness-scope { border: 0; margin: 0 0 14px; padding: 0; display: flex; flex-wrap: wrap; gap: 10px 16px; }
+.effectiveness-scope legend, .effectiveness-methodology dt { font-weight: 650; }
+.effectiveness-scope label { display: grid; align-content: start; gap: 4px; font-size: .875rem; }
+.effectiveness-filters .toolbar input { width: 95px; }
+.effectiveness-metrics table { text-align: left; min-width: 370px; }
+.effectiveness-metrics meter { margin-inline: 8px; vertical-align: middle; width: min(70px, 30%); }
+.effectiveness-methodology { display: grid; gap: 9px; margin-bottom: 0; }
+.effectiveness-methodology dd { margin: 0; }
+.effectiveness-methodology dt { text-transform: capitalize; }

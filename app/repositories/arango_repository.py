@@ -598,6 +598,49 @@ class ArangoMemoryRepository:
             return ArchitecturalDecisionRecord.model_validate(row)
         return MemoryDocument.model_validate(row)
 
+    def effectiveness_records(
+        self, keys: list[str], start: date | None, end: date | None,
+    ) -> list[dict]:
+        return list(self.database.aql.execute(
+            """
+            FOR doc IN @@documents
+                FILTER doc._key IN @keys
+                LET validated = LENGTH(
+                    FOR check IN NOT_NULL(doc.validation_history, [])
+                        LET day = LEFT(check.checked_at, 10)
+                        FILTER LENGTH(check.evidence) > 0
+                        FILTER (@start == null OR day >= @start) AND (@end == null OR day <= @end)
+                        LIMIT 1
+                        RETURN true
+                ) > 0
+                RETURN {key: doc._key, kind: doc.kind, validated, due: doc.next_review_due,
+                        documented: doc.kind == "adr" AND IS_STRING(doc.decision) AND LENGTH(doc.decision) > 0
+                            AND IS_STRING(doc.rationale) AND LENGTH(doc.rationale) > 0}
+            """,
+            bind_vars={
+                "@documents": self._config.documents_collection, "keys": keys,
+                "start": start.isoformat() if start else None, "end": end.isoformat() if end else None,
+            },
+        ))
+
+    def effectiveness_resolutions(self, document_keys: list[str], start: date | None, end: date | None) -> int:
+        rows = self.database.aql.execute(
+            """
+            FOR edge IN @@edges
+                FILTER edge.relation == "adr_conflict_resolution"
+                FILTER edge.source_key IN @keys OR edge.target_key IN @keys
+                LET day = LEFT(edge.resolved_at, 10)
+                FILTER (@start == null OR day >= @start) AND (@end == null OR day <= @end)
+                COLLECT WITH COUNT INTO total
+                RETURN total
+            """,
+            bind_vars={
+                "@edges": self._config.edges_collection, "keys": document_keys,
+                "start": start.isoformat() if start else None, "end": end.isoformat() if end else None,
+            },
+        )
+        return next(iter(rows), 0)
+
     def read_guidance_decisions(self, keys: list[str], as_of: date) -> list[GuidanceDecision]:
         if not keys:
             return []
