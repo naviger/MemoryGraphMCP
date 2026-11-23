@@ -23,10 +23,12 @@ from app.domain.architecture import (
     ProjectGoalInput,
 )
 from app.domain.exceptions import ArchitectureGraphError
+from app.domain.knowledge_capture import ChangeReflectionInput
 from app.domain.models import MemoryKey
 from app.domain.project_guidance import ProjectGuidance
 from app.mcp.tools.auth import require_writer
 from app.services.architecture_service import ArchitectureService
+from app.services.knowledge_capture import KnowledgeCaptureService
 
 
 def register_architecture_tools(
@@ -46,6 +48,16 @@ def register_architecture_tools(
         """
         try:
             return await service.get_project_guidance(project_key)
+        except ArchitectureGraphError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool
+    async def review_change(change: ChangeReflectionInput) -> Observation:
+        """Reflect on a change and store evidence, scoped entities, and tentative relationships."""
+        actor = require_writer() if auth_required else None
+        capture = KnowledgeCaptureService(repository, service.memory)
+        try:
+            return await anyio.to_thread.run_sync(capture.reflect, change, actor)
         except ArchitectureGraphError as exc:
             raise ToolError(str(exc)) from exc
 

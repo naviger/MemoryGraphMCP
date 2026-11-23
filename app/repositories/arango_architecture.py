@@ -37,6 +37,7 @@ from app.domain.architecture_events import (
     TrackerActivity,
 )
 from app.domain.exceptions import ArchitectureGraphError
+from app.domain.knowledge_capture import CaptureReviewItem
 from app.domain.project_changes import BranchCleanup
 from app.domain.project_guidance import (
     GuidanceDraft,
@@ -187,14 +188,16 @@ class ArangoArchitectureRepository:
             "updated_at": now,
         }
 
-    def add_observation(self, observation: Observation) -> Observation:
+    def add_observation(self, observation: Observation, *, replay: bool = False) -> Observation:
         with self._transaction() as transaction:
             nodes = transaction.collection(self._entities)
             existing = nodes.get(observation.key)
             if existing is not None:
                 if existing["entity_type"] == "Observation":
                     previous = Observation.model_validate(existing)
-                    if previous.model_dump(exclude={"timestamp"}) == observation.model_dump(
+                    if (replay and previous.metadata == observation.metadata) or previous.model_dump(
+                        exclude={"timestamp"}
+                    ) == observation.model_dump(
                         exclude={"timestamp"}
                     ):
                         return previous
@@ -218,6 +221,78 @@ class ArangoArchitectureRepository:
                 )
                 edges.insert(self._edge_payload(link, observation.timestamp.isoformat()))
             return Observation.model_validate(result["new"])
+
+    def last_index_revision(self, repository_key: str) -> str | None:
+        row = self._database().collection(self._entities).get(repository_key)
+        return row.get("last_indexed_at") if row else None
+
+    def capture_goal_support(self, changed_keys: list[str], goal_keys: list[str]) -> dict[str, list[str]]:
+        if not changed_keys or not goal_keys:
+            return {}
+        rows = self._database().aql.execute(
+            """
+            FOR edge IN @@edges
+                FILTER edge.relationship_type == "supports_goal"
+                FILTER edge.source_key IN @changed AND edge.target_key IN @goals
+                COLLECT goal = edge.target_key INTO sources = edge.source_key
+                RETURN {goal, sources: UNIQUE(sources)}
+            """,
+            bind_vars={"@edges": self._edges, "changed": changed_keys, "goals": goal_keys},
+        )
+        return {row["goal"]: row["sources"] for row in rows}
+
+    def capture_conversations(self, entity_keys: list[str]) -> list[ConversationSummary]:
+        rows = self._database().aql.execute(
+            """
+            FOR node IN @@entities
+                FILTER node.entity_type == "ConversationSummary"
+                LET outcomes = UNION_DISTINCT(node.decision_keys, node.risk_keys, node.task_keys)
+                FILTER LENGTH(outcomes) > 0
+                FILTER LENGTH(MINUS(outcomes, @keys)) == 0
+                RETURN node
+            """,
+            bind_vars={"@entities": self._entities, "keys": entity_keys},
+        )
+        return [ConversationSummary.model_validate(row) for row in rows]
+
+    def capture_journal(self, project_key: str, limit: int) -> list[dict]:
+        return list(self._database().aql.execute(
+            """
+            FOR event IN @@events
+                FILTER event.project_key == @project
+                FILTER event.event_type == "test.run.finished" OR event.outcome == "applied"
+                FILTER DOCUMENT(@entities, CONCAT("capture-", event._key)) == null
+                SORT event.recorded_at, event._key
+                LIMIT @limit
+                RETURN event
+            """,
+            bind_vars={
+                "@events": self._events, "entities": self._entities,
+                "project": project_key, "limit": limit,
+            },
+        ))
+
+    def capture_review(
+        self, project_key: str | None, limit: int, as_of: str | None,
+    ) -> list[CaptureReviewItem]:
+        rows = self._database().aql.execute(
+            """
+            FOR node IN @@entities
+                FILTER node.entity_type == "Observation" AND LENGTH(node.suggestions) > 0
+                LET project = node.metadata.capture_project
+                FILTER IS_STRING(project) AND (@project == null OR project == @project)
+                FILTER @as_of == null OR LEFT(node.timestamp, 10) <= @as_of
+                SORT node.timestamp DESC, node._key DESC
+                LIMIT @limit
+                RETURN {key: node._key, project_key: project, summary: node.summary,
+                        timestamp: node.timestamp, suggestions: node.suggestions}
+            """,
+            bind_vars={
+                "@entities": self._entities, "project": project_key,
+                "limit": limit, "as_of": as_of,
+            },
+        )
+        return [CaptureReviewItem.model_validate(row) for row in rows]
 
     def save_project_goal(self, goal: Goal) -> Goal:
         if goal.project_key is None:
@@ -764,7 +839,9 @@ class ArangoArchitectureRepository:
             }
         )
 
-    def replace_index(self, index: ArchitectureIndex) -> int:
+    def replace_index(
+        self, index: ArchitectureIndex, *, capture_order: str | None = None,
+    ) -> int:
         entities = [
             {**self._entity_payload(node), "repository": index.repository, "index_state": "current"}
             for node in index.entities
@@ -795,6 +872,18 @@ class ArangoArchitectureRepository:
             edges[payload["_key"]] = {**payload, "index_repository": index.repository}
 
         with self._transaction() as transaction:
+            if capture_order and root_key:
+                root = transaction.collection(self._entities).get(root_key) or {}
+                if root.get("capture_index_order", "") > capture_order:
+                    return 0
+                for node in entities:
+                    if node["_key"] == root_key:
+                        node["capture_index_order"] = capture_order
+            elif root_key:
+                root = transaction.collection(self._entities).get(root_key) or {}
+                for node in entities:
+                    if node["_key"] == root_key and "capture_index_order" in root:
+                        node["capture_index_order"] = root["capture_index_order"]
             collision = list(
                 transaction.aql.execute(
                     """

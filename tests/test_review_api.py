@@ -347,6 +347,7 @@ def test_review_api_auth_and_queue(review_api):
         "review_date": "2026-11-21",
         "overdue_validations": [],
         "unresolved_adr_conflicts": [],
+        "inferred_relationships": [],
     }
 
 
