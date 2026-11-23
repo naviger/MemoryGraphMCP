@@ -1,5 +1,5 @@
 from base64 import urlsafe_b64encode
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from secrets import compare_digest, token_urlsafe
 from time import time
@@ -26,12 +26,18 @@ class LoginFlow:
     expires: float
 
 
-@dataclass(frozen=True)
+@dataclass
 class BrowserSession:
     claims: dict
     id_token: str
     end_session_endpoint: str | None
-    expires: float
+    access_expires: float
+    absolute_expires: float
+    last_activity: float
+    token_endpoint: str
+    refresh_token: str | None = field(repr=False)
+    lock: anyio.Lock = field(default_factory=anyio.Lock, repr=False)
+    next_refresh_at: float = 0
 
 
 def safe_return_path(value: str) -> str:
@@ -66,18 +72,97 @@ class BrowserOIDC:
         if not self.enabled or origin != self.origin:
             raise HTTPException(403, "The request must come from the configured UI origin")
 
-    def claims(self, session_id: str | None) -> dict | None:
+    def session_alive(self, session: BrowserSession, now: float) -> bool:
+        return (
+            now < session.absolute_expires
+            and now - session.last_activity < self.settings.oidc_browser_idle_seconds
+            and (session.refresh_token is not None or now < session.access_expires)
+        )
+
+    async def claims(self, session_id: str | None, *, active: bool = False) -> dict | None:
+        if session_id is None:
+            return None
         session = self.sessions.get(session_id)
-        if session and session.expires > time():
+        if session is None:
+            return None
+        async with session.lock:
+            now = time()
+            if self.sessions.get(session_id) is not session or not self.session_alive(session, now):
+                self.sessions.pop(session_id, None)
+                return None
+            if (
+                session.refresh_token
+                and session.access_expires - now <= 30
+                and now >= session.next_refresh_at
+            ):
+                try:
+                    async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
+                        tokens = await self._exchange(
+                            client,
+                            session.token_endpoint,
+                            {
+                                "grant_type": "refresh_token",
+                                "refresh_token": session.refresh_token,
+                            },
+                        )
+                    access = await anyio.to_thread.run_sync(
+                        self.verifier.verify,
+                        tokens["access_token"],
+                    )
+                    if access.subject != session.claims["subject"] or not access.expires_at:
+                        raise AuthenticationError("Refreshed token identity or expiration changed")
+                    replacement = tokens.get("refresh_token")
+                    if replacement is not None and (
+                        not isinstance(replacement, str) or not replacement
+                    ):
+                        raise AuthenticationError("Refreshed token is invalid")
+                    session.refresh_token = replacement or session.refresh_token
+                    session.access_expires = access.expires_at
+                    session.claims = {
+                        **access.model_dump(mode="json"),
+                        "display_name": profile_name(access.raw) or session.claims["display_name"],
+                    }
+                    session.next_refresh_at = 0
+                except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 500:
+                        self.sessions.pop(session_id, None)
+                        return None
+                    session.next_refresh_at = time() + 5
+                except (AuthenticationError, KeyError, TypeError, ValueError):
+                    self.sessions.pop(session_id, None)
+                    return None
+            now = time()
+            if self.sessions.get(session_id) is not session or not self.session_alive(session, now):
+                return None
+            if now >= session.access_expires:
+                raise HTTPException(503, "Session refresh is temporarily unavailable")
+            if active:
+                session.last_activity = now
             return session.claims
-        if session:
-            self.sessions.pop(session_id, None)
-        return None
+
+    async def _exchange(self, client, endpoint, form):
+        data = {**form, "client_id": self.client_id}
+        secret = self.settings.oidc_browser_client_secret
+        auth = None
+        if secret:
+            if self.settings.oidc_browser_token_auth == "client_secret_post":
+                data["client_secret"] = secret.get_secret_value()
+            else:
+                auth = (self.client_id, secret.get_secret_value())
+                data.pop("client_id")
+        result = await client.post(endpoint, data=data, auth=auth)
+        result.raise_for_status()
+        payload = result.json()
+        if not isinstance(payload, dict):
+            raise AuthenticationError("Invalid token response")
+        return payload
 
     def _cleanup(self) -> None:
         now = time()
         self.flows = {key: value for key, value in self.flows.items() if value.expires > now}
-        self.sessions = {key: value for key, value in self.sessions.items() if value.expires > now}
+        self.sessions = {
+            key: value for key, value in self.sessions.items() if self.session_alive(value, now)
+        }
 
     def _cookie(self, response: Response, name: str, value: str, max_age: int) -> None:
         response.set_cookie(
@@ -200,28 +285,19 @@ class BrowserOIDC:
             try:
                 async with httpx.AsyncClient(timeout=8) as client:
                     metadata = await self._discovery(client)
-                    secret = self.settings.oidc_browser_client_secret
-                    data = {
-                        "grant_type": "authorization_code",
-                        "code": code,
-                        "redirect_uri": f"{self.origin}/api/auth/callback",
-                        "code_verifier": flow.verifier,
-                        "client_id": self.client_id,
-                    }
-                    auth = None
-                    if secret:
-                        if self.settings.oidc_browser_token_auth == "client_secret_post":
-                            data["client_secret"] = secret.get_secret_value()
-                        else:
-                            auth = (self.client_id, secret.get_secret_value())
-                            data.pop("client_id")
-                    result = await client.post(
-                        self.settings.oidc_browser_token_endpoint or metadata["token_endpoint"],
-                        data=data,
-                        auth=auth,
+                    endpoint = (
+                        self.settings.oidc_browser_token_endpoint or metadata["token_endpoint"]
                     )
-                    result.raise_for_status()
-                    tokens = result.json()
+                    tokens = await self._exchange(
+                        client,
+                        endpoint,
+                        {
+                            "grant_type": "authorization_code",
+                            "code": code,
+                            "redirect_uri": f"{self.origin}/api/auth/callback",
+                            "code_verifier": flow.verifier,
+                        },
+                    )
                 id_token = tokens["id_token"]
                 identity = await anyio.to_thread.run_sync(
                     lambda: self.verifier.verify_id_token(
@@ -239,7 +315,13 @@ class BrowserOIDC:
                     or not identity.expires_at
                 ):
                     raise AuthenticationError("OIDC token subjects or lifetime are invalid")
-                expires = min(access.expires_at, identity.expires_at, time() + 3600)
+                now = time()
+                refresh = tokens.get("refresh_token")
+                if not isinstance(refresh, str) or not refresh:
+                    refresh = None
+                expires = now + self.settings.oidc_browser_max_seconds
+                if not refresh:
+                    expires = min(expires, access.expires_at, identity.expires_at)
             except (httpx.HTTPError, AuthenticationError, KeyError, TypeError, ValueError):
                 response.headers["Location"] = with_query(target, auth_error="signin")
                 return response
@@ -256,7 +338,11 @@ class BrowserOIDC:
                 },
                 id_token,
                 metadata.get("end_session_endpoint"),
-                expires,
+                access_expires=access.expires_at,
+                absolute_expires=expires,
+                last_activity=now,
+                token_endpoint=endpoint,
+                refresh_token=refresh,
             )
             self._cookie(response, SESSION_COOKIE, session_id, max(0, int(expires - time())))
             return response

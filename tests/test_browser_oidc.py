@@ -47,3 +47,79 @@ def test_browser_login_requires_s256_and_consumes_state_once(monkeypatch):
         assert denied.headers["Location"] == f"{origin}/?auth_error=signin"
         assert client.get("/api/auth/callback", params=callback).status_code == 400
         assert client.post("/api/auth/logout").status_code == 403
+
+
+def test_activity_refreshes_rotating_tokens_without_extending_absolute_session(monkeypatch):
+    import anyio
+
+    from app.auth import browser_oidc
+    from app.auth.browser_oidc import BrowserSession
+    from app.auth.jwt import JWTClaims
+
+    clock = [1000.0]
+    monkeypatch.setattr(browser_oidc, "time", lambda: clock[0])
+    settings = Settings(_env_file=None, auth_required=False, oidc_browser_idle_seconds=120)
+    verifier = JWTVerifier(settings)
+    oidc = BrowserOIDC(settings, verifier)
+    exchanges = []
+
+    async def exchange(client, endpoint, form):
+        exchanges.append(form["refresh_token"])
+        await anyio.sleep(0)
+        return {"access_token": "updated", "refresh_token": "rotation"}
+
+    monkeypatch.setattr(oidc, "_exchange", exchange)
+    monkeypatch.setattr(
+        JWTVerifier,
+        "verify",
+        lambda self, token: JWTClaims(
+            sub="writer",
+            raw={"roles": ["reader"]},
+            exp=int(clock[0]) + 100,
+        ),
+    )
+
+    async def exercise():
+        oidc.sessions["session"] = BrowserSession(
+            claims={"subject": "writer", "display_name": "Writer", "raw": {"roles": ["writer"]}},
+            id_token="identity",
+            end_session_endpoint=None,
+            access_expires=1040,
+            absolute_expires=1280,
+            last_activity=1000,
+            token_endpoint="https://issuer.example/token",
+            refresh_token="initial",
+        )
+        clock[0] = 1041
+        results = []
+
+        async def request():
+            results.append(await oidc.claims("session", active=True))
+
+        async with anyio.create_task_group() as requests:
+            requests.start_soon(request)
+            requests.start_soon(request)
+        assert len(results) == 2 and exchanges == ["initial"]
+        assert all(result["raw"]["roles"] == ["reader"] for result in results)
+        assert oidc.sessions["session"].refresh_token == "rotation"
+        clock[0] = 1120
+        assert await oidc.claims("session") is not None
+        assert exchanges == ["initial", "rotation"]
+        assert oidc.sessions["session"].last_activity == 1041
+        clock[0] = 1162
+        assert await oidc.claims("session", active=True) is None
+
+        oidc.sessions["maxed"] = BrowserSession(
+            claims={},
+            id_token="identity",
+            end_session_endpoint=None,
+            access_expires=1400,
+            absolute_expires=1280,
+            last_activity=1279,
+            token_endpoint="https://issuer.example/token",
+            refresh_token="initial",
+        )
+        clock[0] = 1280
+        assert await oidc.claims("maxed", active=True) is None
+
+    anyio.run(exercise)
