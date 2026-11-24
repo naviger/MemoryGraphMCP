@@ -1,3 +1,4 @@
+import re
 from collections import Counter
 from datetime import UTC, date, datetime
 from typing import NamedTuple
@@ -42,22 +43,40 @@ def _short(value: str, limit: int = 260) -> str:
 
 def _conflict_difference(original: str, competing: str) -> dict[str, str]:
     original, competing = (" ".join(text.split()) for text in (original, competing))
-    if original == competing or _short(original) != _short(competing):
+    if original == competing:
         return {}
-    shared = next(
-        (index for index, (left, right) in enumerate(zip(original, competing)) if left != right),
-        min(len(original), len(competing)),
+    # Ignore punctuation while locating a word-level difference, but keep the
+    # verbatim wording from each decision in the displayed excerpts.
+    original_words, competing_words = (
+        list(re.finditer(r"\w+", text)) for text in (original, competing)
     )
-    start = max(0, shared - 40)
+    shared = next(
+        (index for index, (left, right) in enumerate(zip(original_words, competing_words))
+         if left.group() != right.group()),
+        min(len(original_words), len(competing_words)),
+    )
+    if shared == len(original_words) == len(competing_words):
+        # If punctuation is the only difference, preserve it.
+        original_offset = competing_offset = next(
+            (index for index, (left, right) in enumerate(zip(original, competing))
+             if left != right),
+            min(len(original), len(competing)),
+        )
+    else:
+        original_offset = original_words[shared].start() if shared < len(original_words) else len(original)
+        competing_offset = competing_words[shared].start() if shared < len(competing_words) else len(competing)
+    if max(original_offset, competing_offset) < 200 and _short(original) != _short(competing):
+        return {}
 
-    def excerpt(text: str) -> str:
+    def excerpt(text: str, offset: int) -> str:
+        start = max(0, offset - 40)
         prefix = "…" if start else ""
-        suffix = " [end of decision]" if shared == len(text) else ""
+        suffix = " [end of decision]" if offset == len(text) else ""
         return prefix + _short(text[start:] + suffix, 260 - len(prefix))
 
     return {
-        "original_decision_excerpt": excerpt(original),
-        "competing_decision_excerpt": excerpt(competing),
+        "original_decision_excerpt": excerpt(original, original_offset),
+        "competing_decision_excerpt": excerpt(competing, competing_offset),
     }
 
 

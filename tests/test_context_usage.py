@@ -198,9 +198,22 @@ async def test_blends_project_documents_and_dated_conflict_counterparts(context_
     assert "Use external IDs." in conflict.competing_decision_excerpt
     assert {linked.key, counterpart.key} <= {item.key for item in why_long.evidence}
 
+    for question in ("How does AssetService work?", "Why does AssetService work?"):
+        linked.decision = ("Asset ownership. " + shared_opening * 12
+                           + "Imported identifiers. " + shared_opening * 12
+                           + "Use canonical asset IDs.")
+        counterpart.decision = ("Asset ownership: " + shared_opening * 12
+                                + "Imported identifiers: " + shared_opening * 12
+                                + "Use external IDs.")
+        divergent, _, _ = await context_service.build(query.model_copy(update={"question": question}))
+        conflict = divergent.conflicts[0]
+        assert "Use canonical asset IDs." in conflict.original_decision_excerpt
+        assert "Use external IDs." in conflict.competing_decision_excerpt
+        assert {linked.key, counterpart.key} <= {item.key for item in divergent.evidence}
+        assert estimate_tokens(divergent) <= query.max_context_tokens
+
     linked.decision = "Use canonical asset IDs."
     counterpart.decision = "Use external IDs."
-
 
     for day in (date(2026, 2, 28), end):
         dated, _, _ = await context_service.build(query.model_copy(update={"as_of": day}))
