@@ -239,9 +239,9 @@ def review_api(monkeypatch, request):
                 key="match", title="Security design", content="Match",
             ), score=0.875)]
 
-        def search_question_documents(self, terms, as_of, limit):
+        def search_question_documents(self, terms, as_of, limit, *, adrs_only=False):
             assert as_of == date(2026, 11, 21) and limit == 8
-            if terms == "unknown":
+            if adrs_only or terms == "unknown":
                 return []
             assert terms == "authentication"
             record = self.read_document("record")

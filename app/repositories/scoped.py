@@ -120,7 +120,9 @@ class ScopedMemory(_Scoped):
             return operation(*args, allowed_document_keys=sorted(docs))
         if name == "find_adr_conflicts":
             self._authorization.require_records(access, [args[0].key], 2)
-            return operation(*args, allowed_document_keys=sorted(docs))
+            return operation(
+                *args, allowed_document_keys=_filtered(docs, kwargs.get("allowed_document_keys")),
+            )
         if name == "find_related_entities":
             request, = args
             return operation(request, allowed_document_keys=sorted(docs))

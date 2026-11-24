@@ -1220,11 +1220,13 @@ class ArangoMemoryRepository:
 
     def search_question_documents(
         self, terms: str, as_of: date, limit: int, *, document_keys: list[str] | None = None,
+        adrs_only: bool = False,
     ) -> list[MemoryDocument]:
         query = """
         LET terms = UNIQUE(TOKENS(@terms, "text_en"))
         FOR doc IN @@documents
             FILTER @document_keys == null OR doc._key IN @document_keys
+            FILTER !@adrs_only OR doc.kind == "adr"
         """ + _VALIDITY_FILTER + """
             FILTER doc.status NOT IN ["proposed", "rejected", "archived", "inactive"]
             LET title = CONCAT_SEPARATOR(" ", doc.title, doc._key, doc.conflict_scope.topic)
@@ -1241,6 +1243,7 @@ class ArangoMemoryRepository:
         rows = self.database.aql.execute(query, bind_vars={
             "@documents": self._config.documents_collection,
             "document_keys": document_keys,
+            "adrs_only": adrs_only,
             "terms": terms, "as_of": as_of.isoformat(), "limit": limit,
         })
         return [self._parse_document(row) for row in rows]
