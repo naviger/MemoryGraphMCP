@@ -209,7 +209,7 @@ class CodexBridge:
         valid = r"tests/(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_-]+\.py"
         if (
             not isinstance(paths, list)
-            or not 1 <= len(paths) <= 8
+            or len(paths) > 8
             or any(not isinstance(path, str) or not re.fullmatch(valid, path) for path in paths)
         ):
             raise BridgeError(400, "Invalid regression test selection")
@@ -220,6 +220,22 @@ class CodexBridge:
             os.environ.get("MGMCP_DRAFT_CHECK_IMAGE", "memorygraphmcp-draft-check:local"),
             ["python", "-m", "pytest", "-q", "-o", "cache_dir=/tmp/pytest-cache", *paths],
         )
+
+    def implementation_contract(self, checkout, context, files):
+        test_pattern = r"tests/(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_-]+\.py"
+        tests = [name for name in files if re.fullmatch(test_pattern, name)]
+        if not tests and not any((checkout / "tests").rglob("test_*.py")):
+            return None
+        criteria = context.get("task", {}).get("success_criteria") or [
+            "Satisfy the task description and preserve existing behavior outside the change."
+        ]
+        return {
+            "test_paths": tests[:8],
+            "acceptance_criteria": [
+                value[:1000] for value in criteria[:8] if isinstance(value, str) and value.strip()
+            ]
+            or ["Satisfy the task description."],
+        }
 
     def apply_approved(self, identity, directory, context):
         target = context.get("approved_patch") or {}
@@ -432,8 +448,14 @@ class CodexBridge:
         output.unlink(missing_ok=True)
         sandbox = "workspace-write" if writable else "read-only"
         instructions = {
-            "plan": "Produce a concise implementation plan. Leave the repository unchanged.",
-            "execute": "Implement the task in this checkout and run relevant local checks.",
+            "plan": (
+                "Produce a concise plan with observable acceptance cases, edge cases, and "
+                "the regression tests to run. Leave the repository unchanged."
+            ),
+            "execute": (
+                "Implement the task and follow the plan when provided. Add regression tests "
+                "for the acceptance cases and run the relevant checks before returning."
+            ),
             "review_commit": "Review the committed fix against its parent and the task criteria.",
             "review": (
                 "Review the proposed changes against the task and report findings. "
@@ -566,6 +588,10 @@ class CodexBridge:
                     name.decode(errors="replace")[:8000] for name in files.split(b"\0") if name
                 ][:50]
             result["completed"] = bool(changes and response["approved"] is True)
+            if changes and not contract:
+                contract = self.implementation_contract(checkout, context, result["files_modified"])
+                if contract:
+                    result["generated_contract"] = contract
             if contract:
                 verified = self.verify_contract(checkout, contract)
                 result["verification"] = verified

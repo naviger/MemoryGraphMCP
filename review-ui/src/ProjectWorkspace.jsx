@@ -239,24 +239,23 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
     setBusy(true); setError('');
     try {
       const draft = await send(`${path}/${job.key}/repair-draft`);
-      setRepair({ ...draft, review: job.key, direction: '', tokenBudget: '',
-        criteria: draft.previous_contract?.acceptance_criteria.join('\n') || '',
-        tests: draft.previous_contract?.test_paths.join('\n') || '',
+      setRepair({ ...draft, review: job.key, direction: draft.needs_design_review ? draft.suggested_direction : '',
+        criteria: draft.suggested_contract.acceptance_criteria.join('\n'),
+        tests: draft.suggested_contract.test_paths.join('\n'),
       });
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
   }
   const criteria = repair?.criteria.split('\n').map((line) => line.trim()).filter(Boolean) || [];
   const testPaths = repair?.tests.split('\n').map((line) => line.trim()).filter(Boolean) || [];
-  const tokenBudget = Number(repair?.tokenBudget);
   const previousContract = repair?.previous_contract;
   const contractChanged = !repair?.needs_design_review || !previousContract ||
     JSON.stringify(criteria) !== JSON.stringify(previousContract.acceptance_criteria) ||
     JSON.stringify(testPaths) !== JSON.stringify(previousContract.test_paths);
   const contractReady = criteria.length > 0 && criteria.length <= 8 && criteria.every((line) => line.length <= 1000) &&
-    testPaths.length > 0 && testPaths.length <= 8 &&
+    testPaths.length <= 8 &&
     testPaths.every((path) => /^tests\/(?:[A-Za-z0-9_-]+\/)*test_[A-Za-z0-9_-]+\.py$/.test(path)) &&
-    Number.isInteger(tokenBudget) && tokenBudget > 0 && tokenBudget <= 20000000 && contractChanged;
+    contractChanged;
 
   async function startRepair(event) {
     event.preventDefault();
@@ -268,7 +267,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
         repair_review_key: repair.review, repair_prompt: repair.prompt,
         repair_direction: repair.direction.trim() || null,
         repair_contract: {
-          acceptance_criteria: criteria, test_paths: testPaths, additional_tokens: tokenBudget,
+          acceptance_criteria: criteria, test_paths: testPaths,
         },
       });
       setRequested(crypto.randomUUID());
@@ -278,7 +277,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
   }
-  async function submit(job, action = 'cancel', additionalReviewTokens = null) {
+  async function submit(job, action = 'cancel', approveReviewAttempt = false) {
     setBusy(true);
     setError('');
     try {
@@ -289,7 +288,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
       } else if (action === 'review-patch') {
         const started = await send(path, {
           request_id: requested, agent: 'codex', mode: 'REVIEW',
-          patch_execution_key: job.key, additional_review_tokens: additionalReviewTokens,
+          patch_execution_key: job.key, approve_review_attempt: approveReviewAttempt,
         });
         setReviewBudget(null);
         setSelection(`${started.key}/0`);
@@ -303,7 +302,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
       await reload();
     } catch (err) {
       if (action === 'review-patch' && err.message.includes('token budget is exhausted')) {
-        setReviewBudget({ job, tokens: '' });
+        setReviewBudget({ job });
         setSelection(steps.find((step) => step.job.key === job.key && step.phase === 'Implement')?.key);
       }
       setError(err.message);
@@ -385,17 +384,18 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
       onSubmit={(event) => { event.preventDefault(); submit(selected.job, 'apply-approved'); }}>
       <h5>Approve application to a local fix branch</h5>
       <p>The bridge will commit the reviewed patch, rerun the required checks below, and run a commit review if they pass. Publishing requires separate approval.</p>
-      <ul>{selected.job.repair_contract.test_paths.map((test) => <li key={test}><code>{test}</code></li>)}</ul>
+      {selected.job.repair_contract.test_paths.length
+        ? <ul>{selected.job.repair_contract.test_paths.map((test) => <li key={test}><code>{test}</code></li>)}</ul>
+        : <p>Required check is the Python test suite.</p>}
       <div className="workspace-actions">
         <button className="button primary" disabled={busy || active}>Apply to local fix branch</button>
         <button type="button" className="button outlined" onClick={() => setApplyApproval(null)}>Cancel</button>
       </div>
     </form>}
     {reviewBudget?.job.key === selected.job.key && <form className="detail workspace-form"
-      onSubmit={(event) => { event.preventDefault(); submit(reviewBudget.job, 'review-patch', Number(reviewBudget.tokens)); }}>
-      <h5>Approve additional tokens for this review</h5>
-      <label>Additional tokens<input type="number" min={1} max={20000000} step={1} required
-        value={reviewBudget.tokens} onChange={(event) => setReviewBudget({ ...reviewBudget, tokens: event.target.value })} /></label>
+      onSubmit={(event) => { event.preventDefault(); submit(reviewBudget.job, 'review-patch', true); }}>
+      <h5>Approve one more review attempt</h5>
+      <p>The earlier token allowance has been used. Continue if you want another model review of the same patch.</p>
       <div className="workspace-actions"><button className="button primary" disabled={busy}>Review the same patch</button>
         <button type="button" className="button outlined" onClick={() => setReviewBudget(null)}>Close</button></div>
     </form>}
@@ -420,17 +420,15 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
         <textarea value={repair.criteria} rows={4} disabled={busy} required
           onChange={(event) => setRepair({ ...repair, criteria: event.target.value })} />
       </label>
-      <label>Required test files <span className="muted">One Python test path under tests/ per line</span>
-        <textarea value={repair.tests} rows={3} disabled={busy} required
-          placeholder="tests/test_example.py"
-          onChange={(event) => setRepair({ ...repair, tests: event.target.value })} />
-      </label>
-      <label>Additional reported-token budget
-        <input type="number" min={1} max={20000000} step={1} required disabled={busy}
-          value={repair.tokenBudget} onChange={(event) => setRepair({ ...repair, tokenBudget: event.target.value })} />
-      </label>
-      <p className="muted">The budget is checked between phases. A running model call can exceed it.
-        Required tests must pass before model review.</p>
+      <p>{testPaths.length ? `Required checks: ${testPaths.join(', ')}` : 'Required check: Python test suite'}</p>
+      <details>
+        <summary>Change required checks</summary>
+        <label>Python test files <span className="muted">Leave blank to run the full Python suite.</span>
+          <textarea value={repair.tests} rows={3} disabled={busy}
+            onChange={(event) => setRepair({ ...repair, tests: event.target.value })} />
+        </label>
+      </details>
+      <p className="muted">Starting approves one model repair attempt. Required checks run before any follow-up review.</p>
       {!contractChanged && <p role="status">Change the acceptance criteria or tests before continuing.</p>}
       <label>Repair prompt<textarea ref={repairPrompt} rows={8} maxLength={8000} required disabled={busy}
         value={repair.prompt} onChange={(event) => setRepair({ ...repair, prompt: event.target.value })} /></label>

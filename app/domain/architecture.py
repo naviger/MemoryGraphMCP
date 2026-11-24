@@ -282,6 +282,7 @@ class Execution(ArchitectureNode):
     repair_direction: str | None = None
     repair_contract: RepairContract | None = None
     repair_token_ceiling: int | None = None
+    approve_review_attempt: bool = False
     additional_review_tokens: int | None = None
     agent: Literal["local", "codex", "claude-code", "openhands"]
     mode: Literal["PLAN_ONLY", "IMPLEMENT", "REVIEW", "FULL_LIFECYCLE", "APPLY_APPROVED"]

@@ -578,6 +578,11 @@ class TaskExecutor:
             state = "PLANNED"
         elif claimed.repair_review_key:
             state = "REVIEW"
+        elif claimed.agent == "codex" and (
+            result.generated_contract
+            or (claimed.repair_contract and claimed.mode == "FULL_LIFECYCLE")
+        ):
+            state = "REVIEW"
         elif result.completed and claimed.mode in {"IMPLEMENT", "FULL_LIFECYCLE"}:
             state = "COMPLETED"
         else:

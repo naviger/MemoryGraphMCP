@@ -374,6 +374,7 @@ def test_arango_recovery_and_workspace():
         "REVIEW",
         result=AgentResult(
             summary="Saved patch",
+            files_modified=["app/context.py", "tests/test_context_usage.py"],
             artifacts=[
                 AgentArtifact(
                     name="Local implementation patch",
@@ -409,6 +410,10 @@ def test_arango_recovery_and_workspace():
     )
     draft = workspace.repair_draft("alpha", repair_task.key, review.key)
     assert "Validate the source" in draft["prompt"]
+    assert draft["suggested_contract"] == {
+        "acceptance_criteria": ["Validate the source before import."],
+        "test_paths": ["tests/test_context_usage.py"],
+    }
     with pytest.raises(ArchitectureGraphError):
         workspace.repair_draft("beta", repair_task.key, review.key)
     from app.domain.repair_contract import RepairContract

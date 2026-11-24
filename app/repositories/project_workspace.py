@@ -1,7 +1,10 @@
 """Transactional writes for project work and task executions."""
 
+import re
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
+
+from pydantic import TypeAdapter, ValidationError
 
 from app.domain.architecture import (
     Agent,
@@ -24,6 +27,7 @@ from app.domain.project_workspace import (
     TaskUpdate,
     WorkDraft,
 )
+from app.domain.repair_contract import TestPath
 
 
 class ProjectWorkspaceRepository:
@@ -214,6 +218,26 @@ class ProjectWorkspaceRepository:
     def task_token_total(self, project, task_key):
         return self._usage(self.graph._database(), project, task_key)["tokens"]
 
+    @staticmethod
+    def suggested_repair_contract(source, findings):
+        existing = source.repair_contract
+        criteria = [
+            item.strip()[:1000]
+            for item in re.split(r"(?:^|\n|(?<=\.))\s*\d+[.)]\s+", findings)
+            if item.strip()
+        ][:8]
+        test_paths = list(existing.test_paths) if existing else []
+        test_path = TypeAdapter(TestPath)
+        for result in source.results:
+            for path in result.get("files_modified", []):
+                try:
+                    path = test_path.validate_python(path)
+                except ValidationError:
+                    continue
+                if path not in test_paths:
+                    test_paths.append(path)
+        return {"acceptance_criteria": criteria, "test_paths": test_paths[:8]}
+
     def repair_draft(self, project, task_key, review_key):
         self.task(project, task_key)
         review = self.graph.read_entity(review_key)
@@ -228,6 +252,11 @@ class ProjectWorkspaceRepository:
             "needs_design_review": earlier is not None,
             "usage": self._usage(self.graph._database(), project, task_key),
             "previous_contract": source.repair_contract,
+            "suggested_contract": self.suggested_repair_contract(source, result["summary"]),
+            "suggested_direction": (
+                "Adjust the approach to address the latest blockers. First add a regression "
+                "case for each blocker, then make the smallest change that passes those checks."
+            ),
             "previous_review": earlier,
             "agent": "codex",
             "model": "Codex CLI default",
@@ -365,6 +394,7 @@ class ProjectWorkspaceRepository:
                     execution.repair_direction,
                     execution.repair_contract if execution.repair_review_key else None,
                     execution.additional_review_tokens,
+                    execution.approve_review_attempt,
                 ) != (
                     command.agent,
                     command.mode,
@@ -375,6 +405,7 @@ class ProjectWorkspaceRepository:
                     command.repair_direction,
                     command.repair_contract,
                     command.additional_review_tokens,
+                    command.approve_review_attempt,
                 ):
                     raise ArchitectureGraphError("Execution request ID was already used")
                 return execution
@@ -388,7 +419,7 @@ class ProjectWorkspaceRepository:
                 )
             ):
                 raise ArchitectureGraphError("Task must be open and have no active execution")
-            if command.additional_review_tokens and (
+            if (command.additional_review_tokens or command.approve_review_attempt) and (
                 not command.patch_execution_key or command.mode != "REVIEW"
             ):
                 raise ArchitectureGraphError("Extra review tokens apply only to exact patch review")
@@ -452,7 +483,7 @@ class ProjectWorkspaceRepository:
                         )
                     if not contract:
                         raise ArchitectureGraphError(
-                            "Set acceptance criteria, regression tests, and a token budget first."
+                            "Confirm the acceptance criteria and regression checks first."
                         )
                     if (
                         earlier
@@ -466,7 +497,10 @@ class ProjectWorkspaceRepository:
                         raise ArchitectureGraphError(
                             "Revise the acceptance criteria or test selection before continuing."
                         )
-                    ceiling = self._usage(tx, project, key)["tokens"] + contract.additional_tokens
+                    if contract.additional_tokens is not None:
+                        ceiling = (
+                            self._usage(tx, project, key)["tokens"] + contract.additional_tokens
+                        )
                     superseded = tx.aql.execute(
                         """
                         FOR job IN @@nodes
@@ -498,7 +532,9 @@ class ProjectWorkspaceRepository:
                     contract = source.repair_contract
                     ceiling = source.repair_token_ceiling
                     used = self._usage(tx, project, key)["tokens"]
-                    if command.additional_review_tokens:
+                    if command.approve_review_attempt:
+                        ceiling = None
+                    elif command.additional_review_tokens or command.approve_review_attempt:
                         ceiling = max(used, ceiling or 0) + command.additional_review_tokens
                     if ceiling is not None and used >= ceiling:
                         raise ArchitectureGraphError(
@@ -519,6 +555,7 @@ class ProjectWorkspaceRepository:
                 repair_contract=contract,
                 repair_token_ceiling=ceiling,
                 additional_review_tokens=command.additional_review_tokens,
+                approve_review_attempt=command.approve_review_attempt,
                 requested_by=actor,
                 agent=command.agent,
                 mode=command.mode,
@@ -701,6 +738,12 @@ class ProjectWorkspaceRepository:
                     if nodes.get(key):
                         self.link(tx, job.key, key, "references", now)
             if result:
+                if (
+                    result.generated_contract
+                    and prior.agent == "codex"
+                    and not prior.repair_contract
+                ):
+                    updates["repair_contract"] = result.generated_contract
                 updates["results"] = [*prior.results, result.model_dump(mode="json")]
                 updates["phase"] = prior.phase + 1
             if state in {"COMPLETED", "PLANNED", "FAILED", "REVIEW", "CANCELLED"}:

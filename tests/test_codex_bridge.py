@@ -353,3 +353,38 @@ def test_apply_approved_patch_and_review_exact_commit(bridge, monkeypatch, passe
     else:
         with pytest.raises(BridgeError, match="must pass"):
             bridge.run(job_id, "review_commit", prompt)
+
+
+def test_initial_implementation_selects_and_runs_required_checks(bridge, monkeypatch):
+    tests = bridge.repo / "tests"
+    tests.mkdir()
+    (tests / "test_fixture.py").write_text("def test_fixture(): pass\n")
+    git(bridge.repo, "add", ".")
+    git(
+        bridge.repo,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "-m",
+        "Add baseline tests",
+    )
+    checks = []
+
+    def verify(checkout, contract):
+        assert checkout.joinpath("fixture.txt").read_text() == "changed by adapter\n"
+        checks.append(contract)
+        return {"passed": True, "command": "pytest", "output": ""}
+
+    monkeypatch.setattr(bridge, "verify_contract", verify)
+    identity = "d" * 64
+    context = {"project_key": bridge.project, "mode": "FULL_LIFECYCLE"}
+    bridge.run(identity, "plan", json.dumps(context))
+    result = bridge.run(identity, "execute", json.dumps(context))
+    contract = result["generated_contract"]
+    assert contract["test_paths"] == []  # Run the suite when no changed test file was identified.
+    assert result["verification"]["passed"]
+    review = bridge.run(identity, "review", json.dumps({**context, "repair_contract": contract}))
+    assert review["verification"]["passed"]
+    assert checks == [contract, contract]

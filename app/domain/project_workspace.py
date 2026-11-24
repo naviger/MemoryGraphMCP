@@ -48,6 +48,7 @@ class StartExecution(BaseModel):
     repair_prompt: WorkText | None = None
     repair_direction: WorkText | None = None
     repair_contract: RepairContract | None = None
+    approve_review_attempt: bool = False
     additional_review_tokens: int | None = Field(default=None, ge=1, le=20_000_000)
 
 
@@ -81,6 +82,7 @@ class AgentResult(BaseModel):
     repaired_target: dict[str, str] | None = None
     verification: RepairVerification | None = None
     applied_commit: dict[str, str] | None = None
+    generated_contract: RepairContract | None = None
 
 
 class RecommendAgent(BaseModel):
