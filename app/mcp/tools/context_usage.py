@@ -1,9 +1,15 @@
+from typing import Annotated
+
+from pydantic import Field
+
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware import Middleware
 
 from app.domain.context_usage import (
+    ContextClaim,
+    ContextClaimCheck,
     ContextQuery,
     MeasuredContextPackage,
     RequestID,
@@ -81,6 +87,16 @@ def register_context_usage(mcp: FastMCP, service: ContextPackageService, usage: 
             path="graph and document evidence → ADR conflict lookup → budgeted context",
         )
         return MeasuredContextPackage(**package.model_dump(), usage=receipt)
+
+    @mcp.tool
+    async def validate_context_citations(
+        query: ContextQuery, claims: Annotated[list[ContextClaim], Field(min_length=1, max_length=20)],
+    ) -> list[ContextClaimCheck]:
+        """Rebuild scoped context and check exact excerpt sentences and destination:key citations."""
+        try:
+            return await service.check_claims(query, claims)
+        except ArchitectureGraphError as exc:
+            raise ToolError(str(exc)) from exc
 
     @mcp.tool
     async def get_token_usage(scope: UsageScope = "session", project_key: MemoryKey | None = None) -> UsageSummary:

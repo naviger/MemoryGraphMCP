@@ -21,7 +21,7 @@ from app.domain.models import (
 )
 from app.domain.review_details import ProjectOverview
 from app.repositories.protocol import MemoryRepository
-from app.services.context_package import ContextPackageService
+from app.services.context_package import ContextPackageService, decision_parts, relevant_excerpt
 from app.services.review_details import ReviewDetailService
 from app.services.token_usage import document_baseline
 
@@ -174,15 +174,22 @@ class AskGraphService:
         for record in records:
             if record.key is None:
                 continue
+            parts = decision_parts(record, as_of)
+            if record.kind == "adr" and parts is None:
+                continue
             cite = AnswerCitation(key=record.key, title=record.title)
             gaps.extend(self._evidence_gaps(record, as_of))
-            if isinstance(record, ArchitecturalDecisionRecord):
-                if rationale_requested:
-                    _add_claim(answers, record.rationale, [cite])
-                    _add_claim(context, record.decision, [cite])
+            if parts:
+                if rationale_requested and parts.rationale:
+                    _add_claim(answers, parts.rationale, [cite])
+                    _add_claim(context, parts.decision, [cite])
                 else:
-                    _add_claim(answers, record.decision, [cite])
-                if record.conflict_scope is None:
+                    _add_claim(answers, parts.decision, [cite])
+                _add_claim(context, relevant_excerpt(parts.consequences, set(terms), record.title), [cite])
+                _add_claim(context, relevant_excerpt(
+                    parts.code_evidence, set(terms), record.title, prefer_link=True,
+                ), [cite])
+                if not isinstance(record, ArchitecturalDecisionRecord) or record.conflict_scope is None:
                     gaps.append(f"{record.title} lacks a scope for automated conflict checks.")
                 else:
                     lookup = self.repository.find_adr_conflicts

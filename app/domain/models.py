@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date as CalendarDate
 from datetime import timedelta
 from typing import Annotated, Any, Literal
@@ -93,6 +94,15 @@ def next_review_due(document: MemoryDocument, checked_on: CalendarDate) -> Calen
 
 
 ADRStatus = Literal["proposed", "accepted", "superseded", "rejected"]
+
+
+def markdown_adr_status(content: str) -> str | None:
+    header = re.split(r"(?m)^##[ \t]+", content, maxsplit=1)[0]
+    match = re.search(
+        r"(?im)^[ \t]*(?:-[ \t]+)?Status:[ \t]*(proposed|accepted|superseded|rejected)[ \t]*\r?$",
+        header,
+    )
+    return match.group(1).casefold() if match else None
 
 
 ScopeLabel = Annotated[

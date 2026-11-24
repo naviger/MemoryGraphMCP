@@ -7,6 +7,8 @@ import anyio
 
 from app.domain.architecture import ArchitectureSearch, ArchitectureTrace, Project
 from app.domain.context_usage import (
+    ContextClaim,
+    ContextClaimCheck,
     ContextConflict,
     ContextEvidence,
     ContextItem,
@@ -14,7 +16,7 @@ from app.domain.context_usage import (
     ContextQuery,
 )
 from app.domain.exceptions import ArchitectureGraphError
-from app.domain.models import ADRConflictQuery, ArchitecturalDecisionRecord
+from app.domain.models import ADRConflictQuery, ArchitecturalDecisionRecord, MemoryDocument, markdown_adr_status
 from app.repositories.architecture_protocol import ArchitectureRepository
 from app.repositories.protocol import MemoryRepository
 from app.services.token_usage import estimate_tokens, words
@@ -27,7 +29,7 @@ _RELATED = {
     "validated_by", "supports_goal", "supported_by", "uses", "used_by", "references",
     "referenced_by", "supersedes", "superseded_by",
 }
-_STOP = set("what how why is are to of a the for an and which do does can in as on show tell me current tests test service goal".split())
+_STOP = set("what how why is are to of a the for an and which do does can in as on show tell me current tests test service goal happens every where behavior record records".split())
 
 
 class BuiltContext(NamedTuple):
@@ -80,13 +82,87 @@ def _conflict_difference(original: str, competing: str) -> dict[str, str]:
     }
 
 
-def _applicable(record: object, day: date) -> bool:
-    return isinstance(record, ArchitecturalDecisionRecord) and bool(
-        record.key
-        and (record.status == "accepted" or record.status == "superseded" and record.expiration_date)
-        and (record.effective_date is None or record.effective_date <= day)
-        and (record.expiration_date is None or day < record.expiration_date)
+class DecisionParts(NamedTuple):
+    decision: str
+    rationale: str
+    consequences: str
+    code_evidence: str = ""
+
+
+def decision_parts(record: MemoryDocument, day: date) -> DecisionParts | None:
+    if (record.kind != "adr" or not record.key
+            or record.effective_date and record.effective_date > day
+            or record.expiration_date and day >= record.expiration_date):
+        return None
+    status = record.status.strip().casefold() if record.status else None
+    if isinstance(record, ArchitecturalDecisionRecord):
+        if status == "accepted" or status == "superseded" and record.expiration_date:
+            return DecisionParts(record.decision, record.rationale, record.consequences)
+        return None
+
+    # Older imported ADRs preserved the Markdown document and its status line.
+    parts = re.split(r"(?m)^##[ \t]+([^\n]+)\n", record.content.replace("\r\n", "\n"))
+    status = status or markdown_adr_status(parts[0])
+    if status != "accepted" and not (status == "superseded" and record.expiration_date):
+        return None
+    sections = {heading.strip().casefold(): body.strip() for heading, body in zip(parts[1::2], parts[2::2])}
+    if not sections.get("decision"):
+        return None
+    return DecisionParts(
+        sections["decision"], sections.get("rationale", sections.get("context", "")),
+        sections.get("consequences", ""), sections.get("evidence from code", ""),
     )
+
+
+def _sentences(text: str) -> list[str]:
+    return [part.strip() for part in re.split(r"\n+|(?<=[.!?])\s+", text) if part.strip()]
+
+
+def relevant_excerpt(text: str, terms: set[str], title: str, *, prefer_link: bool = False) -> str:
+    passages = _sentences(text)
+    if not passages:
+        return ""
+    title_terms = terms.intersection(words(title))
+
+    def score(part: str) -> tuple[bool, int, int]:
+        matches = terms.intersection(words(part))
+        linked = bool(matches and prefer_link and re.search(r"\[[^\]]+\]\([^)\s]+\)", part))
+        return linked, len(matches & title_terms), len(matches)
+
+    best = max(passages, key=score)
+    return _short(best) if terms.intersection(words(best)) else ""
+
+
+def check_cited_claims(package: ContextPackage, claims: list[ContextClaim]) -> list[ContextClaimCheck]:
+    excerpts = {
+        f"{item.destination}:{item.key}": item.text
+        for group in _GROUPS.values() for item in getattr(package, group)
+    }
+    for conflict in package.conflicts:
+        for key, snippet in ((conflict.original_key, conflict.original_decision_excerpt),
+                             (conflict.competing_key, conflict.competing_decision_excerpt)):
+            identifier = f"records:{key}"
+            if snippet and identifier in excerpts:
+                excerpts[identifier] += "\n" + snippet
+
+    def quote(text: str) -> str:
+        return " ".join(text.split())
+
+    def supports(source: str, claim: str) -> bool:
+        return any(
+            quote(re.sub(r"^(?:Rationale|Consequences|Code evidence):\s*", "", sentence)) == claim
+            for sentence in _sentences(source) if not sentence.startswith("…") and not sentence.endswith("…")
+        )
+
+    return [
+        ContextClaimCheck(
+            claim=claim,
+            status="unknown_citation" if set(claim.citations) - excerpts.keys()
+            else "supported" if all(supports(excerpts[cite], quote(claim.text)) for cite in claim.citations)
+            else "unsupported_text",
+        )
+        for claim in claims
+    ]
 
 
 class ContextPackageService:
@@ -97,14 +173,21 @@ class ContextPackageService:
     async def build(self, query: ContextQuery) -> BuiltContext:
         return await anyio.to_thread.run_sync(self._build, query)
 
+    async def check_claims(self, query: ContextQuery, claims: list[ContextClaim]) -> list[ContextClaimCheck]:
+        package, _, _ = await self.build(query)
+        return check_cited_claims(package, claims)
+
     def _build(self, query: ContextQuery) -> BuiltContext:
         day = query.as_of or datetime.now(UTC).date()
         inventory = None
         scoped = None
         document_keys = None
+        terms = set(words(query.question)) - _STOP
         if query.project_key:
-            if not isinstance(self.graph.read_entity(query.project_key), Project):
+            project = self.graph.read_entity(query.project_key)
+            if not isinstance(project, Project):
                 raise ArchitectureGraphError("Project not found")
+            terms.difference_update(words(project.name))
             scope = self.graph.project_scope(query.project_key)
             inventory = scope.entities
             scoped = {item.key for item in inventory}
@@ -113,7 +196,6 @@ class ContextPackageService:
             document_keys = [doc.key for doc in self.memory.project_documents(
                 query.project_key, scope.repository_names, linked, "", None,
             )]
-        terms = set(words(query.question)) - _STOP
         seeds = {}
         for key, kind in ((query.entity, None), (query.adr, "ADR"), (query.goal, "Goal"), (query.service, "Service")):
             if not key:
@@ -128,7 +210,8 @@ class ContextPackageService:
             if node is None:
                 raise ArchitectureGraphError("An anchor was not found in the selected scope")
             seeds[node.key] = node
-        if not seeds:
+        implicit = not seeds
+        if implicit:
             if inventory is None:
                 hits = [
                     node for term in sorted(terms, key=lambda word: (-len(word), word))[:8]
@@ -176,7 +259,7 @@ class ContextPackageService:
                                text=_short(node.description, 150))
             if node.entity_type == "ADR":
                 record = self.memory.read_document(node.memory_key or node.key)
-                if _applicable(record, day):
+                if record is not None and decision_parts(record, day):
                     records.setdefault(record.key, (record, reason))
                 continue
             elif node.entity_type == "Constraint":
@@ -191,18 +274,20 @@ class ContextPackageService:
 
         if terms:
             filters = {"document_keys": document_keys} if document_keys is not None else {}
+            lexical = {}
             for record in self.memory.search_question_documents(
                 " ".join(sorted(terms)), day, 8, adrs_only=True, **filters,
             ):
-                if _applicable(record, day):
-                    records.setdefault(record.key, (record, "Matched document search"))
+                if decision_parts(record, day):
+                    lexical.setdefault(record.key, records.get(record.key, (record, "Matched document search")))
+            records = {**lexical, **records} if implicit else {**records, **lexical}
 
         ordered = {}
         conflicts = {}
         scope_filter = {"allowed_document_keys": document_keys} if document_keys is not None else {}
         for key, (record, reason) in records.items():
             ordered.setdefault(key, (record, reason))
-            if record.conflict_scope is None:
+            if not isinstance(record, ArchitecturalDecisionRecord) or record.conflict_scope is None:
                 continue
             for pair in self.memory.find_adr_conflicts(
                 ADRConflictQuery(key=key, as_of=day, limit=100), **scope_filter,
@@ -214,7 +299,7 @@ class ContextPackageService:
                 other, other_reason = records.get(other_key, (None, "Unresolved ADR conflict"))
                 if other is None:
                     other = self.memory.read_document(other_key)
-                if _applicable(other, day):
+                if isinstance(other, ArchitecturalDecisionRecord) and decision_parts(other, day):
                     ordered.setdefault(other_key, (other, other_reason))
                     conflicts[identity] = ContextConflict(
                         original_key=key, competing_key=other_key,
@@ -227,18 +312,23 @@ class ContextPackageService:
         baseline_documents = []
         rationale = bool({"why", "rationale"}.intersection(words(query.question)))
         for record, reason in ordered.values():
-            full = {"title": record.title, "decision": record.decision, "rationale": record.rationale,
-                    "consequences": record.consequences, "content": record.content}
+            parts = decision_parts(record, day)
+            full = {"title": record.title, "decision": parts.decision, "rationale": parts.rationale,
+                    "consequences": parts.consequences, "content": record.content}
             baseline_documents.append(full)
-            excerpt = _short(record.decision)
-            if rationale:
-                excerpt = _short(record.rationale)
+            excerpt = _short(parts.decision)
+            if rationale and parts.rationale:
+                excerpt = _short(parts.rationale)
                 if record.key in conflict_keys:
-                    excerpt = f"{_short(record.decision)}\nRationale: {excerpt}"
+                    excerpt = f"{_short(parts.decision)}\nRationale: {excerpt}"
             if query.include_full_adrs:
                 excerpt = record.content or "\n".join(full.values())
-                if record.key in conflict_keys and record.decision not in excerpt:
-                    excerpt = f"{record.decision}\n{excerpt}"
+                if record.key in conflict_keys and parts.decision not in excerpt:
+                    excerpt = f"{parts.decision}\n{excerpt}"
+            else:
+                for label, value in (("Consequences", parts.consequences), ("Code evidence", parts.code_evidence)):
+                    if extra := relevant_excerpt(value, terms, record.title, prefer_link=label == "Code evidence"):
+                        excerpt += f"\n{label}: {extra}"
             item = ContextItem(key=record.key, title=_short(record.title, 100),
                                destination="records", text=excerpt)
             citation = next((item for validation in reversed(record.validation_history)
