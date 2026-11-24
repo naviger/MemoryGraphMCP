@@ -1,4 +1,4 @@
-"""Writer-approved acceptance criteria and a reported-token ceiling."""
+"""Acceptance criteria and deterministic checks for a proposed patch."""
 
 from typing import Annotated
 
@@ -12,8 +12,8 @@ TestPath = Annotated[
 
 class RepairContract(BaseModel):
     acceptance_criteria: list[Criterion] = Field(min_length=1, max_length=8)
-    test_paths: list[TestPath] = Field(min_length=1, max_length=8)
-    additional_tokens: int = Field(ge=1, le=20_000_000)
+    test_paths: list[TestPath] = Field(max_length=8)
+    additional_tokens: int | None = Field(default=None, ge=1, le=20_000_000)
 
 
 class RepairVerification(BaseModel):

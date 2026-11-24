@@ -274,15 +274,18 @@ class Execution(ArchitectureNode):
     project_key: MemoryKey
     task_key: MemoryKey
     patch_execution_key: MemoryKey | None = None
+    approved_review_key: MemoryKey | None = None
+    approved_patch: dict[str, str] | None = None
     repair_review_key: MemoryKey | None = None
     repair_patch_sha256: str | None = None
     repair_prompt: str | None = None
     repair_direction: str | None = None
     repair_contract: RepairContract | None = None
     repair_token_ceiling: int | None = None
+    approve_review_attempt: bool = False
     additional_review_tokens: int | None = None
     agent: Literal["local", "codex", "claude-code", "openhands"]
-    mode: Literal["PLAN_ONLY", "IMPLEMENT", "REVIEW", "FULL_LIFECYCLE"]
+    mode: Literal["PLAN_ONLY", "IMPLEMENT", "REVIEW", "FULL_LIFECYCLE", "APPLY_APPROVED"]
     state: Literal[
         "BACKLOG", "PLANNED", "READY", "RUNNING", "BLOCKED", "REVIEW", "COMPLETED", "FAILED",
         "CANCEL_REQUESTED", "CANCELLED",

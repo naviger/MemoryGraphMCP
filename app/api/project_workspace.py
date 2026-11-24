@@ -107,6 +107,16 @@ def build_workspace_router(prefix, workspace, executor, capture):
             raise HTTPException(422, "This agent does not support the selected mode")
         return await invoke(workspace.start, project, task, command, actor)
 
+    @router.post("/{project}/workspace/tasks/{task}/executions/{execution}/apply-approved")
+    async def apply_approved(
+        project: MemoryKey, task: MemoryKey, execution: MemoryKey, request: Request
+    ):
+        actor = authorize(project, request, write=True)
+        await executor.refresh()
+        if not await executor.can_apply_approved():
+            raise HTTPException(409, "A Codex bridge with approved patch support is required")
+        return await invoke(workspace.apply_approved, project, task, execution, actor)
+
     @router.get("/{project}/workspace/tasks/{task}/executions/{execution}/repair-draft")
     async def repair_draft(
         project: MemoryKey, task: MemoryKey, execution: MemoryKey, request: Request

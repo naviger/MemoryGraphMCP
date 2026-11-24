@@ -21,6 +21,7 @@ PHASES = {
     "IMPLEMENT": ("execute",),
     "REVIEW": ("review",),
     "FULL_LIFECYCLE": ("plan", "execute", "review"),
+    "APPLY_APPROVED": ("apply", "review_commit"),
 }
 CONTEXT_TYPES = {
     "ADR",
@@ -79,7 +80,7 @@ class BridgeProvider:
             response.raise_for_status()
             return response
 
-    async def model_label(self):
+    async def capabilities(self):
         headers = {}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token.get_secret_value()}"
@@ -89,10 +90,14 @@ class BridgeProvider:
             ) as client:
                 response = await client.get(f"{self.url}/capabilities", headers=headers)
                 response.raise_for_status()
-                model = response.json().get("model")
-                return model[:200] if isinstance(model, str) and model else None
-        except (httpx.HTTPError, ValueError, AttributeError):
-            return None
+                payload = response.json()
+                return payload if isinstance(payload, dict) else {}
+        except (httpx.HTTPError, ValueError):
+            return {}
+
+    async def model_label(self):
+        model = (await self.capabilities()).get("model")
+        return model[:200] if isinstance(model, str) and model else None
 
     async def perform(self, phase, execution_key, prompt):
         response = await self._post(
@@ -228,10 +233,19 @@ class TaskExecutor:
             name: [
                 mode
                 for mode, phases in PHASES.items()
-                if "execute" not in phases or not isinstance(provider, LocalProvider)
+                if mode != "APPLY_APPROVED"
+                and ("execute" not in phases or not isinstance(provider, LocalProvider))
             ]
             for name, provider in self.providers.items()
         }
+
+    async def can_apply_approved(self):
+        provider = self.providers.get("codex")
+        return bool(
+            isinstance(provider, BridgeProvider)
+            and "REVIEW" in self.modes().get("codex", [])
+            and (await provider.capabilities()).get("apply_approved_patch") is True
+        )
 
     async def codex_model_label(self):
         provider = self.providers.get("codex")
@@ -340,6 +354,8 @@ class TaskExecutor:
                 ),
                 "project_key": job.project_key,
                 "patch_execution_key": job.patch_execution_key,
+                "approved_patch": job.approved_patch,
+                "approved_review_key": job.approved_review_key,
                 "repair_patch_sha256": job.repair_patch_sha256,
                 "repair_prompt": job.repair_prompt,
                 "repair_direction": job.repair_direction,
@@ -385,7 +401,12 @@ class TaskExecutor:
                     )
                 )
             return
-        if provider is None or job.mode not in self.modes().get(job.agent, []):
+        allowed = (
+            job.agent == "codex" and "REVIEW" in self.modes().get("codex", [])
+            if job.mode == "APPLY_APPROVED"
+            else job.mode in self.modes().get(job.agent, [])
+        )
+        if provider is None or not allowed:
             await anyio.to_thread.run_sync(
                 partial(move, job, "FAILED", failure="The selected provider is unavailable")
             )
@@ -420,7 +441,7 @@ class TaskExecutor:
             phase = phases[claimed.phase]
             with anyio.fail_after(570):
                 result = await provider.perform(phase, claimed.key, prompt)
-            if claimed.repair_contract and not result.verification:
+            if claimed.repair_contract and phase != "review_commit" and not result.verification:
                 await anyio.to_thread.run_sync(
                     partial(
                         move,
@@ -447,7 +468,36 @@ class TaskExecutor:
                         )
                     )
                     return
-            if claimed.patch_execution_key and not claimed.repair_review_key:
+            if claimed.mode == "APPLY_APPROVED":
+                applied = result.applied_commit or {}
+                expected = claimed.approved_patch or {}
+                if phase == "apply":
+                    valid = (
+                        bool(applied.get("commit"))
+                        and applied.get("branch") == f"codex/task-fix-{claimed.key[:12]}"
+                        and applied.get("base_commit") == expected.get("base_commit")
+                        and applied.get("patch_sha256") == expected.get("patch_sha256")
+                    )
+                else:
+                    commit = claimed.results[0]["applied_commit"]["commit"]
+                    valid = (
+                        result.reviewed_target == {"kind": "fix branch commit", "commit": commit}
+                        and result.review_verdict is not None
+                    )
+                if not valid or result.pull_request:
+                    await anyio.to_thread.run_sync(
+                        partial(
+                            move,
+                            claimed,
+                            "FAILED",
+                            usage=result.usage,
+                            failure="The bridge did not confirm the approved fix commit",
+                        )
+                    )
+                    return
+            if claimed.patch_execution_key and not (
+                claimed.repair_review_key or claimed.approved_review_key
+            ):
                 target = result.reviewed_target or {}
                 if (
                     target.get("kind") != "implementation patch"
@@ -516,13 +566,22 @@ class TaskExecutor:
             )
             return
         final = claimed.phase + 1 == len(phases)
-        if not final and phase == "execute" and not result.completed:
+        if phase == "apply" and not result.verification.passed:
+            state = "REVIEW"
+        elif phase == "review_commit":
+            state = "COMPLETED" if result.review_verdict == "passed" else "REVIEW"
+        elif not final and phase == "execute" and not result.completed:
             state = "REVIEW"
         elif not final:
             state = "READY"
         elif claimed.mode == "PLAN_ONLY":
             state = "PLANNED"
         elif claimed.repair_review_key:
+            state = "REVIEW"
+        elif claimed.agent == "codex" and (
+            result.generated_contract
+            or (claimed.repair_contract and claimed.mode == "FULL_LIFECYCLE")
+        ):
             state = "REVIEW"
         elif result.completed and claimed.mode in {"IMPLEMENT", "FULL_LIFECYCLE"}:
             state = "COMPLETED"

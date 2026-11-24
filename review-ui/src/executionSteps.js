@@ -1,6 +1,7 @@
 export const PHASES = {
   PLAN_ONLY: ['Plan'], IMPLEMENT: ['Implement'], REVIEW: ['Review'],
   FULL_LIFECYCLE: ['Plan', 'Implement', 'Review'],
+  APPLY_APPROVED: ['Apply patch', 'Review commit'],
 };
 
 export function reviewBlocked(result) {
@@ -62,9 +63,11 @@ export function patchProgress(jobs) {
   const superseded = new Set();
   const reviewed = new Set();
   const latestReview = new Map();
+  const applications = new Set();
   const newestFirst = [...jobs].sort((left, right) =>
     Date.parse(right.created_at) - Date.parse(left.created_at));
   for (const job of newestFirst) {
+    if (job.approved_review_key && job.patch_execution_key) applications.add(job.patch_execution_key);
     const hasPatch = job.results.some((result) =>
       result.artifacts?.some((artifact) => artifact.name === 'Local implementation patch'));
     if (job.repair_review_key && job.patch_execution_key && hasPatch) {
@@ -77,5 +80,5 @@ export function patchProgress(jobs) {
       if (!latestReview.has(patch)) latestReview.set(patch, job.key);
     }
   }
-  return { superseded, reviewed, latestReview };
+  return { superseded, reviewed, latestReview, applications };
 }

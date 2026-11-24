@@ -28,6 +28,9 @@ MODES = {
     "REVIEW": ("review",),
     "FULL_LIFECYCLE": ("plan", "execute", "review"),
 }
+APPROVED_MODE = "APPLY_APPROVED"
+APPROVED_PHASES = ("apply", "review_commit")
+
 SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -148,7 +151,8 @@ class CodexBridge:
     def run(self, identity, phase, prompt):
         context = json.loads(prompt)
         mode = context.get("mode")
-        if context.get("project_key") != self.project or phase not in MODES.get(mode, ()):
+        phases = APPROVED_PHASES if mode == APPROVED_MODE else MODES.get(mode, ())
+        if context.get("project_key") != self.project or phase not in phases:
             raise BridgeError(403, "Project or execution mode is unavailable")
         with self.lock, closing(self.database()) as db:
             if self.cancelled(db, identity):
@@ -161,14 +165,12 @@ class CodexBridge:
                 return json.loads(row[0])
             if self.running:
                 raise BridgeError(503, "The local bridge already has an active phase")
-            if mode == "FULL_LIFECYCLE":
-                phases = MODES[mode]
-                for previous in phases[: phases.index(phase)]:
-                    if not db.execute(
-                        "SELECT 1 FROM phase_results WHERE id=? AND phase=?",
-                        (identity, previous),
-                    ).fetchone():
-                        raise BridgeError(409, "An earlier phase must finish first")
+            for previous in phases[: phases.index(phase)]:
+                if not db.execute(
+                    "SELECT 1 FROM phase_results WHERE id=? AND phase=?",
+                    (identity, previous),
+                ).fetchone():
+                    raise BridgeError(409, "An earlier phase must finish first")
             self.running[identity] = None
         try:
             result = self.run_phase(identity, phase, mode, prompt)
@@ -207,7 +209,7 @@ class CodexBridge:
         valid = r"tests/(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_-]+\.py"
         if (
             not isinstance(paths, list)
-            or not 1 <= len(paths) <= 8
+            or len(paths) > 8
             or any(not isinstance(path, str) or not re.fullmatch(valid, path) for path in paths)
         ):
             raise BridgeError(400, "Invalid regression test selection")
@@ -219,11 +221,142 @@ class CodexBridge:
             ["python", "-m", "pytest", "-q", "-o", "cache_dir=/tmp/pytest-cache", *paths],
         )
 
+    def implementation_contract(self, checkout, context, files):
+        test_pattern = r"tests/(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_-]+\.py"
+        tests = [name for name in files if re.fullmatch(test_pattern, name)]
+        if not tests and not any((checkout / "tests").rglob("test_*.py")):
+            return None
+        criteria = context.get("task", {}).get("success_criteria") or [
+            "Satisfy the task description and preserve existing behavior outside the change."
+        ]
+        return {
+            "test_paths": tests[:8],
+            "acceptance_criteria": [
+                value[:1000] for value in criteria[:8] if isinstance(value, str) and value.strip()
+            ]
+            or ["Satisfy the task description."],
+        }
+
+    def apply_approved(self, identity, directory, context):
+        target = context.get("approved_patch") or {}
+        source_key = target.get("execution_id", "")
+        base = target.get("base_commit", "")
+        digest = target.get("patch_sha256", "")
+        review_key = context.get("approved_review_key", "")
+        if (
+            source_key != context.get("patch_execution_key")
+            or not re.fullmatch(r"[a-f0-9]{64}", source_key)
+            or not re.fullmatch(r"[a-f0-9]{64}", review_key)
+            or not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", base)
+            or not re.fullmatch(r"[a-f0-9]{64}", digest)
+        ):
+            raise BridgeError(400, "The approved patch identity is incomplete")
+        original = self.state / source_key
+        with closing(self.database()) as db:
+            row = db.execute(
+                "SELECT result FROM phase_results WHERE id=? AND phase='execute'", (source_key,)
+            ).fetchone()
+            reviewed = db.execute(
+                "SELECT result FROM phase_results WHERE id=? AND phase='review'", (review_key,)
+            ).fetchone()
+        review = json.loads(reviewed[0]) if reviewed else {}
+        if (
+            review.get("review_verdict") != "passed"
+            or review.get("reviewed_target") != target
+            or not (review.get("verification") or {}).get("passed")
+        ):
+            raise BridgeError(409, "The bridge has no matching passing patch review")
+        patch = original / "implementation.patch"
+        if not row or not patch.is_file() or (original / "base").read_text().strip() != base:
+            raise BridgeError(409, "The approved implementation artifact is unavailable")
+        contents = patch.read_bytes()
+        if hashlib.sha256(contents).hexdigest() != digest or not any(
+            artifact.get("name") == "Local implementation patch"
+            and artifact.get("sha256") == digest
+            for artifact in json.loads(row[0]).get("artifacts", [])
+        ):
+            raise BridgeError(409, "The saved implementation differs from the approved patch")
+        captured = directory / "approved.patch"
+        captured.write_bytes(contents)
+        checkout = self.prepare_repo(directory, original / "repo")
+        branch = f"codex/task-fix-{identity[:12]}"
+        if git(checkout, "branch", "--list", branch).strip():
+            git(checkout, "checkout", branch)
+        else:
+            git(checkout, "checkout", "-b", branch, base)
+        head = git(checkout, "rev-parse", "HEAD").decode().strip()
+        if head == base:
+            git(checkout, "reset", "--hard", base)
+            git(checkout, "clean", "-fdx")
+            git(checkout, "apply", "--index", "--", str(captured))
+            git(checkout, "diff", "--cached", "--check", base, "--")
+            git(
+                checkout,
+                "-c",
+                "user.name=MemoryGraphMCP",
+                "-c",
+                "user.email=memorygraphmcp@localhost",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-m",
+                "Apply approved task patch",
+            )
+        commit = git(checkout, "rev-parse", "HEAD").decode().strip()
+        if (
+            git(checkout, "rev-parse", "HEAD^").decode().strip() != base
+            or hashlib.sha256(git(checkout, "diff", "--binary", base, commit, "--")).hexdigest()
+            != digest
+            or git(checkout, "status", "--porcelain")
+        ):
+            raise BridgeError(409, "The fix branch does not match the approved patch")
+        verified = self.verify_contract(checkout, context["repair_contract"])
+        result = {
+            "summary": (
+                "The approved patch was committed locally and the required tests passed."
+                if verified["passed"]
+                else "The required tests failed on the local fix commit. Commit review was skipped."
+            ),
+            "applied_commit": {
+                "branch": branch,
+                "commit": commit,
+                "base_commit": base,
+                "patch_sha256": digest,
+            },
+            "verification": verified,
+            "artifacts": [
+                {"name": "Local fix commit", "reference": f"{checkout} ({branch} at {commit})"}
+            ],
+        }
+        if not verified["passed"]:
+            result["review_verdict"] = "blocking"
+        return result
+
+    def applied_review_target(self, identity, checkout):
+        with closing(self.database()) as db:
+            row = db.execute(
+                "SELECT result FROM phase_results WHERE id=? AND phase='apply'", (identity,)
+            ).fetchone()
+        applied = json.loads(row[0]) if row else {}
+        expected = applied.get("applied_commit") or {}
+        head = git(checkout, "rev-parse", "HEAD").decode().strip()
+        if (
+            not (applied.get("verification") or {}).get("passed")
+            or head != expected.get("commit")
+            or git(checkout, "status", "--porcelain")
+        ):
+            raise BridgeError(409, "The exact fix commit must pass its required tests first")
+        return {"kind": "fix branch commit", "commit": head}
+
     def run_phase(self, identity, phase, mode, prompt):
         directory = self.state / identity
         directory.mkdir(exist_ok=True, mode=0o700)
         context = json.loads(prompt)
         contract = context.get("repair_contract")
+        if phase == "apply":
+            return self.apply_approved(identity, directory, context)
         repair = phase == "execute" and bool(context.get("repair_patch_sha256"))
         target = context.get("patch_execution_key") if phase == "review" or repair else None
         if repair and (not target or mode != "IMPLEMENT" or not context.get("repair_prompt")):
@@ -272,6 +405,8 @@ class CodexBridge:
         else:
             checkout = self.prepare_repo(directory)
             base = (directory / "base").read_text().strip()
+            if phase == "review_commit":
+                reviewed_target = self.applied_review_target(identity, checkout)
             if phase == "review":
                 reviewed_target = {"kind": "checkout commit", "commit": base}
                 if mode == "FULL_LIFECYCLE":
@@ -313,14 +448,23 @@ class CodexBridge:
         output.unlink(missing_ok=True)
         sandbox = "workspace-write" if writable else "read-only"
         instructions = {
-            "plan": "Produce a concise implementation plan. Leave the repository unchanged.",
-            "execute": "Implement the task in this checkout and run relevant local checks.",
+            "plan": (
+                "Produce a concise plan with observable acceptance cases, edge cases, and "
+                "the regression tests to run. Leave the repository unchanged."
+            ),
+            "execute": (
+                "Implement the task and follow the plan when provided. Add regression tests "
+                "for the acceptance cases and run the relevant checks before returning."
+            ),
+            "review_commit": "Review the committed fix against its parent and the task criteria.",
             "review": (
                 "Review the proposed changes against the task and report findings. "
                 "Set approved=true only if the proposed implementation passes review. "
                 "Leave the repository unchanged."
             ),
         }[phase]
+        if phase == "review_commit":
+            instructions += f" Review exactly {reviewed_target['commit']}. Report blockers."
         if contract:
             instructions += (
                 " Use the accepted criteria and selected test paths as the review contract. "
@@ -415,13 +559,15 @@ class CodexBridge:
         result = {"summary": summary, "tests": tests, "completed": False, "usage": usage}
         if phase == "plan":
             result.update(summary="Codex generated a task plan.", plan=summary)
-        if phase == "review":
+        if phase in {"review", "review_commit"}:
             result["review_comments"] = [summary]
             result["review_verdict"] = "passed" if response["approved"] is True else "blocking"
             result["reviewed_target"] = reviewed_target
             if verified:
                 result["verification"] = verified
-            result["completed"] = mode == "FULL_LIFECYCLE" and response["approved"] is True
+            result["completed"] = (
+                mode in {"FULL_LIFECYCLE", APPROVED_MODE} and response["approved"] is True
+            )
         if writable:
             if repair:
                 result["repaired_target"] = reviewed_target
@@ -442,6 +588,10 @@ class CodexBridge:
                     name.decode(errors="replace")[:8000] for name in files.split(b"\0") if name
                 ][:50]
             result["completed"] = bool(changes and response["approved"] is True)
+            if changes and not contract:
+                contract = self.implementation_contract(checkout, context, result["files_modified"])
+                if contract:
+                    result["generated_contract"] = contract
             if contract:
                 verified = self.verify_contract(checkout, contract)
                 result["verification"] = verified
@@ -486,7 +636,12 @@ def serve(bridge, token, host, port):
             if self.authorized():
                 if self.path == "/capabilities":
                     self.reply(
-                        200, {"modes": list(MODES), "model": bridge.model or "Codex CLI default"}
+                        200,
+                        {
+                            "modes": list(MODES),
+                            "model": bridge.model or "Codex CLI default",
+                            "apply_approved_patch": True,
+                        },
                     )
                 else:
                     self.reply(404, {})
@@ -495,7 +650,7 @@ def serve(bridge, token, host, port):
             if not self.authorized():
                 return
             phase = self.path.removeprefix("/")
-            if phase not in {"plan", "execute", "review", "cancel"}:
+            if phase not in {"plan", "execute", "review", "cancel", *APPROVED_PHASES}:
                 return self.reply(404, {})
             try:
                 size = int(self.headers.get("Content-Length", "0"))
