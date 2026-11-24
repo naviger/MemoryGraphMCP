@@ -28,7 +28,7 @@ export function executionSteps(jobs) {
       endedStates.has(lastEvent?.state) || (result && lastEvent?.state === 'READY')
     ) ? lastEvent.timestamp : undefined;
     const state = reviewBlocked(result) ? 'Changes required'
-      : result ? (phase === 'Implement' && !result.completed ? 'Needs review' : 'Finished')
+      : result ? 'Finished'
         : current ? ({
           READY: 'Queued', RUNNING: 'Running', BLOCKED: 'Waiting to retry',
           CANCEL_REQUESTED: 'Cancelling', CANCELLED: 'Cancelled', FAILED: 'Failed',
