@@ -2,7 +2,8 @@
 
 import argparse
 import json
-from pathlib import Path
+import subprocess
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
@@ -25,6 +26,21 @@ class ExpectedClaim(Input):
     citations: list[Text] = Field(min_length=1)
 
 
+class SourceExcerpt(Input):
+    path: Text
+    first_line: int = Field(ge=1)
+    last_line: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_location(self):
+        path = PurePosixPath(self.path)
+        if path.is_absolute() or ".." in path.parts or path.as_posix() != self.path or self.path == ".":
+            raise ValueError("Use a repository-relative source path")
+        if not 0 <= self.last_line - self.first_line < 40:
+            raise ValueError("Specify an ordered source range of at most 40 lines")
+        return self
+
+
 class Case(Input):
     id: Text
     project: Text
@@ -36,6 +52,7 @@ class Case(Input):
     expected: list[ExpectedClaim] = Field(min_length=1)
     checks: dict[Text, Text] = Field(default_factory=dict)
     delivery_guidance: list[Text] = Field(default_factory=list)
+    source_excerpts: list[SourceExcerpt] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def validate_case(self):
@@ -84,6 +101,30 @@ class TrialSet(Input):
 
 def trial_plan(benchmark: Benchmark) -> list[dict]:
     return [case.model_dump(mode="json", exclude={"expected"}) for case in benchmark.cases]
+
+
+def pinned_source_excerpts(case: Case, repository: Path) -> list[dict]:
+    """Read selectable source evidence from the case commit, regardless of checkout state."""
+    evidence = []
+    for index, excerpt in enumerate(case.source_excerpts, 1):
+        revision_path = f"{case.commit}:{excerpt.path}"
+        result = subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(repository), "show", revision_path],
+            capture_output=True, text=True, encoding="utf-8", check=False,
+        )
+        if result.returncode:
+            raise ValueError(f"Cannot read pinned source {revision_path}")
+        lines = result.stdout.splitlines()
+        if excerpt.last_line > len(lines):
+            raise ValueError(f"Source range exceeds pinned file {revision_path}")
+        evidence.append({
+            "excerpt_id": f"R{index}",
+            "citation_id": f"repo:{excerpt.path}",
+            "commit": case.commit,
+            **excerpt.model_dump(),
+            "text": "\n".join(lines[excerpt.first_line - 1:excerpt.last_line]),
+        })
+    return evidence
 
 
 def collect_scorecard(benchmark: Benchmark, results: TrialSet) -> dict:

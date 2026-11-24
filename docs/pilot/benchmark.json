@@ -51,6 +51,13 @@
         "The pinned validationStatus implementation treats a validation timestamp after the supplied as-of date as 'Never validated'. Write an assertion for that observable status.",
         "Use an explicit as-of date earlier than last_validated and a later next_review_due, so the assertion exercises the future-validation guard. Append one test using the existing imports.",
         "Cite repo:review-ui/src/validationStatus.js for the rule when citing repository evidence."
+      ],
+      "source_excerpts": [
+        {
+          "path": "review-ui/src/validationStatus.js",
+          "first_line": 3,
+          "last_line": 4
+        }
       ]
     },
     {
