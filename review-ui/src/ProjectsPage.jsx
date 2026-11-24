@@ -1,3 +1,5 @@
+import { EffectivenessPage } from './EffectivenessPage.jsx';
+import { TokenUsagePage } from './TokenUsagePage.jsx';
 import { projectHelpTopics } from './helpTopics.js';
 import { ContextHelp } from './ContextHelp.jsx';
 import ProjectWorkspace, { CaptureStatus } from './ProjectWorkspace.jsx';
@@ -120,7 +122,9 @@ function RepositoryInventory({ items, renderEntity, navigate, searching }) {
   );
 }
 
-const TABS = ['Overview', 'Guidance', 'Decisions', 'Code', 'Testing', 'Source Control', 'Memory', 'Review'];
+const TABS = ['Overview', 'Guidance', 'Decisions', 'Code', 'Testing', 'Source Control', 'Memory', 'Review', 'Token usage', 'Effectiveness'];
+
+const tabSlug = (name) => name.toLowerCase().replaceAll(' ', '-');
 
 function projectTab(requested) {
   const tab = requested === 'Changes' ? 'Source Control' : requested;
@@ -230,12 +234,16 @@ function Inventory({ project, navigate, searching, tab, setTab, token, asOf, onU
         event.currentTarget.querySelectorAll('[role="tab"]')[next].focus();
       }}>
       {TABS.map((name) => (
-        <button type="button" key={name} role="tab" id={`project-tab-${name}`}
-          aria-controls={`project-panel-${name}`} aria-selected={tab === name}
+        <button type="button" key={name} role="tab" id={`project-tab-${tabSlug(name)}`}
+          aria-controls={`project-panel-${tabSlug(name)}`} aria-selected={tab === name}
           tabIndex={tab === name ? 0 : -1} onClick={() => setTab(name)}>{name}</button>
       ))}
     </div>
     {[
+      ['Token usage', tab === 'Token usage' && <TokenUsagePage projectKey={project.key}
+        token={token} onUnauthorized={onUnauthorized} embedded />],
+      ['Effectiveness', tab === 'Effectiveness' && <EffectivenessPage projectKey={project.key}
+        projects={[project]} token={token} onUnauthorized={onUnauthorized} embedded />],
       ['Overview', tab === 'Overview' && <>
         <ProjectWorkspace projectKey={project.key} token={token} navigate={navigate} onUnauthorized={onUnauthorized} />
         <CaptureStatus projectKey={project.key} token={token} />
@@ -271,7 +279,7 @@ function Inventory({ project, navigate, searching, tab, setTab, token, asOf, onU
       ['Review', <ProjectReview projectKey={project.key} asOf={asOf} token={token}
         navigate={navigate} onUnauthorized={onUnauthorized} active={tab === 'Review'} />],
     ].map(([name, panel]) => (
-      <section key={name} role="tabpanel" id={`project-panel-${name}`} aria-labelledby={`project-tab-${name}`}
+      <section key={name} role="tabpanel" id={`project-panel-${tabSlug(name)}`} aria-labelledby={`project-tab-${tabSlug(name)}`}
         hidden={tab !== name} className="project-tab-panel">{panel}</section>
     ))}
   </>;

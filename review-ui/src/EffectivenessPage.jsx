@@ -1,5 +1,6 @@
 import { ContextHelp } from './ContextHelp.jsx';
 import { useEffect, useState } from 'react';
+import { MetricChart, MetricSummary, count, shortDay } from './MetricCharts.jsx';
 import { reviewRequest } from './api.js';
 
 const number = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
@@ -7,7 +8,7 @@ const money = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'U
 const amount = (value, suffix = '') => value == null ? '—' : `${number.format(value)}${suffix}`;
 const emptyScope = (project = '') => ({ project_key: project, repository_key: '', start: '', end: '' });
 
-function ScopeFields({ title, scope, projects, change, token, onUnauthorized }) {
+function ScopeFields({ title, scope, projects, change, token, onUnauthorized, pinned = false }) {
   const [repositories, setRepositories] = useState({});
   const [error, setError] = useState('');
   useEffect(() => {
@@ -29,11 +30,11 @@ function ScopeFields({ title, scope, projects, change, token, onUnauthorized }) 
   const set = (field) => (event) => change({ ...scope, [field]: event.target.value });
   return <fieldset className="effectiveness-scope">
     <legend>{title}</legend>
-    <label>Project <select required value={scope.project_key}
+    {!pinned && <label>Project <select required value={scope.project_key}
       onChange={(event) => change({ ...scope, project_key: event.target.value, repository_key: '' })}>
       <option value="">Choose a project</option>
       {projects.map((project) => <option key={project.key} value={project.key}>{project.name}</option>)}
-    </select></label>
+    </select></label>}
     <label>Repository <select value={scope.repository_key} onChange={set('repository_key')}>
       <option value="">All repositories</option>
       {Object.entries(repositories).map(([key, name]) => <option key={key} value={key}>{name}</option>)}
@@ -112,10 +113,11 @@ function MetricsTable({ title, reports, rows, render }) {
   </section>;
 }
 
-export function EffectivenessPage({ projectKey, projects, token, onUnauthorized }) {
+export function EffectivenessPage({ projectKey, projects, token, onUnauthorized, embedded = false }) {
   const [primary, setPrimary] = useState(() => emptyScope(projectKey || projects[0]?.key));
   const [comparison, setComparison] = useState(null);
   const [price, setPrice] = useState('');
+  const [trendMetric, setTrendMetric] = useState('tasks_completed');
   const [submitted, setSubmitted] = useState(() => ({ primary }));
   const [reports, setReports] = useState(null);
   const [error, setError] = useState('');
@@ -138,15 +140,32 @@ export function EffectivenessPage({ projectKey, projects, token, onUnauthorized 
     return () => remote.abort();
   }, [submitted, token, onUnauthorized]);
 
+  const report = reports?.[0];
+  const insights = report && [
+    report.delivery.first_pass_samples
+      ? `About ${count(report.delivery.first_pass_percent, '%')} of agent changes with check evidence passed on the first attempt (${count(report.delivery.first_pass_samples)} changes measured).`
+      : 'First-pass success needs reported outcomes or imported CI linked to agent changes.',
+    report.health.traceability_score.denominator
+      ? `${report.health.traceability_score.numerator} of ${report.health.traceability_score.denominator} services and active constraints have the expected ADR or test link.`
+      : 'Traceability will appear when this scope has services or active constraints.',
+    report.economics.token_savings.value == null
+      ? 'There are no comparable token measurements for this period.'
+      : `Comparable requests ${report.economics.token_savings.value < 0 ? 'used' : 'saved'} about ${count(Math.abs(report.economics.token_savings.value))} ${report.economics.token_savings.value < 0 ? 'extra ' : ''}tokens across ${count(report.economics.token_savings.samples)} measurements.`,
+  ];
+  const scopeLabel = (scope, index) => reports[0].project_key === reports[1]?.project_key
+    ? (scope.repository_name || (index ? 'Comparison period' : 'Primary period')) : scope.project_name;
+
   return <>
-    <header className="page-heading"><div><div className="heading-with-help"><h1>Engineering effectiveness</h1><ContextHelp topic="effectiveness" /></div>
+    <header className="page-heading"><div><div className="heading-with-help">
+      {embedded ? <h2>Engineering effectiveness</h2> : <h1>Engineering effectiveness</h1>}
+      <ContextHelp topic="effectiveness" /></div>
       <p>Compare delivery outcomes, architectural coverage, and estimated cost avoidance.</p></div></header>
     <form className="detail effectiveness-filters" onSubmit={(event) => {
       event.preventDefault();
       setSubmitted({ primary, comparison, price });
     }}>
-      <ScopeFields title="Primary" scope={primary} change={setPrimary} {...{ projects, token, onUnauthorized }} />
-      {comparison && <ScopeFields title="Comparison" scope={comparison} change={setComparison}
+      <ScopeFields title={embedded ? "This project" : "Primary"} pinned={embedded} scope={primary} change={setPrimary} {...{ projects, token, onUnauthorized }} />
+      {comparison && <ScopeFields title="Comparison" pinned={embedded} scope={comparison} change={setComparison}
         {...{ projects, token, onUnauthorized }} />}
       <div className="toolbar">
         <label>Input price (USD per million tokens)
@@ -163,6 +182,33 @@ export function EffectivenessPage({ projectKey, projects, token, onUnauthorized 
     {error ? <p role="alert" className="status error">{error}</p> : !reports ? (
       <p role="status">{submitted.primary.project_key ? 'Loading engineering evidence…' : 'Choose a project to view its metrics.'}</p>
     ) : <>
+      <MetricSummary metrics={[
+        ['Completed tasks', count(report.delivery.tasks_completed)],
+        ['Agent first-pass success', count(report.delivery.first_pass_percent, '%')],
+        ['Traceability', count(report.health.traceability_score.percent, '%')],
+      ]} insights={insights} />
+      <div className="metric-grid">
+        <section className="detail metric-section">
+          <label className="metric-control">Weekly measure <select value={trendMetric} onChange={(event) => setTrendMetric(event.target.value)}>
+            <option value="tasks_completed">Completed tasks</option>
+            <option value="agent_changes">Agent changes</option>
+            <option value="human_changes">Human changes</option>
+          </select></label>
+          <MetricChart compact title="Weekly delivery" description="Latest weeks with recorded delivery events. Weeks start Monday, UTC."
+            rows={(report.delivery_trend ?? []).map((week) => ({ label: shortDay(week.week_start), value: week[trendMetric] }))} />
+        </section>
+        <MetricChart title="Current graph health" unit="%" limit={100}
+          description="A blank score means this scope has no eligible evidence."
+          rows={[['Memory', 'memory_score'], ['Traceability', 'traceability_score'], ['Validation', 'validation_score']]
+            .map(([label, key]) => ({ label, value: report.health[key].percent }))} />
+      </div>
+      {reports.length > 1 && <div className="metric-grid">
+        <MetricChart title="First-pass success by scope" unit="%" limit={100}
+          rows={reports.map((scope, index) => ({ key: index, label: scopeLabel(scope, index), value: scope.delivery.first_pass_percent }))} />
+        <MetricChart title="Completed tasks by scope"
+          rows={reports.map((scope, index) => ({ key: index, label: scopeLabel(scope, index), value: scope.delivery.tasks_completed }))} />
+      </div>}
+      <details className="detail metric-section"><summary>Detailed metrics and methodology</summary>
       <MetricsTable title="Health" reports={reports}
         rows={[[ 'Memory score', 'memory_score' ], [ 'Traceability score', 'traceability_score' ], [ 'Validation score', 'validation_score' ]]}
         render={(report, key) => <HealthScore score={report.health[key]} />} />
@@ -185,6 +231,7 @@ export function EffectivenessPage({ projectKey, projects, token, onUnauthorized 
             <div key={name}><dt>{name}</dt><dd>{text}</dd></div>)}
           {ECONOMICS.map(([label, key]) => <div key={key}><dt>{label}</dt><dd>{reports[0].economics[key].methodology}</dd></div>)}
         </dl>
+      </details>
       </details>
     </>}
   </>;

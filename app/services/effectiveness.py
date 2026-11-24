@@ -1,6 +1,6 @@
 """Project and repository evidence rollups with explicit denominators."""
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from statistics import mean
 from typing import Protocol
 
@@ -8,6 +8,7 @@ import anyio
 
 from app.domain.architecture import Project
 from app.domain.effectiveness import (
+    DeliveryWeek,
     DevelopmentOutcome,
     EffectivenessQuery,
     EffectivenessReport,
@@ -97,6 +98,26 @@ def _agent_check_outcomes(reports: list[DevelopmentOutcome], events: list[dict])
         elif run:
             retries.append(sum(attempt > 1 and row["status"] != "cancelled" for attempt, row in run.items()))
     return first_pass, retries
+
+
+def delivery_trend(reports: list[DevelopmentOutcome], outcomes: dict) -> list[DeliveryWeek]:
+    buckets = {}
+
+    def bucket(timestamp: datetime) -> DeliveryWeek:
+        day = timestamp.astimezone(UTC).date()
+        monday = day - timedelta(days=day.weekday())
+        return buckets.setdefault(monday, DeliveryWeek(week_start=monday))
+
+    for report in reports:
+        week = bucket(report.occurred_at)
+        if report.actor == "agent":
+            week.agent_changes += 1
+        else:
+            week.human_changes += 1
+    for timestamp, status in outcomes.values():
+        if status == "completed":
+            bucket(timestamp).tasks_completed += 1
+    return [buckets[week] for week in sorted(buckets)[-12:]]
 
 
 class EffectivenessService:
@@ -250,6 +271,7 @@ class EffectivenessService:
                 "validation_score": rate(current, len(scheduled)),
             },
             economics=economics(events, reports, query.input_price_per_million),
+            delivery_trend=delivery_trend(reports, task_results),
             methodology={
                 "inventory": "Current graph snapshot. Repository scope includes indexed entities and directly linked evidence. Historical selectors apply to dated activity.",
                 "delivery": "Unique changes explicitly reported as agent or human. Agent first-pass and retry rates use reported outcomes or the earliest imported CI run with a first attempt for the exact commit and repository. CI retries count imported non-cancelled reruns. Task finishes combine applied tracker events and reported task outcomes; duration requires an explicit start.",

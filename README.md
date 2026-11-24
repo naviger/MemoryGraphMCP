@@ -569,6 +569,13 @@ is extrapolated across missing samples. For model cost avoidance, enter a USD
 price per million input tokens. The result estimates input cost at that price,
 and negative net savings indicate extra tokens or cost.
 
+The **Token usage** and **Effectiveness** tabs in Projects stay scoped to the
+open project. The sidebar dashboards support wider views and comparisons
+across projects. Charts summarize daily token activity, weekly delivery,
+graph health, and comparisons. Expand the detailed measurements to inspect
+the underlying numbers and methodology. Insights are calculated directly
+from those numbers and describe missing evidence and negative savings.
+
 ### Help center
 
 Open **Help** at the bottom of the sidebar to search or browse task guides.

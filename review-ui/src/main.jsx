@@ -512,7 +512,7 @@ function App() {
             key={projectKey} projectKey={projectKey} projects={projects} token={token} onUnauthorized={expireSession} />}
           {session && !projects && route?.destination === 'effectiveness' && !projectError &&
             <p role="status">Loading projects…</p>}
-          {session && route?.destination === 'token-usage' && <TokenUsagePage projectKey={projectKey}
+          {session && route?.destination === 'token-usage' && <TokenUsagePage key={projectKey} projectKey={projectKey} projects={projects ?? []}
             token={token} onUnauthorized={expireSession} />}
           {(route?.destination === 'help' || session && ['ask', 'search', 'graph', 'projects', 'global-guidance', 'agent-settings', 'token-usage', 'effectiveness'].includes(route?.destination))
             ? null : session && !isQueueRoute ? (

@@ -88,6 +88,13 @@ class Estimate(BaseModel):
     methodology: str
 
 
+class DeliveryWeek(BaseModel):
+    week_start: date
+    agent_changes: int = 0
+    human_changes: int = 0
+    tasks_completed: int = 0
+
+
 class EffectivenessReport(BaseModel):
     project_key: MemoryKey
     project_name: str
@@ -103,3 +110,4 @@ class EffectivenessReport(BaseModel):
     health: dict[str, Rate]
     economics: dict[str, Estimate]
     methodology: dict[str, str]
+    delivery_trend: list[DeliveryWeek] = Field(default_factory=list)
