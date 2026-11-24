@@ -9,9 +9,11 @@ from fastmcp.server.middleware import Middleware
 
 from app.domain.context_usage import (
     CheckedContextAnswer,
+    CheckedExcerptAnswer,
     ContextClaim,
     ContextClaimCheck,
     ContextQuery,
+    ContextExcerpt,
     MeasuredContextPackage,
     RequestID,
     UsageOutcome,
@@ -110,6 +112,25 @@ def register_context_usage(mcp: FastMCP, service: ContextPackageService, usage: 
         """
         try:
             return await service.finalize_answer(query, claims)
+        except ArchitectureGraphError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool
+    async def list_context_excerpts(query: ContextQuery) -> list[ContextExcerpt]:
+        """List selectable exact excerpts and their canonical graph citations for this query."""
+        try:
+            return await service.list_excerpts(query)
+        except ArchitectureGraphError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool
+    async def finalize_context_excerpts(
+        query: ContextQuery,
+        excerpt_ids: Annotated[list[Annotated[str, Field(min_length=1, max_length=128)]], Field(max_length=20)],
+    ) -> CheckedExcerptAnswer:
+        """Resolve selected IDs in the same dated scope and check every reconstructed claim."""
+        try:
+            return await service.finalize_excerpts(query, excerpt_ids)
         except ArchitectureGraphError as exc:
             raise ToolError(str(exc)) from exc
 

@@ -566,13 +566,18 @@ and static heuristics, so missing rationale stays unknown.
 
 ### Graph context packages and token usage
 
-For assisted answers, give the model the returned `citation_id` for each item
-and ask for exact excerpt sentences with those IDs. Before displaying the answer,
-call `finalize_context_answer` with the same query and the proposed claims.
-Present only `findings` as verified and show `flagged_claims` as evidence gaps.
-The finalizer normalizes unambiguous bare keys within the package and flags
-missing citations, unknown IDs, and text that does not match. Repository paths
-require their own evidence check.
+For assisted answers, call `list_context_excerpts` with the scoped context
+query and give the model the returned text and excerpt IDs. Ask it to select
+supporting IDs. Before displaying the answer, call `finalize_context_excerpts`
+with the same query and those IDs. The server reconstructs the quotes from
+the scoped package, attaches their canonical citations, and checks each claim.
+Present only `findings` as verified. Show `flagged_claims` and
+`unknown_excerpt_ids` as evidence gaps. Check whether the selected excerpts
+answer the question. The citation check verifies provenance and exact wording.
+
+Clients that submit their own claims can call `finalize_context_answer`.
+It resolves unambiguous bare keys and flags missing, unknown, and unsupported
+citations. Repository paths require their own evidence check.
 
 For strict citation diagnostics, callers can use `validate_context_citations` with the
 same query and proposed **verbatim** claim sentences. Send citation identifiers

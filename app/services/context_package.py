@@ -1,6 +1,7 @@
 import re
 from collections import Counter
 from datetime import UTC, date, datetime
+from hashlib import sha256
 from typing import NamedTuple
 
 import anyio
@@ -8,10 +9,12 @@ import anyio
 from app.domain.architecture import ArchitectureSearch, ArchitectureTrace, Project
 from app.domain.context_usage import (
     CheckedContextAnswer,
+    CheckedExcerptAnswer,
     ContextClaim,
     ContextClaimCheck,
     ContextConflict,
     ContextEvidence,
+    ContextExcerpt,
     ContextItem,
     ContextPackage,
     ContextQuery,
@@ -134,7 +137,7 @@ def relevant_excerpt(text: str, terms: set[str], title: str, *, prefer_link: boo
     return _short(best) if terms.intersection(words(best)) else ""
 
 
-def check_cited_claims(package: ContextPackage, claims: list[ContextClaim]) -> list[ContextClaimCheck]:
+def _cited_text(package: ContextPackage) -> dict[str, str]:
     excerpts = {
         item.citation_id: item.text
         for group in _GROUPS.values() for item in getattr(package, group)
@@ -146,21 +149,44 @@ def check_cited_claims(package: ContextPackage, claims: list[ContextClaim]) -> l
             if snippet and identifier in excerpts:
                 excerpts[identifier] += "\n" + snippet
 
-    def quote(text: str) -> str:
-        return " ".join(text.split())
+    return excerpts
 
-    def supports(source: str, claim: str) -> bool:
-        return any(
-            quote(re.sub(r"^(?:Rationale|Consequences|Code evidence):\s*", "", sentence)) == claim
-            for sentence in _sentences(source) if not sentence.startswith("…") and not sentence.endswith("…")
-        )
 
+def _verbatim_excerpts(source: str) -> list[str]:
+    return [
+        text for sentence in _sentences(source)
+        if (text := re.sub(r"^(?:Rationale|Consequences|Code evidence):\s*", "", sentence))
+        and not text.startswith("…") and not text.endswith("…")
+    ]
+
+
+def _quote(text: str) -> str:
+    return " ".join(text.split())
+
+
+def context_excerpts(package: ContextPackage) -> list[ContextExcerpt]:
+    """Attach content-addressed IDs to excerpts eligible for exact citation checks."""
+    rows: dict[str, ContextExcerpt] = {}
+    for citation, source in _cited_text(package).items():
+        for text in _verbatim_excerpts(source):
+            if len(text) > 2000:
+                continue
+            identifier = sha256(f"{citation}\0{text}".encode()).hexdigest()[:24]
+            rows[identifier] = ContextExcerpt(excerpt_id=identifier, citation_id=citation, text=text)
+    return list(rows.values())
+
+
+def check_cited_claims(package: ContextPackage, claims: list[ContextClaim]) -> list[ContextClaimCheck]:
+    excerpts = {
+        citation: {_quote(text) for text in _verbatim_excerpts(source)}
+        for citation, source in _cited_text(package).items()
+    }
     return [
         ContextClaimCheck(
             claim=claim,
             status="missing_citation" if not claim.citations
             else "unknown_citation" if set(claim.citations) - excerpts.keys()
-            else "supported" if all(supports(excerpts[cite], quote(claim.text)) for cite in claim.citations)
+            else "supported" if all(_quote(claim.text) in excerpts[cite] for cite in claim.citations)
             else "unsupported_text",
         )
         for claim in claims
@@ -195,6 +221,22 @@ def finalize_context_answer(
     )
 
 
+def finalize_excerpt_answer(package: ContextPackage, excerpt_ids: list[str]) -> CheckedExcerptAnswer:
+    available = {excerpt.excerpt_id: excerpt for excerpt in context_excerpts(package)}
+    claims = []
+    unknown = []
+    for identifier in dict.fromkeys(excerpt_ids):
+        excerpt = available.get(identifier)
+        if excerpt is None:
+            unknown.append(identifier)
+        else:
+            claims.append(ContextClaim(text=excerpt.text, citations=[excerpt.citation_id]))
+    checked = finalize_context_answer(package, claims)
+    return CheckedExcerptAnswer(
+        findings=checked.findings, flagged_claims=checked.flagged_claims, unknown_excerpt_ids=unknown,
+    )
+
+
 class ContextPackageService:
     def __init__(self, graph: ArchitectureRepository, memory: MemoryRepository):
         self.graph = graph
@@ -212,6 +254,14 @@ class ContextPackageService:
     ) -> CheckedContextAnswer:
         package, _, _ = await self.build(query)
         return finalize_context_answer(package, claims)
+
+    async def list_excerpts(self, query: ContextQuery) -> list[ContextExcerpt]:
+        package, _, _ = await self.build(query)
+        return context_excerpts(package)
+
+    async def finalize_excerpts(self, query: ContextQuery, excerpt_ids: list[str]) -> CheckedExcerptAnswer:
+        package, _, _ = await self.build(query)
+        return finalize_excerpt_answer(package, excerpt_ids)
 
     def _build(self, query: ContextQuery) -> BuiltContext:
         day = query.as_of or datetime.now(UTC).date()

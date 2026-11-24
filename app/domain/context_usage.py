@@ -83,6 +83,19 @@ class CheckedContextAnswer(BaseModel):
     flagged_claims: list[ContextClaimCheck]
 
 
+ExcerptID = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{24}$")]
+
+
+class ContextExcerpt(BaseModel):
+    excerpt_id: ExcerptID
+    citation_id: str
+    text: str
+
+
+class CheckedExcerptAnswer(CheckedContextAnswer):
+    unknown_excerpt_ids: list[str]
+
+
 class UsageOutcome(BaseModel):
     completed: bool
     follow_up_retries: int = Field(default=0, ge=0, le=1000)

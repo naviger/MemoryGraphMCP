@@ -297,6 +297,20 @@ async def test_mcp_context_returns_usage_and_records_outcome(context_service):
             {"text": "Use canonical asset IDs.", "citations": ["records:record"]},
         ]
         assert finalized.structured_content["flagged_claims"][0]["status"] == "unsupported_text"
+        menu = await client.call_tool("list_context_excerpts", {
+            "query": {"question": "How does AssetService work?", "service": "assets"},
+        })
+        excerpt = next(row for row in menu.structured_content["result"]
+                       if row["text"] == "Use canonical asset IDs.")
+        selection = await client.call_tool("finalize_context_excerpts", {
+            "query": {"question": "How does AssetService work?", "service": "assets"},
+            "excerpt_ids": [excerpt["excerpt_id"], "invented", excerpt["excerpt_id"]],
+        })
+        assert selection.structured_content == {
+            "findings": [{"text": excerpt["text"], "citations": ["records:record"]}],
+            "flagged_claims": [],
+            "unknown_excerpt_ids": ["invented"],
+        }
 
 
 @pytest.mark.asyncio
@@ -350,9 +364,19 @@ async def test_pilot_jwks_markdown_adr_is_retrieved_and_invented_citations_are_r
         "unknown_citation", "unknown_citation", "unsupported_text",
     ]
 
+    menu = await context_service.list_excerpts(query)
+    jwks = [item for item in menu if item.citation_id == expected.citation_id]
+    assert any("maxsize=1" in item.text for item in jwks)
+    chosen = await context_service.finalize_excerpts(query, [item.excerpt_id for item in jwks])
+    assert [item.text for item in chosen.findings] == [item.text for item in jwks]
+    assert chosen.flagged_claims == chosen.unknown_excerpt_ids == []
+
     record.content = record.content.replace("Status: Accepted", "Status: Proposed")
     package, _, _ = await context_service.build(query)
     assert record.key not in {item.key for item in package.relevant_adrs}
+    stale = await context_service.finalize_excerpts(query, [jwks[0].excerpt_id])
+    assert stale.findings == []
+    assert stale.unknown_excerpt_ids == [jwks[0].excerpt_id]
 
 
 @pytest.mark.asyncio
@@ -388,6 +412,11 @@ async def test_pilot_review_schedule_includes_cited_expiration_consequence(conte
     ])
     assert [item.citations for item in checked.findings] == [[f"records:{original.key}"]]
     assert [item.status for item in checked.flagged_claims] == ["unsupported_text", "missing_citation"]
+
+    menu = await context_service.list_excerpts(query)
+    excerpt = next(item for item in menu if item.text == "Updating confidence does not move expiration.")
+    chosen = await context_service.finalize_excerpts(query, [excerpt.excerpt_id])
+    assert [item.citations for item in chosen.findings] == [[excerpt.citation_id]]
 
     future = query.model_copy(update={"question": (
         "Add one focused regression for a last_validated date later than the requested as-of date. "
