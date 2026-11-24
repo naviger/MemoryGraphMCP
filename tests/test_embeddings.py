@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from app.domain.exceptions import EmbeddingError
 from app.domain.models import MemoryDocument
-from app.services.embeddings import DeterministicEmbeddingProvider, EmbeddingService
+from app.services.embeddings import DeterministicEmbeddingProvider, EmbeddingService, OllamaEmbeddingProvider
 
 
 class FailingProvider:
@@ -64,3 +65,30 @@ def test_embedding_service_rejects_wrong_client_vector_dimension() -> None:
 
     with pytest.raises(EmbeddingError):
         service.embed_client_vector([0.1, 0.2])
+
+
+@pytest.mark.parametrize(("configured", "listed", "status"), [
+    ("nomic-embed-text", "nomic-embed-text:latest", "ready"),
+    ("registry:5000/team/embed", "registry:5000/team/embed:latest", "ready"),
+    ("nomic-embed-text:latest", "nomic-embed-text", "ready"),
+    ("nomic-embed-text:v2", "nomic-embed-text:v2", "ready"),
+    ("nomic-embed-text:v2", "nomic-embed-text:latest", "degraded"),
+    ("nomic-embed-text", "other/nomic-embed-text:latest", "degraded"),
+])
+def test_ollama_health_matches_the_default_tag_without_changing_profile(
+    monkeypatch, configured, listed, status,
+):
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(
+            200, json={"models": [{"name": listed}]},
+        )),
+        base_url="http://ollama",
+    )
+    monkeypatch.setattr("app.services.embeddings.httpx.Client", lambda **kwargs: client)
+    provider = OllamaEmbeddingProvider("http://ollama", configured, 768, 5)
+
+    health = provider.health()
+
+    assert health["status"] == status
+    assert health["model"] == provider.model == configured
+    assert (health["error_summary"] is None) == (status == "ready")
