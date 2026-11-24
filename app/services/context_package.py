@@ -183,8 +183,10 @@ class ContextPackageService:
                 if not node.rule or node.enforcement_status in {None, "retired", "proposed"}:
                     continue
                 item.text = _short(node.rule)
-            elif node.source_path:
-                evidence.citation = _short(f"{reason}. {node.source_path}", 150)
+            label = "Current index" if node.index_state else "Current graph"
+            path = f". {node.source_path}" if node.source_path else ""
+            evidence.citation = _short(f"{label}: {reason}{path}", 150)
+            evidence.code_location = node.code_location()
             graph_items.append((group, item, evidence))
 
         if terms:

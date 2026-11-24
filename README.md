@@ -114,6 +114,25 @@ and test evidence. Edges record direction, source, confidence, and timestamps.
 See the [architecture metamodel](docs/architecture-metamodel.md) and run
 `python -m scripts.index_architecture --help` for indexing options.
 
+The source Repository key is the identity of an index. Its display name can
+change while indexed symbols and their graph links keep their keys. To index an
+exact Git tree, pass the existing repository key and a commit ref. Add the
+GitHub slug for commit-addressed source and line links.
+
+```sh
+python -m scripts.index_architecture /path/to/checkout \
+  --repository "Repository display name" --repository-key REPOSITORY_KEY \
+  --commit HEAD --github-repository owner/repo
+```
+
+Commit capture also pins indexed evidence to the captured SHA. Entity details
+show the indexed source revision and can show an earlier cited revision retained
+on a manually recorded relationship. Ask the Graph labels code and test links as
+current graph evidence even when the question has an as-of date. An as-of query
+uses dated ADRs and does not reconstruct historical graph topology. Older
+unversioned indexes acquire provenance when refreshed from a commit.
+
+
 Use `add_observation` to attach a sourced, timestamped summary and confidence score
 to graph entities. Use `save_architectural_constraint` to record a rule, its scope,
 authority, enforcement status, governed entities, and validating tests.

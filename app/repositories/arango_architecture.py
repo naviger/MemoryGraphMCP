@@ -137,7 +137,7 @@ class ArangoArchitectureRepository:
             or entity.test_suite_keys
         ):
             raise ArchitectureGraphError("Use save_architectural_constraint to manage rules")
-        if entity.index_state is not None:
+        if entity.index_state is not None or entity.source_revision is not None or entity.repository_key is not None:
             raise ArchitectureGraphError("Index state is assigned by Python ingestion")
         with self._transaction() as transaction:
             nodes = transaction.collection(self._entities)
@@ -198,6 +198,7 @@ class ArangoArchitectureRepository:
             "relationship_type": kind,
             "confidence": link.confidence,
             "source": link.source,
+            "source_revision": link.source_revision.model_dump(mode="json") if link.source_revision else None,
             "created_at": now,
             "updated_at": now,
         }
@@ -861,7 +862,9 @@ class ArangoArchitectureRepository:
                 LET repo = DOCUMENT(@repository)
                 FOR suite IN @@entities
                     FILTER repo != null AND suite.entity_type == "TestSuite"
-                    FILTER suite.repository == repo.name AND suite.source_path IN @paths
+                    FILTER (suite.repository_key == repo._key OR
+                        (suite.repository_key == null AND suite.repository == repo.name))
+                        AND suite.source_path IN @paths
                     FOR target, edge IN 1..1 INBOUND suite._id @@edges
                         FILTER edge.relationship_type == "validated_by"
                         FILTER target.entity_type IN ["ADR", "Constraint"]
@@ -887,7 +890,7 @@ class ArangoArchitectureRepository:
         )
 
     def put_link(self, link: ArchitectureLink) -> ArchitectureRelationship:
-        if link.source == _STATIC_SOURCE:
+        if link.source == _STATIC_SOURCE or link.source_revision is not None:
             raise ArchitectureGraphError(
                 "The static-analysis source is reserved for Python ingestion"
             )
@@ -903,13 +906,19 @@ class ArangoArchitectureRepository:
         payload = self._edge_payload(link, datetime.now(UTC).isoformat())
         with self._transaction() as transaction:
             nodes = transaction.collection(self._entities)
+            locations = []
             for key in (link.source_key, link.target_key):
-                if not nodes.has(key):
+                row = nodes.get(key)
+                if row is None:
                     raise ArchitectureGraphError(f"Architecture entity '{key}' was not found")
+                location = _ENTITY.validate_python(row).code_location()
+                if location is not None:
+                    locations.append(location.model_dump(mode="json", exclude={"url"}))
             edges = transaction.collection(self._edges)
             previous = edges.get(payload["_key"])
             if previous:
                 payload["created_at"] = previous["created_at"]
+            payload["cited_code"] = (previous or {}).get("cited_code", []) or locations
             result = edges.insert(payload, overwrite_mode="replace", return_new=True)
         return ArchitectureRelationship.model_validate(result["new"]).model_copy(
             update={
@@ -937,50 +946,56 @@ class ArangoArchitectureRepository:
                 "An index must contain unique entities and all static link endpoints"
             )
         roots = [
-            node["_key"] for node in entities
+            node for node in entities
             if node["entity_type"] == "Repository" and node.get("role") == "source"
-            and node["name"] == index.repository
         ]
-        root_key = roots[0] if len(roots) == 1 else None
+        if (len(roots) != 1 or roots[0]["_key"] != index.repository_key
+                or roots[0]["name"] != index.repository):
+            raise ArchitectureGraphError("An index must contain its source repository")
+        root, = roots
+        root_key = index.repository_key
         now = datetime.now(UTC).isoformat()
-        for node in entities:
-            if node["_key"] == root_key:
-                node["last_indexed_at"] = now
+        root["last_indexed_at"] = now
         edges = {}
         for link in index.links:
             payload = self._edge_payload(link, now)
-            edges[payload["_key"]] = {**payload, "index_repository": index.repository}
+            edges[payload["_key"]] = {
+                **payload, "index_repository": index.repository, "index_repository_key": root_key,
+            }
 
         with self._transaction() as transaction:
-            if capture_order and root_key:
-                root = transaction.collection(self._entities).get(root_key) or {}
-                if root.get("capture_index_order", "") > capture_order:
-                    return 0
-                for node in entities:
-                    if node["_key"] == root_key:
-                        node["capture_index_order"] = capture_order
-            elif root_key:
-                root = transaction.collection(self._entities).get(root_key) or {}
-                for node in entities:
-                    if node["_key"] == root_key and "capture_index_order" in root:
-                        node["capture_index_order"] = root["capture_index_order"]
+            previous = transaction.collection(self._entities).get(root_key)
+            previous_order = (previous or {}).get("capture_index_order", "")
+            if capture_order and previous and (
+                previous_order > capture_order or previous["name"] != index.repository
+            ):
+                return 0
+            if capture_order or previous_order:
+                root["capture_index_order"] = capture_order or previous_order
+            # For the first upgrade of a legacy index, use its original namespace
+            # to migrate only rows whose ownership was previously stored by name.
+            legacy = index.namespace if (
+                previous and previous.get("index_state") and not previous.get("repository_key")
+                and previous.get("repository") == index.namespace
+            ) else None
             collision = list(
                 transaction.aql.execute(
                     """
                 FOR node IN @@entities
                     FILTER node._key IN @keys
-                    FILTER node.index_state == null OR node.repository != @repository
-                    FILTER !(node._key == @root_key AND node.index_state == null
-                        AND node.entity_type == "Repository" AND node.role == "source"
-                        AND node.name == @repository
-                        AND (node.repository == null OR node.repository == @repository))
+                    FILTER !(node._key == @root_key AND node.entity_type == "Repository"
+                        AND node.role == "source")
+                    FILTER node.index_state == null OR (
+                        node.repository_key != @root_key AND
+                        !(node.repository_key == null AND @legacy != null AND node.repository == @legacy)
+                    )
                     LIMIT 1
                     RETURN node._key
                 """,
                     bind_vars={
                         "@entities": self._entities,
                         "keys": sorted(keys),
-                        "repository": index.repository,
+                        "legacy": legacy,
                         "root_key": root_key,
                     },
                 )
@@ -1023,13 +1038,18 @@ class ArangoArchitectureRepository:
                 transaction.aql.execute(
                     """
                 FOR edge IN @@edges
-                    FILTER edge.index_repository == @repository AND edge.source == @source
+                    FILTER edge.source == @source AND (
+                        edge.index_repository_key == @root_key OR
+                        (edge.index_repository_key == null AND @legacy != null
+                            AND edge.index_repository == @legacy)
+                    )
                     FILTER edge._key NOT IN @keys
                     REMOVE edge IN @@edges
                 """,
                     bind_vars={
                         "@edges": self._edges,
-                        "repository": index.repository,
+                        "root_key": root_key,
+                        "legacy": legacy,
                         "source": _STATIC_SOURCE,
                         "keys": list(edges),
                     },
@@ -1039,13 +1059,19 @@ class ArangoArchitectureRepository:
                 transaction.aql.execute(
                     """
                 FOR node IN @@entities
-                    FILTER node.repository == @repository AND node.index_state == "current"
+                    FILTER node.index_state == "current" AND (
+                        node.repository_key == @root_key OR
+                        (node.repository_key == null AND @legacy != null AND node.repository == @legacy)
+                    )
                     FILTER node._key NOT IN @keys
-                    UPDATE node WITH {index_state: "stale"} IN @@entities
+                    UPDATE node WITH {index_state: "stale", repository_key: @root_key,
+                                      repository: @repository} IN @@entities
                 """,
                     bind_vars={
                         "@entities": self._entities,
                         "repository": index.repository,
+                        "root_key": root_key,
+                        "legacy": legacy,
                         "keys": sorted(keys),
                     },
                 )
@@ -1450,7 +1476,10 @@ class ArangoArchitectureRepository:
             )
             LET owned = (
                 FOR node IN @@entities
-                    FILTER node.repository IN repositories[*].name AND node.index_state != "stale"
+                    FILTER node.index_state != "stale" AND (
+                        node.repository_key IN repositories[*]._key OR
+                        (node.repository_key == null AND node.repository IN repositories[*].name)
+                    )
                     RETURN node._key
             )
             LET keys = UNION_DISTINCT(direct, defined, owned)
@@ -1513,16 +1542,20 @@ class ArangoArchitectureRepository:
                 FOR key IN direct
                     LET node = DOCUMENT(@entities, key)
                     FILTER node.entity_type == "Repository" AND node.role == "source"
-                    FILTER !@strict OR LENGTH(
-                        FOR candidate IN @@entities
-                            FILTER candidate.entity_type == "Repository" AND candidate.role == "source"
-                            FILTER candidate.name == node.name
-                            LIMIT 2
-                            RETURN true
-                    ) == 1
                     RETURN node
             )
             LET repository_names = UNIQUE(repositories[*].name)
+            LET legacy_names = (
+                FOR name IN repository_names
+                    FILTER LENGTH(
+                        FOR candidate IN @@entities
+                            FILTER candidate.entity_type == "Repository" AND candidate.role == "source"
+                                AND candidate.name == name
+                            LIMIT 2
+                            RETURN true
+                    ) == 1
+                    RETURN name
+            )
             LET defined = (
                 FOR repo IN repositories
                     FOR node, edge IN 1..1 OUTBOUND repo._id @@edges
@@ -1532,7 +1565,10 @@ class ArangoArchitectureRepository:
             )
             LET owned = (
                 FOR node IN @@entities
-                    FILTER node.repository IN repository_names AND node.index_state != "stale"
+                    FILTER node.index_state != "stale" AND (
+                        node.repository_key IN repositories[*]._key OR
+                        (node.repository_key == null AND node.repository IN legacy_names)
+                    )
                     FILTER !@strict OR node.entity_type != "Project"
                     RETURN node._key
             )
@@ -1612,7 +1648,7 @@ class ArangoArchitectureRepository:
                     SORT node.entity_type, LOWER(node.name), key
                     RETURN MERGE(KEEP(node, [
                         "name", "entity_type", "source_path", "memory_key",
-                        "repository", "role", "qualified_name", "status",
+                        "repository", "repository_key", "role", "qualified_name", "status",
                         "started_at", "ended_at", "position"
                     ]), {
                         key, decision_links, parent_key, created_at: task_created_at,

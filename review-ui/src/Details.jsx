@@ -44,6 +44,16 @@ function Citations({ evidence }) {
   );
 }
 
+export function CodeEvidenceLink({ location, label = 'Source at' }) {
+  if (!location) return null;
+  const { revision, path, url } = location;
+  const title = `${label} ${revision.commit.slice(0, 12)}`;
+  const safeUrl = citationUrl(url);
+  return safeUrl
+    ? <a href={safeUrl} target="_blank" rel="noreferrer" title={path || revision.commit}>{title}</a>
+    : <span title={revision.commit}>{title}</span>;
+}
+
 export function Evidence({ history, source, sourceId }) {
   return (
     <section className="evidence">

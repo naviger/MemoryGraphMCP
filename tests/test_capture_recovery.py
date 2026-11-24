@@ -670,6 +670,60 @@ def test_arango_recovery_and_workspace():
     legacy = next(node for node in workspace.entities("alpha") if node.key == first.key)
     assert datetime.fromisoformat(legacy.created_at) == first.created_at
 
+    from app.domain.architecture import ArchitectureTrace, CodeRevision
+    from app.services.python_architecture import PythonArchitectureIndexer
+
+    indexer = PythonArchitectureIndexer()
+    source = graph.read_entity("repo")
+    first_revision = CodeRevision(repository_key=source.key, commit="a" * 40, github_repository="example/old")
+    second_revision = CodeRevision(repository_key=source.key, commit="b" * 40, github_repository="example/new")
+    module = "app/assets.py"
+    # Recreate the rows a name-keyed pre-upgrade index would have persisted.
+    old_index = indexer.build(source.name, {module: "class AssetService: pass", "gone.py": "pass"},
+                              root=source.model_copy(update={"index_namespace": source.name}))
+    graph.replace_index(old_index)
+    with graph._transaction() as tx:
+        list(tx.aql.execute(
+            "FOR node IN @@nodes FILTER node.repository_key == 'repo' "
+            'UPDATE node WITH {repository_key: null, index_namespace: null} IN @@nodes',
+            bind_vars={"@nodes": graph._entities},
+        ))
+        list(tx.aql.execute(
+            "FOR edge IN @@edges FILTER edge.index_repository_key == 'repo' "
+            'UPDATE edge WITH {index_repository_key: null} IN @@edges',
+            bind_vars={"@edges": graph._edges},
+        ))
+    target = next(item for item in old_index.entities if item.entity_type == "Class")
+    source = graph.read_entity("repo")
+    graph.replace_index(indexer.build(source.name, {module: "class AssetService: pass"},
+                                      root=source, revision=first_revision))
+    assert graph.read_entity(target.key).repository_key == source.key
+    stale = next(item for item in old_index.entities if item.source_path == "gone.py")
+    assert graph.read_entity(stale.key).index_state == "stale"
+    graph.put_link(ArchitectureLink(
+        source_key="service", target_key=target.key, relationship_type="references", source="test",
+    ))
+
+    # An unrelated repository can use the same display name after the rename.
+    other = Repository(key="other-repo", name="New name", role="source")
+    graph.put_entity(other)
+    graph.put_link(ArchitectureLink(source_key="beta", target_key=other.key,
+                                    relationship_type="defines", source="test"))
+    graph.replace_index(indexer.build(other.name, {module: "class Other: pass"}, root=other))
+    source = graph.read_entity("repo")
+    graph.replace_index(indexer.build("New name", {module: "\nclass AssetService: pass"},
+                                      root=source, revision=second_revision))
+    assert graph.read_entity("repo").name == "New name"
+    assert graph.read_entity(target.key).code_location().url.endswith(f"/{'b' * 40}/{module}#L2")
+    paths = graph.trace(ArchitectureTrace(key="service", relationship_types=["references"]))
+    pinned, = next(path for path in paths if path.entity.key == target.key).relationships[0].cited_code
+    assert pinned.url.endswith(f"/{'a' * 40}/{module}#L1")
+    static = graph.trace(ArchitectureTrace(key=source.key, relationship_types=["defines"]))
+    assert static and all(path.relationships[0].source_revision == second_revision for path in static)
+    assert target.key in {entry.key for entry in graph.project_scope("alpha", strict_scope=True).entities}
+    assert target.key not in {entry.key for entry in graph.project_scope("beta", strict_scope=True).entities}
+
+
 
 def test_workspace_routes_require_project_and_writer_grants():
     from types import SimpleNamespace

@@ -3,6 +3,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, StringConstraints
 
+from app.domain.architecture import CodeLocation
 from app.domain.models import ADRConflict, MemoryKey
 
 
@@ -16,6 +17,7 @@ class AnswerCitation(BaseModel):
     key: str
     title: str
     destination: Literal["records", "entities"] = "records"
+    code_location: CodeLocation | None = None
 
 
 class AnswerFinding(BaseModel):

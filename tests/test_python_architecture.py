@@ -112,3 +112,49 @@ dynamic = ConstraintInput(key=identifier, name="Dynamic", rule=get_rule(), scope
     assert rule.enforcement_status == "proposed"
     assert rule.metadata["declared_enforcement_status"] == "enforced"
     assert any(link.target_key == rule.key and link.relationship_type == "defines" for link in index.links)
+
+
+def test_revision_links_stay_pinned_after_repository_rename():
+    from app.domain.architecture import CodeRevision
+
+    indexer = PythonArchitectureIndexer()
+    root = Repository(key="repo-id", name="Old name", role="source")
+    path = "src/my module.py"
+    before = CodeRevision(repository_key=root.key, commit="a" * 40, github_repository="org/old")
+    after = CodeRevision(repository_key=root.key, commit="b" * 40, github_repository="org/new")
+    first = indexer.build(root.name, {path: "def run(): pass\n"}, root=root, revision=before)
+    renamed = root.model_copy(update={"name": "New name"})
+    second = indexer.build(renamed.name, {path: "\ndef run(): pass\n"}, root=renamed, revision=after)
+    original = next(node for node in first.entities if isinstance(node, Function))
+    current = next(node for node in second.entities if isinstance(node, Function))
+    assert current.key == original.key
+    assert original.source_revision.url(path, 1) == f"https://github.com/org/old/blob/{'a' * 40}/src/my%20module.py#L1"
+    assert current.source_revision.url(path, 2) == f"https://github.com/org/new/blob/{'b' * 40}/src/my%20module.py#L2"
+    assert all(link.source_revision == before for link in first.links)
+    assert all(link.source_revision == after for link in second.links)
+
+
+
+def test_git_index_reads_committed_blobs_even_after_worktree_changes(tmp_path):
+    from subprocess import check_output
+
+    from scripts.index_architecture import load_commit_sources
+
+    def git(*args):
+        return check_output(["git", "-C", str(tmp_path), *args]).decode().strip()
+
+    git("init", "-q")
+    path = tmp_path / "api.py"
+    path.write_text("def first(): pass\n")
+    git("add", "api.py")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+        "commit", "-qm", "Initial snapshot")
+    first = git("rev-parse", "HEAD")
+    path.write_text("def second(): pass\n")
+    git("add", "api.py")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+        "commit", "-qm", "Second snapshot")
+    path.write_text("def uncommitted(): pass\n")
+    (tmp_path / "untracked.py").write_text("pass\n")
+    assert load_commit_sources(tmp_path, first) == (first, {"api.py": "def first(): pass\n"})
+    assert load_commit_sources(tmp_path, "HEAD")[1] == {"api.py": "def second(): pass\n"}

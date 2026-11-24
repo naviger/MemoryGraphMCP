@@ -3,6 +3,7 @@ from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, BaseModel, Field, StringConstraints
 
+from app.domain.architecture import CodeLocation
 from app.domain.models import MemoryKey
 
 RetrievalMethod = Literal["Lexical", "Semantic", "Hybrid", "Graph", "ContextPackage"]
@@ -32,6 +33,7 @@ class ContextItem(BaseModel):
 class ContextEvidence(BaseModel):
     key: MemoryKey
     citation: str
+    code_location: CodeLocation | None = None
 
 
 class ContextConflict(BaseModel):

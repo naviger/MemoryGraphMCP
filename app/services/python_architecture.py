@@ -12,6 +12,7 @@ from app.domain.architecture import (
     ArchitectureIndex,
     ArchitectureLink,
     Class,
+    CodeRevision,
     Constraint,
     DatabaseCollection,
     Function,
@@ -67,13 +68,18 @@ class _PythonFile:
 
 
 class _Index:
-    def __init__(self, repository: str) -> None:
-        self.repository = repository
+    def __init__(self, namespace: str, repository_key: str, revision: CodeRevision | None) -> None:
+        self.namespace = namespace
+        self.repository_key = repository_key
+        self.revision = revision
         self.entities: dict[str, ArchitectureEntity] = {}
         self.links: dict[tuple[str, str, RelationshipType], ArchitectureLink] = {}
 
     def add(self, entity: ArchitectureEntity) -> str:
-        self.entities[entity.key] = entity
+        self.entities[entity.key] = entity.model_copy(update={
+            "repository_key": self.repository_key,
+            "source_revision": self.revision,
+        })
         return entity.key
 
     def link(
@@ -92,6 +98,7 @@ class _Index:
                     relationship_type=kind,
                     confidence=confidence,
                     source="static-analysis",
+                    source_revision=self.revision,
                 ),
             )
 
@@ -108,7 +115,7 @@ class _Declarations(ast.NodeVisitor):
         qualified_name = ".".join(filter(None, (self.file.module_name, *parents)))
         shared = {
             "key": architecture_key(
-                self.index.repository,
+                self.index.namespace,
                 self.file.path,
                 type(node).__name__.replace("Async", ""),
                 *parents,
@@ -236,7 +243,7 @@ class _Declarations(ast.NodeVisitor):
             return
         try:
             entity = Constraint(
-                key=architecture_key(self.index.repository, self.file.path, "constraint", fields["key"]),
+                key=architecture_key(self.index.namespace, self.file.path, "constraint", fields["key"]),
                 name=fields["name"], rule=fields["rule"], scope=fields["scope"],
                 authority=fields["authority"], enforcement_status="proposed",
                 source_path=self.file.path,
@@ -260,7 +267,7 @@ class _Declarations(ast.NodeVisitor):
                 continue
             collection = self.index.add(
                 DatabaseCollection(
-                    key=architecture_key(self.index.repository, "database-collection", name),
+                    key=architecture_key(self.index.namespace, "database-collection", name),
                     name=name,
                     metadata={"inferred_from": f"{self.file.path}:{line}"},
                 )
@@ -326,7 +333,8 @@ class PythonArchitectureIndexer:
     """Parse a repository snapshot without importing or executing its code."""
 
     def build(
-        self, repository: str, sources: dict[str, str], *, root: Repository | None = None
+        self, repository: str, sources: dict[str, str], *, root: Repository | None = None,
+        revision: CodeRevision | None = None,
     ) -> ArchitectureIndex:
         repository = repository.strip()
         if not repository or len(repository) > 500:
@@ -341,14 +349,16 @@ class PythonArchitectureIndexer:
                 f"Indexing supports up to {MAX_FILES} files and {MAX_SOURCE_BYTES} source bytes"
             )
 
-        index = _Index(repository)
-        repository_key = index.add(
-            root or Repository(
-                key=architecture_key("python-repository", repository),
-                name=repository,
-                role="source",
-            )
+        root = root or Repository(
+            key=architecture_key("python-repository", repository), name=repository, role="source",
         )
+        if revision and revision.repository_key != root.key:
+            raise ArchitectureGraphError("Revision belongs to a different repository")
+        namespace = root.index_namespace or (root.repository if root.index_state else None) or root.key
+        index = _Index(namespace, root.key, revision)
+        repository_key = index.add(root.model_copy(update={
+            "name": repository, "index_namespace": namespace,
+        }))
         files: list[_PythonFile] = []
         for relative, source in sorted(sources.items()):
             path = PurePosixPath(relative)
@@ -370,7 +380,7 @@ class PythonArchitectureIndexer:
                 ) from exc
             file_key = index.add(
                 SourceFile(
-                    key=architecture_key(repository, "file", relative),
+                    key=architecture_key(namespace, "file", relative),
                     name=path.name,
                     source_path=relative,
                 )
@@ -379,7 +389,7 @@ class PythonArchitectureIndexer:
             name = _module_name(path)
             module_key = index.add(
                 Module(
-                    key=architecture_key(repository, "module", relative),
+                    key=architecture_key(namespace, "module", relative),
                     name=name,
                     qualified_name=name,
                     description=ast.get_docstring(tree) or "",
@@ -393,7 +403,7 @@ class PythonArchitectureIndexer:
             if path.name.startswith("test_") or path.name.endswith("_test.py"):
                 suite = index.add(
                     TestSuite(
-                        key=architecture_key(repository, "tests", relative),
+                        key=architecture_key(namespace, "tests", relative),
                         name=name,
                         source_path=relative,
                     )
@@ -403,6 +413,9 @@ class PythonArchitectureIndexer:
         self._connect(index, files)
         return ArchitectureIndex(
             repository=repository,
+            repository_key=repository_key,
+            namespace=namespace,
+            revision=revision,
             entities=list(index.entities.values()),
             links=list(index.links.values()),
         )
@@ -425,7 +438,7 @@ class PythonArchitectureIndexer:
                 if target is None:
                     target = index.add(
                         Module(
-                            key=architecture_key(index.repository, "external-module", imported),
+                            key=architecture_key(index.namespace, "external-module", imported),
                             name=imported,
                             qualified_name=imported,
                             metadata={"external": True},

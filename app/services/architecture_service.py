@@ -9,6 +9,7 @@ from app.domain.architecture import (
     ArchitectureADR,
     ArchitectureEntity,
     ArchitectureIndexResult,
+    CodeRevision,
     ArchitectureSearch,
     Constraint,
     ConstraintInput,
@@ -124,29 +125,43 @@ class ArchitectureService:
             self.repository.add_conversation_summary, conversation
         )
 
-    async def index_python(self, repository: str, files: dict[str, str]) -> ArchitectureIndexResult:
-        return await anyio.to_thread.run_sync(self._index_python, repository, files)
-
-    def _index_python(self, repository: str, files: dict[str, str]) -> ArchitectureIndexResult:
-        name = repository.strip()
-        candidates = self.repository.search(
-            ArchitectureSearch(query=name, entity_type="Repository", limit=100, include_stale=True)
+    async def index_python(
+        self, repository: str, files: dict[str, str], *,
+        repository_key: str | None = None, revision: CodeRevision | None = None,
+    ) -> ArchitectureIndexResult:
+        return await anyio.to_thread.run_sync(
+            self._index_python, repository, files, repository_key, revision,
         )
-        roots = [
-            node for node in candidates
-            if isinstance(node, Repository) and node.role == "source" and node.name == name
-        ]
-        if len(roots) > 1:
-            raise ArchitectureGraphError(f"Multiple source repositories named '{name}'")
-        root = roots[0] if roots else None
-        index = self.indexer.build(repository, files, root=root)
+
+    def _index_python(
+        self, repository: str, files: dict[str, str],
+        repository_key: str | None, revision: CodeRevision | None,
+    ) -> ArchitectureIndexResult:
+        name = repository.strip()
+        if repository_key is not None:
+            root = self.repository.read_entity(repository_key)
+            if not isinstance(root, Repository) or root.role != "source":
+                raise ArchitectureGraphError("Source repository was not found")
+        else:
+            candidates = self.repository.search(
+                ArchitectureSearch(query=name, entity_type="Repository", limit=100, include_stale=True)
+            )
+            roots = [
+                node for node in candidates
+                if isinstance(node, Repository) and node.role == "source" and node.name == name
+            ]
+            if len(roots) > 1:
+                raise ArchitectureGraphError(f"Multiple source repositories named '{name}'")
+            root = roots[0] if roots else None
+        index = self.indexer.build(name, files, root=root, revision=revision)
         count = self.repository.replace_index(index)
         return ArchitectureIndexResult(
             repository=index.repository,
-            repository_key=root.key if root else architecture_key("python-repository", name),
+            repository_key=index.repository_key,
             files_indexed=len(files),
             entities_indexed=len(index.entities),
             relationships_indexed=count,
+            source_revision=index.revision,
         )
 
     async def import_memory(self, key: str) -> ArchitectureEntity:

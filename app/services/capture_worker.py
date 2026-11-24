@@ -14,6 +14,7 @@ import structlog
 
 from app.config.settings import Settings
 from app.domain.architecture import (
+    CodeRevision,
     Constraint,
     ConversationSummary,
     Repository,
@@ -174,7 +175,11 @@ class CaptureWorker:
         index_key = architecture_key("capture", self.project, "index", event_id)
         if self.graph.read_entity(index_key) is not None:
             return
-        index = PythonArchitectureIndexer().build(root.name, sources, root=root)
+        revision = CodeRevision(
+            repository_key=root.key, commit=commit.sha,
+            github_repository=self.settings.capture_github_repository or None,
+        )
+        index = PythonArchitectureIndexer().build(root.name, sources, root=root, revision=revision)
         count = self.graph.replace_index(index, capture_order=order.astimezone(UTC).isoformat(timespec="microseconds"))
         if count == 0 and index.links:
             return
@@ -202,7 +207,10 @@ class CaptureWorker:
                 related = [*row["affected_entity_keys"], *[
                     node.key for node in self.graph.project_scope(self.project).entities
                     if node.entity_type == "TestSuite" and node.source_path in paths
-                    and repository and node.repository == repository.name
+                    and repository and (
+                        node.repository_key == repository.key if node.repository_key
+                        else node.repository == repository.name
+                    )
                 ]]
             else:
                 source = "task"

@@ -259,7 +259,7 @@ class ReviewDetailService:
         if query:
             by_key = {node.key: node for node in scope.entities}
             files = {
-                (node.repository, node.source_path): node.key for node in scope.entities
+                (node.repository_key or node.repository, node.source_path): node.key for node in scope.entities
                 if node.entity_type == "SourceFile" and node.source_path
             }
             repositories = {
@@ -268,8 +268,8 @@ class ReviewDetailService:
             }
             for key in tuple(selected):
                 node = by_key[key]
-                file_key = files.get((node.repository, node.source_path))
-                repository_key = repositories.get(node.repository)
+                file_key = files.get((node.repository_key or node.repository, node.source_path))
+                repository_key = node.repository_key or repositories.get(node.repository)
                 if file_key:
                     selected.add(file_key)
                 if repository_key:
@@ -409,6 +409,11 @@ class ReviewDetailService:
                         source_path=entity.source_path,
                         index_state=entity.index_state,
                         relationships=[step.relationship_type for step in path.relationships],
+                        code_location=entity.code_location(),
+                        cited_code=[
+                            location for step in path.relationships for location in step.cited_code
+                            if location.entity_key == entity.key
+                        ],
                     )
                     identity = (
                         ("records", memory_key) if memory_key else (link.destination, link.key)
@@ -420,6 +425,7 @@ class ReviewDetailService:
         return ReviewEntityDetail(
             record=projected,
             entity=nodes[0] if nodes else None,
+            code_location=nodes[0].code_location() if nodes else None,
             embedding=self._embedding_diagnostics(document) if document else None,
             links=sorted(
                 links.values(), key=lambda link: (link.entity_type, link.name.casefold(), link.key)
