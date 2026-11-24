@@ -659,6 +659,10 @@ def test_arango_recovery_and_workspace():
     with pytest.raises(ArchitectureGraphError, match="read-only"):
         workspace.task_update("alpha", first.key, TaskUpdate(status="open"), "writer")
     assert graph.read_entity(first.key) == finished
+    summary = next(node for node in workspace.entities("alpha") if node.key == first.key)
+    assert datetime.fromisoformat(summary.started_at) == finished.started_at
+    assert datetime.fromisoformat(summary.ended_at) == finished.ended_at
+    assert summary.position == finished.position
 
 
 def test_workspace_routes_require_project_and_writer_grants():

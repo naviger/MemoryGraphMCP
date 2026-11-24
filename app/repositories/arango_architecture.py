@@ -1593,7 +1593,8 @@ class ArangoArchitectureRepository:
                     SORT node.entity_type, LOWER(node.name), key
                     RETURN MERGE(KEEP(node, [
                         "name", "entity_type", "source_path", "memory_key",
-                        "repository", "role", "qualified_name", "status"
+                        "repository", "role", "qualified_name", "status",
+                        "started_at", "ended_at", "position"
                     ]), {
                         key, decision_links, parent_key,
                         reason: key IN direct ? "Linked to project"
