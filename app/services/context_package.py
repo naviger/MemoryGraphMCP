@@ -7,6 +7,7 @@ import anyio
 
 from app.domain.architecture import ArchitectureSearch, ArchitectureTrace, Project
 from app.domain.context_usage import (
+    CheckedContextAnswer,
     ContextClaim,
     ContextClaimCheck,
     ContextConflict,
@@ -135,7 +136,7 @@ def relevant_excerpt(text: str, terms: set[str], title: str, *, prefer_link: boo
 
 def check_cited_claims(package: ContextPackage, claims: list[ContextClaim]) -> list[ContextClaimCheck]:
     excerpts = {
-        f"{item.destination}:{item.key}": item.text
+        item.citation_id: item.text
         for group in _GROUPS.values() for item in getattr(package, group)
     }
     for conflict in package.conflicts:
@@ -157,12 +158,41 @@ def check_cited_claims(package: ContextPackage, claims: list[ContextClaim]) -> l
     return [
         ContextClaimCheck(
             claim=claim,
-            status="unknown_citation" if set(claim.citations) - excerpts.keys()
+            status="missing_citation" if not claim.citations
+            else "unknown_citation" if set(claim.citations) - excerpts.keys()
             else "supported" if all(supports(excerpts[cite], quote(claim.text)) for cite in claim.citations)
             else "unsupported_text",
         )
         for claim in claims
     ]
+
+
+def finalize_context_answer(
+    package: ContextPackage, claims: list[ContextClaim],
+) -> CheckedContextAnswer:
+    """Separate verified excerpts from candidate claims. Resolve only unique bare keys."""
+    groups = (getattr(package, group) for group in _GROUPS.values())
+    aliases: dict[str, set[str]] = {}
+    for items in groups:
+        for item in items:
+            aliases.setdefault(item.key, set()).add(item.citation_id)
+
+    def canonical_id(citation: str) -> str:
+        matches = aliases.get(citation, set())
+        return next(iter(matches)) if len(matches) == 1 else citation
+
+    canonical = [
+        ContextClaim(
+            text=claim.text,
+            citations=list(dict.fromkeys(canonical_id(cite) for cite in claim.citations)),
+        )
+        for claim in claims
+    ]
+    checks = check_cited_claims(package, canonical)
+    return CheckedContextAnswer(
+        findings=[check.claim for check in checks if check.status == "supported"],
+        flagged_claims=[check for check in checks if check.status != "supported"],
+    )
 
 
 class ContextPackageService:
@@ -176,6 +206,12 @@ class ContextPackageService:
     async def check_claims(self, query: ContextQuery, claims: list[ContextClaim]) -> list[ContextClaimCheck]:
         package, _, _ = await self.build(query)
         return check_cited_claims(package, claims)
+
+    async def finalize_answer(
+        self, query: ContextQuery, claims: list[ContextClaim],
+    ) -> CheckedContextAnswer:
+        package, _, _ = await self.build(query)
+        return finalize_context_answer(package, claims)
 
     def _build(self, query: ContextQuery) -> BuiltContext:
         day = query.as_of or datetime.now(UTC).date()

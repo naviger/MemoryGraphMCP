@@ -56,6 +56,13 @@ def build_mcp_server(
                 if architecture_service is not None else ""
             )
             + (
+                "For graph-assisted answers, use the context item citation_id and confirm "
+                "exact excerpt findings with finalize_context_answer before returning them. "
+                "Display flagged claims as evidence gaps. "
+                if architecture_service is not None and hasattr(architecture_service.repository, "record_usage")
+                else ""
+            )
+            + (
                 "Use as_of for time-scoped search and cite relevant records. "
                 "Check ADR conflicts before treating a decision as authoritative. "
                 "Report uncertainty when records are undated, stale, or conflicting. "

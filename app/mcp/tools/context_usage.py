@@ -8,6 +8,7 @@ from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware import Middleware
 
 from app.domain.context_usage import (
+    CheckedContextAnswer,
     ContextClaim,
     ContextClaimCheck,
     ContextQuery,
@@ -95,6 +96,20 @@ def register_context_usage(mcp: FastMCP, service: ContextPackageService, usage: 
         """Rebuild scoped context and check exact excerpt sentences and destination:key citations."""
         try:
             return await service.check_claims(query, claims)
+        except ArchitectureGraphError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @mcp.tool
+    async def finalize_context_answer(
+        query: ContextQuery, claims: Annotated[list[ContextClaim], Field(max_length=20)],
+    ) -> CheckedContextAnswer:
+        """Before returning an assisted answer, separate verified findings from flagged claims.
+
+        Use citation_id from build_context_package and quote exact excerpt sentences.
+        Flagged claims are unverified and must not be presented as findings.
+        """
+        try:
+            return await service.finalize_answer(query, claims)
         except ArchitectureGraphError as exc:
             raise ToolError(str(exc)) from exc
 

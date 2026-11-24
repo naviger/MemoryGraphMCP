@@ -566,7 +566,15 @@ and static heuristics, so missing rationale stays unknown.
 
 ### Graph context packages and token usage
 
-After building context, callers can use `validate_context_citations` with the
+For assisted answers, give the model the returned `citation_id` for each item
+and ask for exact excerpt sentences with those IDs. Before displaying the answer,
+call `finalize_context_answer` with the same query and the proposed claims.
+Present only `findings` as verified and show `flagged_claims` as evidence gaps.
+The finalizer normalizes unambiguous bare keys within the package and flags
+missing citations, unknown IDs, and text that does not match. Repository paths
+require their own evidence check.
+
+For strict citation diagnostics, callers can use `validate_context_citations` with the
 same query and proposed **verbatim** claim sentences. Send citation identifiers
 as `records:<key>` or `entities:<key>` from the returned context. The tool rebuilds
 the dated, scoped package and distinguishes unknown citation IDs from text that

@@ -271,6 +271,7 @@ async def test_mcp_context_returns_usage_and_records_outcome(context_service):
         result = await client.call_tool("build_context_package", {"query": {
             "question": "How does AssetService work?", "service": "assets",
         }})
+        assert result.structured_content["relevant_adrs"][0]["citation_id"] == "records:record"
         receipt = result.structured_content["usage"]
         assert receipt["method"] == "ContextPackage" and receipt["entities_supplied"] >= 3
         assert receipt["response_tokens"] is None
@@ -287,6 +288,15 @@ async def test_mcp_context_returns_usage_and_records_outcome(context_service):
         assert [row["status"] for row in validation.structured_content["result"]] == [
             "supported", "unsupported_text",
         ]
+        finalized = await client.call_tool("finalize_context_answer", {
+            "query": {"question": "How does AssetService work?", "service": "assets"},
+            "claims": [{"text": "Use canonical asset IDs.", "citations": ["record"]},
+                       {"text": "Use external IDs.", "citations": ["records:record"]}],
+        })
+        assert finalized.structured_content["findings"] == [
+            {"text": "Use canonical asset IDs.", "citations": ["records:record"]},
+        ]
+        assert finalized.structured_content["flagged_claims"][0]["status"] == "unsupported_text"
 
 
 @pytest.mark.asyncio
@@ -319,6 +329,7 @@ async def test_pilot_jwks_markdown_adr_is_retrieved_and_invented_citations_are_r
     package, _, _ = await context_service.build(query)
     expected = next((item for item in package.relevant_adrs if item.key == record.key), None)
     assert expected is not None
+    assert expected.citation_id == f"records:{record.key}"
     assert "maxsize=1" in expected.text
     claim = "We will cache the Keycloak JWKS response using an LRU cache in the security layer before token verification."
     results = await context_service.check_claims(query, [
@@ -327,6 +338,17 @@ async def test_pilot_jwks_markdown_adr_is_retrieved_and_invented_citations_are_r
         ContextClaim(text="The API fetches JWKS for every token validation.", citations=[f"records:{record.key}"]),
     ])
     assert [entry.status for entry in results] == ["supported", "unknown_citation", "unsupported_text"]
+
+    checked = await context_service.finalize_answer(query, [
+        ContextClaim(text=claim, citations=[expected.citation_id]),
+        ContextClaim(text=claim, citations=["docs/adr/adr-0009-jwks-caching.md"]),
+        ContextClaim(text=claim, citations=["records:adr-0009-jwks-caching.md"]),
+        ContextClaim(text="Sextant fetches new signing keys each time.", citations=[expected.citation_id]),
+    ])
+    assert [item.citations for item in checked.findings] == [[expected.citation_id]]
+    assert [item.status for item in checked.flagged_claims] == [
+        "unknown_citation", "unknown_citation", "unsupported_text",
+    ]
 
     record.content = record.content.replace("Status: Accepted", "Status: Proposed")
     package, _, _ = await context_service.build(query)
@@ -359,6 +381,14 @@ async def test_pilot_review_schedule_includes_cited_expiration_consequence(conte
     ])
     assert [entry.status for entry in results] == ["supported", "unsupported_text"]
 
+    checked = await context_service.finalize_answer(query, [
+        ContextClaim(text="Updating confidence does not move expiration.", citations=[original.key]),
+        ContextClaim(text="Saving a validation updates the expiration date.", citations=[original.key]),
+        ContextClaim(text="A late review changes applicability."),
+    ])
+    assert [item.citations for item in checked.findings] == [[f"records:{original.key}"]]
+    assert [item.status for item in checked.flagged_claims] == ["unsupported_text", "missing_citation"]
+
     future = query.model_copy(update={"question": (
         "Add one focused regression for a last_validated date later than the requested as-of date. "
         "Keep the validation and expiration rules unchanged. Explain the rule the test verifies and cite the evidence."
@@ -368,3 +398,6 @@ async def test_pilot_review_schedule_includes_cited_expiration_consequence(conte
         citations=[f"records:{original.key}"],
     )])
     assert future_results[0].status == "unsupported_text"
+    checked = await context_service.finalize_answer(future, [future_results[0].claim])
+    assert checked.findings == []
+    assert checked.flagged_claims == future_results
