@@ -80,6 +80,11 @@ class DeterministicEmbeddingProvider:
         return [round(value / norm, 8) for value in vector]
 
 
+def _ollama_model_tag(model: str) -> str:
+    # Ollama lists an untagged model under :latest. A registry port is not a tag.
+    return model if ":" in model.rsplit("/", 1)[-1] else f"{model}:latest"
+
+
 class OllamaEmbeddingProvider:
     name = "ollama"
 
@@ -114,8 +119,12 @@ class OllamaEmbeddingProvider:
             }
 
         items = payload.get("models", []) if isinstance(payload, dict) else []
+        configured_tag = _ollama_model_tag(self.model)
         available = any(
-            isinstance(item, dict) and item.get("name") == self.model for item in items
+            isinstance(item, dict)
+            and isinstance(name := item.get("name"), str)
+            and _ollama_model_tag(name) == configured_tag
+            for item in items
         )
         status = "ready" if available else "degraded"
         return {
