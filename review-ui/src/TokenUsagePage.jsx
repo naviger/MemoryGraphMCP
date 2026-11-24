@@ -1,3 +1,4 @@
+import { ContextHelp } from './ContextHelp.jsx';
 import { useEffect, useState } from 'react';
 import { MetricChart, MetricSummary, count, shortDay } from './MetricCharts.jsx';
 import { reviewRequest } from './api.js';
@@ -69,7 +70,9 @@ export function TokenUsagePage({ projectKey, projects = [], token, onUnauthorize
 
   return <>
     <header className="page-heading">
-      <div>{embedded ? <h2>Token usage</h2> : <h1>Token usage</h1>}
+      <div><div className="heading-with-help">
+        {embedded ? <h2>Token usage</h2> : <h1>Token usage</h1>}
+        <ContextHelp topic="token-usage" /></div>
         <p>See how much context requests used and when they saved tokens.</p></div>
       <div className="toolbar">
         {!embedded && <label>Scope <select value={actualScope} onChange={(event) => { if (!selected && projects.length) setSelected(projects[0].key); setScope(event.target.value); }}>

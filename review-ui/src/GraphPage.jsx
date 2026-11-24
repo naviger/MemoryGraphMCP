@@ -1,3 +1,4 @@
+import { ContextHelp } from './ContextHelp.jsx';
 import { ChevronDown } from 'lucide-react';
 import { useEffect, useId, useRef, useState } from 'react';
 import { reviewRequest } from './api.js';
@@ -171,7 +172,7 @@ export function GraphPage({ initialFocus, projectKey, token, navigate, onUnautho
           window.history.back();
         }}>Back to previous view</a>
       </nav>}
-      <header className="page-heading"><div><h1>Graph</h1>
+      <header className="page-heading"><div><div className="heading-with-help"><h1>Graph</h1><ContextHelp topic="graph" /></div>
         <p>Explore architecture nodes and follow their relationships.</p></div></header>
       {modelError && <p role="alert">{modelError}</p>}
       <div className="graph-workspace">

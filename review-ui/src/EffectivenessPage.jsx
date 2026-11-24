@@ -1,3 +1,4 @@
+import { ContextHelp } from './ContextHelp.jsx';
 import { useEffect, useState } from 'react';
 import { MetricChart, MetricSummary, count, shortDay } from './MetricCharts.jsx';
 import { reviewRequest } from './api.js';
@@ -155,7 +156,9 @@ export function EffectivenessPage({ projectKey, projects, token, onUnauthorized,
     ? (scope.repository_name || (index ? 'Comparison period' : 'Primary period')) : scope.project_name;
 
   return <>
-    <header className="page-heading"><div>{embedded ? <h2>Engineering effectiveness</h2> : <h1>Engineering effectiveness</h1>}
+    <header className="page-heading"><div><div className="heading-with-help">
+      {embedded ? <h2>Engineering effectiveness</h2> : <h1>Engineering effectiveness</h1>}
+      <ContextHelp topic="effectiveness" /></div>
       <p>Compare delivery outcomes, architectural coverage, and estimated cost avoidance.</p></div></header>
     <form className="detail effectiveness-filters" onSubmit={(event) => {
       event.preventDefault();

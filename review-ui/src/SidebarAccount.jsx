@@ -1,3 +1,4 @@
+import { ContextHelp } from './ContextHelp.jsx';
 import { ChevronUp, LogOut, ShieldCheck, UserRound, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
@@ -125,7 +126,7 @@ function AccountDialog({ name, session, avatar, saveAvatar, onClose }) {
   return <dialog className="account-dialog" ref={dialog} aria-labelledby="account-title"
     onCancel={(event) => { event.preventDefault(); close(); }}>
     <header className="account-dialog-heading">
-      <h2 id="account-title">Account details</h2>
+      <div className="heading-with-help"><h2 id="account-title">Account details</h2><ContextHelp topic="account" beforeNavigate={close} /></div>
       <button type="button" className="button icon outlined" aria-label="Close account details" onClick={close}>
         <X size={18} aria-hidden="true" />
       </button>

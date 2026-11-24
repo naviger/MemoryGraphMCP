@@ -1,3 +1,4 @@
+import { ContextHelp } from './ContextHelp.jsx';
 import { InspectorView, PreviewLink } from './RecordInspector.jsx';
 import { Search } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
@@ -50,7 +51,7 @@ export function SearchMemoryPage({ token, navigate, onUnauthorized, projectKey, 
     <InspectorView token={token} navigate={navigate} onUnauthorized={onUnauthorized}>
       <section className="memory-search-page" aria-labelledby="memory-search-heading">
         <header className="page-heading">
-          <div><h1 id="memory-search-heading">Search Memory</h1>
+          <div><div className="heading-with-help"><h1 id="memory-search-heading">Search Memory</h1><ContextHelp topic="search" /></div>
             <p>{projectKey ? `Searching ${projectName || "the selected project"}.` : "Searching all projects."}</p></div>
         </header>
         <form className="detail ask-form" onSubmit={search}>

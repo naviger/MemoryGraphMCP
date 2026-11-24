@@ -575,49 +575,11 @@ across projects. Charts summarize daily token activity, weekly delivery,
 graph health, and comparisons. Expand the detailed measurements to inspect
 the underlying numbers and methodology. Insights are calculated directly
 from those numbers and describe missing evidence and negative savings.
-### Project permissions and ArangoDB provisioning
 
-Docker Compose provisions a dedicated `memorygraphmcp_app` identity. Supply
-`MGMCP_ARANGO_APP_PASSWORD` with a value distinct from `ARANGO_ROOT_PASSWORD`.
-The one-shot `arango-provision` service creates storage and installs the grants.
-The API receives only its runtime credentials. The runtime account can access
-the application database and read/write the configured MemoryGraphMCP
-collections. Provisioning explicitly denies access to existing unrelated
-user collections and grants no database administration. ArangoDB may give
-the account inherited read access to collections created later, so keep the
-database dedicated to this application and rerun provisioning after storage
-changes. Re-run the
-provisioning service when rotating the runtime credential or changing the
-application's storage layout, then recreate the API container.
+### Help center
 
-Project authorization defaults to on in Compose. For a direct installation
-serving users with different access rights, set
-`MGMCP_PROJECT_AUTHORIZATION_REQUIRED=true`. This requires
-authentication and a signed access-token claim named `mgmcp_projects` by default
-(configurable with `MGMCP_PROJECT_GRANTS_CLAIM`). Map the claim in your trusted
-identity provider as a JSON object keyed by project key, for example:
-
-```json
-{"example-project-key": "write", "reference-project-key": "read"}
-```
-
-A project write grant also requires the application writer role. An application
-admin is an installation-wide operator with access to all projects.
-Authenticated non-admins with no grants get no project data. Existing records
-are readable from an authorized project through its explicit project link or
-project key metadata. A repository name in document metadata alone does not
-authorize access. Attach legacy records explicitly before migrating.
-
-Scoped writers can revalidate or resolve authorized records and use project
-workflows. Changing a shared record requires write access to each owning
-project. Corpus-wide creation and operations that can change graph ownership,
-including generic links and repository indexing, are reserved for installation
-admins in this mode. Use the existing dedicated tracker principal with a write
-grant for its configured project. CI continues using its separate project- and
-repository-bound credential. Keep unscoped compatibility mode for trusted
-single-workspace installations only.
-
-In this mode MCP uses stateless HTTP so each tool call is authorized with its
-current bearer token. Supply `X-MemoryGraph-Session` to correlate token telemetry
-across calls. Background capture and CI remain bound to their configured
-project and repository.
+Open **Help** at the bottom of the sidebar to search or browse task guides.
+Each guide has its own URL and links to related topics. Use the circled
+question mark beside a screen or project tab heading for a short explanation,
+then choose **More** to open the matching guide. The graph metamodel guide
+shows the node and relationship types supported by the running API.
