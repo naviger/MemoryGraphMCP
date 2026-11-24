@@ -8,7 +8,9 @@ small test-writing task. Each case runs twice, for eight trials total.
 
 1. Generate the trial prompts with the plan command below. Give the agent only the
    selected case from that output. Keep the manifest's expected claims and citations
-   with the grader.
+   with the grader. Include the shared `delivery_guidance` in both conditions.
+   It states the pinned behavior and test runtime assumptions. Record its use
+   in the trial setup because it changes comparability with earlier delivery runs.
 2. Use fresh, disposable worktrees at the case's exact base commit and fresh agent
    sessions. Keep the model version, settings, tools apart from project memory,
    instructions, time budget, and check commands the same within each pair. Use a
@@ -17,7 +19,17 @@ small test-writing task. Each case runs twice, for eight trials total.
    code search. In the **memorygraph** condition, allow the same repository access
    plus published project guidance, graph lookup, and cited retrieval. Use the
    case's as-of date. Verify code citations against the pinned checkout when
-   the graph's current index has a different or unknown revision.
+   the graph's current index has a different or unknown revision. For an
+   assisted answer, pass the `prepare_context_excerpts` results to the model and
+   ask it to select supporting IDs. Call `finalize_context_excerpts` with the
+   same query and returned context ID. When the case configures
+   `source_excerpts`, use `pinned_source_excerpts` to offer separate repository
+   evidence IDs. The overdue-review case uses the pinned revalidation
+   rules to distinguish review deadlines from applicability dates. Resolve
+   selected repository IDs against the same Git commit
+   and record the path and line range. Send graph IDs through the graph
+   citation checker. Save the raw selections, verified findings, and flagged gaps.
+   Measure finalization separately from model request time.
 4. Save each answer or patch and its check output. For delivery, inspect the
    diff against the requested behavior and look for vacuous tests. Record
    every listed check, including failures or checks that could not run.

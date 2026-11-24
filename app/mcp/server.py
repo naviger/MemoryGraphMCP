@@ -56,6 +56,13 @@ def build_mcp_server(
                 if architecture_service is not None else ""
             )
             + (
+                "For graph-assisted answers, use prepare_context_excerpts and select supporting "
+                "excerpt IDs. Call finalize_context_excerpts with the context ID and same query before returning "
+                "findings. Display flagged claims and unknown selections as evidence gaps. "
+                if architecture_service is not None and hasattr(architecture_service.repository, "record_usage")
+                else ""
+            )
+            + (
                 "Use as_of for time-scoped search and cite relevant records. "
                 "Check ADR conflicts before treating a decision as authoritative. "
                 "Report uncertainty when records are undated, stale, or conflicting. "

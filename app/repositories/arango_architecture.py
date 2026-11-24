@@ -1619,9 +1619,11 @@ class ArangoArchitectureRepository:
             bind_vars={"@entities": self._entities},
         ))
 
-    def project_scope(self, key: str, *, strict_scope: bool = False, database: TransactionDatabase | None = None) -> ProjectScope:
-        rows = (self._database() if database is None else database).aql.execute(
-            """
+    def project_scope(
+        self, key: str, *, strict_scope: bool = False, include_details: bool = True,
+        database: TransactionDatabase | None = None,
+    ) -> ProjectScope:
+        query = """
             WITH @@entities
             LET direct = (
                 FOR node, edge IN 1..1 ANY @seed @@edges
@@ -1673,6 +1675,13 @@ class ArangoArchitectureRepository:
                     )
                     RETURN key
             )
+        """
+        bind_vars = {
+            "@entities": self._entities, "strict": strict_scope, "@edges": self._edges,
+            "entities": self._entities, "seed": f"{self._entities}/{key}", "key": key,
+        }
+        if include_details:
+            query += """
             LET project_keys = APPEND(scoped, @key)
             LET record_dates = (
                 FOR key IN project_keys
@@ -1769,13 +1778,20 @@ class ArangoArchitectureRepository:
             RETURN {entities, dependencies, repository_names,
                     earliest_record: MIN(dates), latest_record: MAX(dates),
                     last_index_date: MAX(index_dates)}
-            """,
-            bind_vars={
-                "@entities": self._entities, "strict": strict_scope, "@edges": self._edges,
-                "entities": self._entities, "seed": f"{self._entities}/{key}", "key": key,
-                "static": _STATIC_SOURCE,
-            },
-        )
+            """
+            bind_vars["static"] = _STATIC_SOURCE
+        else:
+            query += """
+            LET entities = (
+                FOR key IN scoped
+                    LET node = DOCUMENT(@entities, key)
+                    SORT node.entity_type, LOWER(node.name), key
+                    RETURN MERGE(KEEP(node, ["name", "entity_type", "memory_key", "repository_key"]),
+                                 {key, reason: "Project scope"})
+            )
+            RETURN {entities, dependencies: [], repository_names}
+            """
+        rows = (self._database() if database is None else database).aql.execute(query, bind_vars=bind_vars)
         return ProjectScope.model_validate(next(iter(rows)))
 
     def count_by_entity_type(

@@ -43,20 +43,23 @@ class ScopedRepositories:
         self.memory = ScopedMemory(memory, self)
         self.graph = ScopedGraph(self.graph_store, self)
 
-    def project_scope(self, access, project):
-        if project not in access.cache:
+    def project_scope(self, access, project, *, include_details=False):
+        cache_key = (project, include_details)
+        if cache_key not in access.cache:
             node = self.graph_store.read_entity(project)
             if not isinstance(node, Project):
-                access.cache[project] = (None, set(), set())
+                access.cache[cache_key] = (None, set(), set())
             else:
-                scope = self.graph_store.project_scope(project, strict_scope=True)
+                scope = self.graph_store.project_scope(
+                    project, strict_scope=True, include_details=include_details,
+                )
                 # Only actual ownership and direct project links authorize reads.
                 docs = self.memory_store.project_documents(
                     project, [], [item.memory_key for item in scope.entities if item.memory_key], "", None,
                 )
-                access.cache[project] = (scope, {project, *(item.key for item in scope.entities)},
-                                         {item.key for item in docs})
-        return access.cache[project]
+                access.cache[cache_key] = (scope, {project, *(item.key for item in scope.entities)},
+                                           {item.key for item in docs})
+        return access.cache[cache_key]
 
     def keys(self, access, index):
         return set().union(*(self.project_scope(access, project)[index] for project in access.grants))
@@ -207,7 +210,9 @@ class ScopedGraph(_Scoped):
         if name == "project_scope":
             project = args[0]
             access.require(project)
-            scope, keys, docs = auth.project_scope(access, project)
+            scope, keys, docs = auth.project_scope(
+                access, project, include_details=kwargs.get("include_details", True),
+            )
             if scope is None:
                 raise ProjectAccessDenied()
             return scope.model_copy(update={"dependencies": [], "entities": [

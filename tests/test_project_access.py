@@ -31,7 +31,7 @@ def test_project_grants_require_authenticated_roles():
 
 @pytest.fixture
 def scoped():
-    def scope(project, *, strict_scope):
+    def scope(project, *, strict_scope, include_details):
         assert strict_scope
         return ProjectScope(
             entities=[ProjectEntity(key=f"{project}-service", name=project, entity_type="Service", reason="linked")],

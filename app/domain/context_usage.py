@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, Field, StringConstraints
+from pydantic import AwareDatetime, BaseModel, Field, StringConstraints, computed_field
 
 from app.domain.architecture import CodeLocation
 from app.domain.models import MemoryKey
@@ -28,6 +28,11 @@ class ContextItem(BaseModel):
     title: str
     text: str = ""
     destination: Literal["records", "entities"] = "entities"
+
+    @computed_field
+    @property
+    def citation_id(self) -> str:
+        return f"{self.destination}:{self.key}"
 
 
 class ContextEvidence(BaseModel):
@@ -64,13 +69,36 @@ class ContextPackage(BaseModel):
 class ContextClaim(BaseModel):
     text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
     citations: list[Annotated[str, StringConstraints(min_length=1, max_length=512)]] = Field(
-        min_length=1, max_length=10,
+        default_factory=list, max_length=10,
     )
 
 
 class ContextClaimCheck(BaseModel):
     claim: ContextClaim
-    status: Literal["supported", "unknown_citation", "unsupported_text"]
+    status: Literal["supported", "missing_citation", "unknown_citation", "unsupported_text"]
+
+
+class CheckedContextAnswer(BaseModel):
+    findings: list[ContextClaim]
+    flagged_claims: list[ContextClaimCheck]
+
+
+ExcerptID = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{24}$")]
+
+
+class ContextExcerpt(BaseModel):
+    excerpt_id: ExcerptID
+    citation_id: str
+    text: str
+
+
+class PreparedContextExcerpts(BaseModel):
+    context_id: RequestID
+    excerpts: list[ContextExcerpt]
+
+
+class CheckedExcerptAnswer(CheckedContextAnswer):
+    unknown_excerpt_ids: list[str]
 
 
 class UsageOutcome(BaseModel):

@@ -566,7 +566,25 @@ and static heuristics, so missing rationale stays unknown.
 
 ### Graph context packages and token usage
 
-After building context, callers can use `validate_context_citations` with the
+For assisted answers, call `prepare_context_excerpts` with the project-scoped context
+query and give the model the returned text and excerpt IDs. Ask it to select
+supporting IDs. Before displaying the answer, call `finalize_context_excerpts`
+with the same query, the selected IDs, and the returned `context_id`. The server reconstructs the quotes from
+the scoped package, attaches their canonical citations, and checks each claim.
+Present only `findings` as verified. Show `flagged_claims` and
+`unknown_excerpt_ids` as evidence gaps. Check whether the selected excerpts
+answer the question. The citation check verifies provenance and exact wording.
+
+Prepared context is kept in API process memory for up to three minutes and
+bound to the same caller, project grants, and query. If it expires or the
+process restarts, prepare the excerpts again. Callers that omit `context_id`
+continue to rebuild the dated package before checking.
+
+Clients that submit their own claims can call `finalize_context_answer`.
+It resolves unambiguous bare keys and flags missing, unknown, and unsupported
+citations. Repository paths require their own evidence check.
+
+For strict citation diagnostics, callers can use `validate_context_citations` with the
 same query and proposed **verbatim** claim sentences. Send citation identifiers
 as `records:<key>` or `entities:<key>` from the returned context. The tool rebuilds
 the dated, scoped package and distinguishes unknown citation IDs from text that

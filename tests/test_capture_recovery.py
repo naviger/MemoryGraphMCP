@@ -720,8 +720,16 @@ def test_arango_recovery_and_workspace():
     assert pinned.url.endswith(f"/{'a' * 40}/{module}#L1")
     static = graph.trace(ArchitectureTrace(key=source.key, relationship_types=["defines"]))
     assert static and all(path.relationships[0].source_revision == second_revision for path in static)
-    assert target.key in {entry.key for entry in graph.project_scope("alpha", strict_scope=True).entities}
-    assert target.key not in {entry.key for entry in graph.project_scope("beta", strict_scope=True).entities}
+    for project_key, owns_target in (("alpha", True), ("beta", False)):
+        detailed = graph.project_scope(project_key, strict_scope=True)
+        lean = graph.project_scope(project_key, strict_scope=True, include_details=False)
+        assert lean.repository_names == detailed.repository_names
+        assert [(row.key, row.name, row.entity_type, row.memory_key, row.repository_key)
+                for row in lean.entities] == [
+            (row.key, row.name, row.entity_type, row.memory_key, row.repository_key)
+            for row in detailed.entities
+        ]
+        assert (target.key in {entry.key for entry in lean.entities}) == owns_target
 
     from app.domain.knowledge_capture import CaptureEvent, CaptureSuggestion, SuggestionDecision
 

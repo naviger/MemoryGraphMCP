@@ -69,7 +69,7 @@ def context_service():
         for node in (nodes["assets"], nodes["adr"], nodes["test-suite"])
     ], dependencies=[], repository_names=[])
     graph = SimpleNamespace(
-        read_entity=nodes.get, project_scope=lambda key: scope,
+        read_entity=nodes.get, project_scope=lambda key, *, include_details: scope,
         search=lambda request: list(nodes.values()), trace=trace,
         find_memory_entities=lambda key: [nodes["adr"]] if key == "record" else [],
     )
@@ -271,6 +271,7 @@ async def test_mcp_context_returns_usage_and_records_outcome(context_service):
         result = await client.call_tool("build_context_package", {"query": {
             "question": "How does AssetService work?", "service": "assets",
         }})
+        assert result.structured_content["relevant_adrs"][0]["citation_id"] == "records:record"
         receipt = result.structured_content["usage"]
         assert receipt["method"] == "ContextPackage" and receipt["entities_supplied"] >= 3
         assert receipt["response_tokens"] is None
@@ -287,6 +288,29 @@ async def test_mcp_context_returns_usage_and_records_outcome(context_service):
         assert [row["status"] for row in validation.structured_content["result"]] == [
             "supported", "unsupported_text",
         ]
+        finalized = await client.call_tool("finalize_context_answer", {
+            "query": {"question": "How does AssetService work?", "service": "assets"},
+            "claims": [{"text": "Use canonical asset IDs.", "citations": ["record"]},
+                       {"text": "Use external IDs.", "citations": ["records:record"]}],
+        })
+        assert finalized.structured_content["findings"] == [
+            {"text": "Use canonical asset IDs.", "citations": ["records:record"]},
+        ]
+        assert finalized.structured_content["flagged_claims"][0]["status"] == "unsupported_text"
+        menu = await client.call_tool("list_context_excerpts", {
+            "query": {"question": "How does AssetService work?", "service": "assets"},
+        })
+        excerpt = next(row for row in menu.structured_content["result"]
+                       if row["text"] == "Use canonical asset IDs.")
+        selection = await client.call_tool("finalize_context_excerpts", {
+            "query": {"question": "How does AssetService work?", "service": "assets"},
+            "excerpt_ids": [excerpt["excerpt_id"], "invented", excerpt["excerpt_id"]],
+        })
+        assert selection.structured_content == {
+            "findings": [{"text": excerpt["text"], "citations": ["records:record"]}],
+            "flagged_claims": [],
+            "unknown_excerpt_ids": ["invented"],
+        }
 
 
 @pytest.mark.asyncio
@@ -319,6 +343,7 @@ async def test_pilot_jwks_markdown_adr_is_retrieved_and_invented_citations_are_r
     package, _, _ = await context_service.build(query)
     expected = next((item for item in package.relevant_adrs if item.key == record.key), None)
     assert expected is not None
+    assert expected.citation_id == f"records:{record.key}"
     assert "maxsize=1" in expected.text
     claim = "We will cache the Keycloak JWKS response using an LRU cache in the security layer before token verification."
     results = await context_service.check_claims(query, [
@@ -328,9 +353,30 @@ async def test_pilot_jwks_markdown_adr_is_retrieved_and_invented_citations_are_r
     ])
     assert [entry.status for entry in results] == ["supported", "unknown_citation", "unsupported_text"]
 
+    checked = await context_service.finalize_answer(query, [
+        ContextClaim(text=claim, citations=[expected.citation_id]),
+        ContextClaim(text=claim, citations=["docs/adr/adr-0009-jwks-caching.md"]),
+        ContextClaim(text=claim, citations=["records:adr-0009-jwks-caching.md"]),
+        ContextClaim(text="Sextant fetches new signing keys each time.", citations=[expected.citation_id]),
+    ])
+    assert [item.citations for item in checked.findings] == [[expected.citation_id]]
+    assert [item.status for item in checked.flagged_claims] == [
+        "unknown_citation", "unknown_citation", "unsupported_text",
+    ]
+
+    menu = await context_service.list_excerpts(query)
+    jwks = [item for item in menu if item.citation_id == expected.citation_id]
+    assert any("maxsize=1" in item.text for item in jwks)
+    chosen = await context_service.finalize_excerpts(query, [item.excerpt_id for item in jwks])
+    assert [item.text for item in chosen.findings] == [item.text for item in jwks]
+    assert chosen.flagged_claims == chosen.unknown_excerpt_ids == []
+
     record.content = record.content.replace("Status: Accepted", "Status: Proposed")
     package, _, _ = await context_service.build(query)
     assert record.key not in {item.key for item in package.relevant_adrs}
+    stale = await context_service.finalize_excerpts(query, [jwks[0].excerpt_id])
+    assert stale.findings == []
+    assert stale.unknown_excerpt_ids == [jwks[0].excerpt_id]
 
 
 @pytest.mark.asyncio
@@ -359,6 +405,19 @@ async def test_pilot_review_schedule_includes_cited_expiration_consequence(conte
     ])
     assert [entry.status for entry in results] == ["supported", "unsupported_text"]
 
+    checked = await context_service.finalize_answer(query, [
+        ContextClaim(text="Updating confidence does not move expiration.", citations=[original.key]),
+        ContextClaim(text="Saving a validation updates the expiration date.", citations=[original.key]),
+        ContextClaim(text="A late review changes applicability."),
+    ])
+    assert [item.citations for item in checked.findings] == [[f"records:{original.key}"]]
+    assert [item.status for item in checked.flagged_claims] == ["unsupported_text", "missing_citation"]
+
+    menu = await context_service.list_excerpts(query)
+    excerpt = next(item for item in menu if item.text == "Updating confidence does not move expiration.")
+    chosen = await context_service.finalize_excerpts(query, [excerpt.excerpt_id])
+    assert [item.citations for item in chosen.findings] == [[excerpt.citation_id]]
+
     future = query.model_copy(update={"question": (
         "Add one focused regression for a last_validated date later than the requested as-of date. "
         "Keep the validation and expiration rules unchanged. Explain the rule the test verifies and cite the evidence."
@@ -368,3 +427,57 @@ async def test_pilot_review_schedule_includes_cited_expiration_consequence(conte
         citations=[f"records:{original.key}"],
     )])
     assert future_results[0].status == "unsupported_text"
+    checked = await context_service.finalize_answer(future, [future_results[0].claim])
+    assert checked.findings == []
+    assert checked.flagged_claims == future_results
+
+
+@pytest.mark.asyncio
+async def test_prepared_context_reuses_package_and_rechecks_scope(context_service, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.auth.project_access import ProjectAccess
+    from app.mcp.tools import context_usage
+
+    state = SimpleNamespace(
+        owner="reader-1", access=ProjectAccess(grants={"project": "read"}), now=100,
+    )
+    monkeypatch.setattr(context_usage, "identity", lambda _: (state.owner, None))
+    monkeypatch.setattr(context_usage, "current_project_access", SimpleNamespace(get=lambda: state.access))
+    monkeypatch.setattr(context_usage, "monotonic", lambda: state.now)
+    build = AsyncMock(wraps=context_service.build)
+    monkeypatch.setattr(context_service, "build", build)
+    server = FastMCP("prepared-context-test")
+    register_context_usage(server, context_service, TokenUsageService(None))
+    query = {"question": "How does AssetService work?", "project_key": "project"}
+    async with Client(server) as client:
+        menu = (await client.call_tool("prepare_context_excerpts", {"query": query})).structured_content
+        excerpt = next(row for row in menu["excerpts"] if row["text"] == "Use canonical asset IDs.")
+        args = {"query": query, "context_id": menu["context_id"],
+                "excerpt_ids": [excerpt["excerpt_id"], "invented"]}
+        result = await client.call_tool("finalize_context_excerpts", args)
+        assert result.structured_content == {
+            "findings": [{"text": excerpt["text"], "citations": ["records:record"]}],
+            "flagged_claims": [],
+            "unknown_excerpt_ids": ["invented"],
+        }
+        for different_query in (query | {"as_of": "2026-11-23"}, query | {"project_key": "elsewhere"}):
+            denied = await client.call_tool(
+                "finalize_context_excerpts", args | {"query": different_query}, raise_on_error=False,
+            )
+            assert denied.is_error
+        state.owner = "reader-2"
+        denied = await client.call_tool("finalize_context_excerpts", args, raise_on_error=False)
+        assert denied.is_error
+        state.owner = "reader-1"
+        state.access = ProjectAccess(grants={"project": "read", "elsewhere": "read"})
+        denied = await client.call_tool("finalize_context_excerpts", args, raise_on_error=False)
+        assert denied.is_error
+        state.access = ProjectAccess(grants={})
+        denied = await client.call_tool("finalize_context_excerpts", args, raise_on_error=False)
+        assert denied.is_error
+        state.access = ProjectAccess(grants={"project": "read"})
+        state.now += context_usage._CONTEXT_TTL_SECONDS
+        expired = await client.call_tool("finalize_context_excerpts", args, raise_on_error=False)
+        assert expired.is_error
+        assert build.await_count == 1
