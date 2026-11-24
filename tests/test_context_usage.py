@@ -430,3 +430,54 @@ async def test_pilot_review_schedule_includes_cited_expiration_consequence(conte
     checked = await context_service.finalize_answer(future, [future_results[0].claim])
     assert checked.findings == []
     assert checked.flagged_claims == future_results
+
+
+@pytest.mark.asyncio
+async def test_prepared_context_reuses_package_and_rechecks_scope(context_service, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app.auth.project_access import ProjectAccess
+    from app.mcp.tools import context_usage
+
+    state = SimpleNamespace(
+        owner="reader-1", access=ProjectAccess(grants={"project": "read"}), now=100,
+    )
+    monkeypatch.setattr(context_usage, "identity", lambda _: (state.owner, None))
+    monkeypatch.setattr(context_usage, "current_project_access", SimpleNamespace(get=lambda: state.access))
+    monkeypatch.setattr(context_usage, "monotonic", lambda: state.now)
+    build = AsyncMock(wraps=context_service.build)
+    monkeypatch.setattr(context_service, "build", build)
+    server = FastMCP("prepared-context-test")
+    register_context_usage(server, context_service, TokenUsageService(None))
+    query = {"question": "How does AssetService work?", "project_key": "project"}
+    async with Client(server) as client:
+        menu = (await client.call_tool("prepare_context_excerpts", {"query": query})).structured_content
+        excerpt = next(row for row in menu["excerpts"] if row["text"] == "Use canonical asset IDs.")
+        args = {"query": query, "context_id": menu["context_id"],
+                "excerpt_ids": [excerpt["excerpt_id"], "invented"]}
+        result = await client.call_tool("finalize_context_excerpts", args)
+        assert result.structured_content == {
+            "findings": [{"text": excerpt["text"], "citations": ["records:record"]}],
+            "flagged_claims": [],
+            "unknown_excerpt_ids": ["invented"],
+        }
+        for different_query in (query | {"as_of": "2026-11-23"}, query | {"project_key": "elsewhere"}):
+            denied = await client.call_tool(
+                "finalize_context_excerpts", args | {"query": different_query}, raise_on_error=False,
+            )
+            assert denied.is_error
+        state.owner = "reader-2"
+        denied = await client.call_tool("finalize_context_excerpts", args, raise_on_error=False)
+        assert denied.is_error
+        state.owner = "reader-1"
+        state.access = ProjectAccess(grants={"project": "read", "elsewhere": "read"})
+        denied = await client.call_tool("finalize_context_excerpts", args, raise_on_error=False)
+        assert denied.is_error
+        state.access = ProjectAccess(grants={})
+        denied = await client.call_tool("finalize_context_excerpts", args, raise_on_error=False)
+        assert denied.is_error
+        state.access = ProjectAccess(grants={"project": "read"})
+        state.now += context_usage._CONTEXT_TTL_SECONDS
+        expired = await client.call_tool("finalize_context_excerpts", args, raise_on_error=False)
+        assert expired.is_error
+        assert build.await_count == 1

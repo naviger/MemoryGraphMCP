@@ -18,9 +18,9 @@ small test-writing task. Each case runs twice, for eight trials total.
    plus published project guidance, graph lookup, and cited retrieval. Use the
    case's as-of date. Verify code citations against the pinned checkout when
    the graph's current index has a different or unknown revision. For an
-   assisted answer, pass the `list_context_excerpts` results to the model and
+   assisted answer, pass the `prepare_context_excerpts` results to the model and
    ask it to select supporting IDs. Call `finalize_context_excerpts` with the
-   same query and save the raw selections, verified findings, and flagged gaps.
+   same query and returned context ID. Save the raw selections, verified findings, and flagged gaps.
    Measure finalization separately from model request time.
 4. Save each answer or patch and its check output. For delivery, inspect the
    diff against the requested behavior and look for vacuous tests. Record

@@ -92,6 +92,11 @@ class ContextExcerpt(BaseModel):
     text: str
 
 
+class PreparedContextExcerpts(BaseModel):
+    context_id: RequestID
+    excerpts: list[ContextExcerpt]
+
+
 class CheckedExcerptAnswer(CheckedContextAnswer):
     unknown_excerpt_ids: list[str]
 
