@@ -1,6 +1,6 @@
 # Recoverable capture and task execution
 
-Project Overview opens on Tasks with Open and In progress selected. Writers can create tasks, goals, risks, and constraints. Select **Help me draft** to generate editable text with the configured local model. The model call does not save a record. Writers can mark a task complete with an outcome and evidence, which creates a linked Observation in the same graph transaction.
+Project Overview opens on Tasks with Open and In progress selected. Writers can create tasks, goals, risks, and constraints. Select **Help me draft** to generate editable text with the configured local model. The model call does not save a record. Writers can mark a task complete with an outcome and evidence, which creates a linked Observation in the same graph transaction. Completed states are read-only in Project Overview. Start shows when the task was created. Older tasks created by the workspace or tracker can use the original project link timestamp. End shows recorded completion or cancellation. Select a date column to sort, or sort by Order and drag the row handle or focus it and use the arrow keys to save the project-wide order.
 
 ## Capture operations
 
@@ -18,7 +18,9 @@ On first startup, GitHub streams capture the newest 25 items. Use **Replay** to 
 
 Observations use stable identities. If the process stops after writing an observation and before saving its cursor, the restarted worker re-reads the range and skips stored observations. This is at-least-once source processing with idempotent graph writes.
 
-## Agent execution
+## Legacy agent execution
+
+Use an interactive Codex session for new work. In Project Overview, **History** opens past runs. Choose **Completed** in the **State** dropdown to record the verified outcome. The following sections document the legacy worker and adapter contract for operators and describe how past runs were initiated.
 
 | Agent | Setup |
 | --- | --- |
@@ -31,13 +33,12 @@ An adapter returns structured JSON with required `summary` and optional `plan`, 
 
 ```mermaid
 sequenceDiagram
-    actor Writer
+    participant Caller as Authorized API client
     participant UI as Project Overview
     participant DB as ArangoDB
     participant Worker as Execution worker
     participant Agent as Agent adapter
-    Writer->>UI: Select Execute and mode
-    UI->>DB: Authorize project and atomically queue execution
+    Caller->>DB: Queue an authorized execution through the API
     Worker->>DB: Claim by revision and lease
     Worker->>DB: Read scoped context and published guidance
     Worker->>Agent: Run phase with stable idempotency key

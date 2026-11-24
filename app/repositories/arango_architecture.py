@@ -166,6 +166,14 @@ class ArangoArchitectureRepository:
                     })
                 else:
                     entity = entity.model_copy(update={"created_at": now, "updated_at": now})
+            if isinstance(entity, Task):
+                if existing:
+                    previous_task = Task.model_validate(existing)
+                    entity = entity.model_copy(update={
+                        "created_at": previous_task.created_at or entity.created_at,
+                    })
+                elif entity.created_at is None:
+                    entity = entity.model_copy(update={"created_at": datetime.now(UTC)})
             result = nodes.insert(
                 self._entity_payload(entity), overwrite_mode="replace", return_new=True
             )
@@ -602,8 +610,13 @@ class ArangoArchitectureRepository:
                     updates = event.model_dump(
                         include={"name", "description", "status"}, exclude_none=True,
                     )
+                    if "status" in updates:
+                        previous = Task.model_validate(task) if task else Task(
+                            key=event.task_key, name=event.name
+                        )
+                        updates.update(previous.status_changes(updates["status"], event.occurred_at))
                     if task is None:
-                        nodes.insert(self._entity_payload(Task(key=event.task_key, **updates)))
+                        nodes.insert(self._entity_payload(Task(key=event.task_key, created_at=event.occurred_at, **updates)))
                         link = ArchitectureLink(
                             source_key=project_key, target_key=event.task_key,
                             relationship_type="defines", source="project-tracker",
@@ -611,11 +624,23 @@ class ArangoArchitectureRepository:
                         edges.insert(self._edge_payload(link, now.isoformat()))
                         affected.append(project_key)
                     else:
-                        nodes.update({"_key": event.task_key, **updates})
+                        nodes.update({
+                            "_key": event.task_key,
+                            **Task.model_validate(task).model_copy(update=updates).model_dump(
+                                mode="json", include=set(updates)
+                            ),
+                        })
                 else:
                     if task is None:
                         raise ArchitectureGraphError(f"Task '{event.task_key}' was not found")
-                    nodes.update({"_key": event.task_key, "status": "done"})
+                    previous = Task.model_validate(task)
+                    changes = previous.status_changes("done", event.occurred_at)
+                    nodes.update({
+                        "_key": event.task_key,
+                        **previous.model_copy(update=changes).model_dump(
+                            mode="json", include=set(changes)
+                        ),
+                    })
 
             receipt = GraphEventReceipt(
                 event_id=event.event_id, event_type=event.event_type,
@@ -1573,12 +1598,24 @@ class ArangoArchitectureRepository:
                             LIMIT 1
                             RETURN parent._key
                     )
+                    LET task_created_at = node.entity_type == "Task" && node.created_at == null
+                        ? FIRST(
+                            FOR owner, edge IN 1..1 INBOUND node._id @@edges
+                                FILTER owner.entity_type == "Project"
+                                FILTER edge.relationship_type == "defines"
+                                    AND edge.source IN ["project-workspace", "project-tracker"]
+                                FILTER IS_STRING(edge.created_at)
+                                SORT DATE_TIMESTAMP(edge.created_at)
+                                LIMIT 1
+                                RETURN edge.created_at
+                        ) : node.created_at
                     SORT node.entity_type, LOWER(node.name), key
                     RETURN MERGE(KEEP(node, [
                         "name", "entity_type", "source_path", "memory_key",
-                        "repository", "role", "qualified_name", "status"
+                        "repository", "role", "qualified_name", "status",
+                        "started_at", "ended_at", "position"
                     ]), {
-                        key, decision_links, parent_key,
+                        key, decision_links, parent_key, created_at: task_created_at,
                         reason: key IN direct ? "Linked to project"
                             : key IN defined ? "Defined in a linked repository"
                             : CONCAT("Indexed in ", node.repository)

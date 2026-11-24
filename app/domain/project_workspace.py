@@ -58,6 +58,12 @@ class TaskUpdate(BaseModel):
     outcome: WorkText | None = None
 
 
+class TaskMove(BaseModel):
+    task_key: MemoryKey
+    anchor_key: MemoryKey
+    placement: Literal["before", "after"]
+
+
 class AgentArtifact(BaseModel):
     name: EntityName
     reference: WorkText

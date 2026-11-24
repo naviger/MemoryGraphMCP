@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from hashlib import sha256
 from json import dumps
 from typing import Annotated, Any, Literal
@@ -193,6 +194,18 @@ TaskStatus = Literal["open", "in_progress", "done", "cancelled"]
 class Task(ArchitectureNode):
     entity_type: Literal["Task"] = "Task"
     status: TaskStatus = "open"
+    created_at: AwareDatetime | None = None
+    started_at: AwareDatetime | None = None
+    ended_at: AwareDatetime | None = None
+    position: int | None = Field(default=None, ge=1)
+
+    def status_changes(self, status: TaskStatus, now: datetime) -> dict:
+        changes = {"status": status}
+        if status != self.status:
+            if status == "in_progress" and self.started_at is None:
+                changes["started_at"] = now
+            changes["ended_at"] = now if status in {"done", "cancelled"} else None
+        return changes
 
 
 GoalStatus = Literal["proposed", "active", "achieved", "archived"]

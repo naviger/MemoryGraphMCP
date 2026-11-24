@@ -96,6 +96,10 @@ class ProjectEntity(BaseModel):
     qualified_name: str | None = None
     parent_key: str | None = None
     status: str | None = None
+    created_at: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    position: int | None = None
     reason: str
     decision_links: list[ProjectDecisionLink] = Field(default_factory=list)
 

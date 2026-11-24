@@ -414,6 +414,25 @@ contains project instructions. Each field is null until its first publication.
 Drafts stay in the editors. Current accepted ADRs and active constraints,
 including validating test keys, are returned alongside both guidance fields.
 
+### Codex development handoff
+
+1. Open the task in **Projects → Overview → Tasks** and bring its link and
+   acceptance criteria into an interactive Codex session in the source
+   repository. Follow `AGENTS.md` and call `get_project_guidance` for the task’s
+   project. Open the cited ADRs, constraints, or tests that apply.
+2. Implement on a focused branch. Run the relevant checks and use Codex to
+   review the exact diff or commit. Get explicit approval before publishing.
+3. Return to the same task. Choose **Completed** in the **State** dropdown and record the reviewed commit,
+   checks and results, unresolved findings, and any follow-up. Link relevant
+   ADRs or evidence through the graph. Set the task to **Completed** when the
+   result is verified. For unfinished work, keep the task open and record
+   the blocker or follow-up in a linked observation.
+
+For example, a completed outcome could read “Reviewed commit `abc1234`.
+The changed-app pytest suite passed 24 tests. Diff review found no blockers.
+Publishing is pending approval.” The project Help topic **Develop with Codex**
+describes the same handoff. The task panel shows past agent executions in the read-only **History** panel.
+
 ### Approved knowledge snapshots
 
 For snapshots that reference each other's ADRs, restore them in one transaction:

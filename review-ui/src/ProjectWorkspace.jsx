@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { reviewRequest } from './api.js';
 import { PreviewLink } from './RecordInspector.jsx';
-import { PHASES, elapsedRuntime, executionSteps, patchProgress, reviewBlocked } from './executionSteps.js';
+import { elapsedRuntime, executionSteps, patchProgress, reviewBlocked } from './executionSteps.js';
 
 const TYPES = { Task: 'Tasks', Goal: 'Goals', Risk: 'Risks', Constraint: 'Constraints' };
 const STATES = { open: 'Open', in_progress: 'In progress', done: 'Completed', cancelled: 'Cancelled' };
@@ -132,7 +132,7 @@ function StepTimes({ step, now, compact = false }) {
   </dl>;
 }
 
-function StepDetails({ step, now, navigate, children }) {
+function StepDetails({ step, now, navigate }) {
   const { job, result } = step;
   return <section className="execution-inspector" aria-label="Selected phase">
     <header>
@@ -181,7 +181,6 @@ function StepDetails({ step, now, navigate, children }) {
       </section>)}
       {result.logs.length > 0 && <details><summary>Execution log</summary><pre>{result.logs.join('\n')}</pre></details>}
     </section>}
-    {children}
     <ExecutionUsage job={job} phaseIndex={step.index} />
     {step.events.length > 0 && <section>
       <h5>Phase activity</h5>
@@ -193,21 +192,13 @@ function StepDetails({ step, now, navigate, children }) {
   </section>;
 }
 
-function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAvailable }) {
+function TaskExecutionHistory({ task, send, close, navigate }) {
   const [jobs, setJobs] = useState(null);
   const [selection, setSelection] = useState(null);
   const [now, setNow] = useState(Date.now);
-  const [agent, setAgent] = useState(Object.keys(agents)[0] || '');
-  const [mode, setMode] = useState('');
-  const [recommendation, setRecommendation] = useState(null);
-  const [repair, setRepair] = useState(null);
-  const [reviewBudget, setReviewBudget] = useState(null);
-  const [applyApproval, setApplyApproval] = useState(null);
-  const [requested, setRequested] = useState(() => crypto.randomUUID());
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
   const path = `/workspace/tasks/${encodeURIComponent(task.key)}/executions`;
-  const reload = useCallback(() => send(path).then(setJobs).catch((err) => setError(err.message)), [path, send]);
+  const reload = useCallback(() => send(path).then((result) => { setJobs(result); setError(''); }).catch((err) => setError(err.message)), [path, send]);
   useEffect(() => {
     reload();
     const timer = window.setInterval(reload, 3000);
@@ -221,115 +212,17 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
   }, [active]);
   const steps = executionSteps(jobs || []);
   const progress = patchProgress(jobs || []);
-  const latestBlocker = steps.find(({ job, result }) =>
-    result?.review_verdict === 'blocking' && result.reviewed_target?.kind === 'implementation patch' &&
-    !progress.superseded.has(result.reviewed_target.execution_id) &&
-    progress.latestReview.get(result.reviewed_target.execution_id) === job.key);
   const selected = steps.find((step) => step.key === selection) || steps[0];
-  const workflows = Object.keys(MODES).filter((value) => Object.values(agents).some((allowed) => allowed.includes(value)));
-  const selectedMode = workflows.includes(mode) ? mode : workflows[0] || '';
-  const eligible = Object.keys(agents).filter((value) => agents[value].includes(selectedMode));
-  const selectedAgent = eligible.includes(agent) ? agent : eligible[0] || '';
-  async function recommend() {
-    setBusy(true); setError(''); setRecommendation(null);
-    try {
-      const choice = await send(`/workspace/tasks/${task.key}/recommend-agent`, { mode: selectedMode });
-      setAgent(choice.agent);
-      setRecommendation(choice);
-    } catch (err) { setError(err.message); }
-    finally { setBusy(false); }
-  }
-  async function startRepair(event) {
-    event.preventDefault();
-    if (!repair || active || busy) return;
-    setBusy(true); setError('');
-    try {
-      const started = await send(`${path}/${repair}/fix-findings/${requested}`, {});
-      setRequested(crypto.randomUUID());
-      setRepair(null);
-      setSelection(`${started.key}/0`);
-      await reload();
-    } catch (err) { setError(err.message); }
-    finally { setBusy(false); }
-  }
-  async function submit(job, action = 'cancel', approveReviewAttempt = false) {
-    setBusy(true);
-    setError('');
-    try {
-      if (action === 'apply-approved') {
-        const started = await send(`${path}/${job.key}/apply-approved`, {});
-        setApplyApproval(null);
-        setSelection(`${started.key}/0`);
-      } else if (action === 'review-patch') {
-        const started = await send(path, {
-          request_id: requested, agent: 'codex', mode: 'REVIEW',
-          patch_execution_key: job.key, approve_review_attempt: approveReviewAttempt,
-        });
-        setReviewBudget(null);
-        setSelection(`${started.key}/0`);
-        setRequested(crypto.randomUUID());
-      } else if (job) await send(`${path}/${job.key}/${action}`, {});
-      else {
-        const started = await send(path, { request_id: requested, agent: selectedAgent, mode: selectedMode });
-        setSelection(`${started.key}/0`);
-        setRequested(crypto.randomUUID());
-      }
-      await reload();
-    } catch (err) {
-      if (action === 'review-patch' && err.message.includes('token budget is exhausted')) {
-        setReviewBudget({ job });
-        setSelection(steps.find((step) => step.job.key === job.key && step.phase === 'Implement')?.key);
-      }
-      setError(err.message);
-    }
-    finally { setBusy(false); }
-  }
   return <section className="detail workspace-form">
-    <div className="workspace-actions"><h3>{task.name}</h3>
+    <div className="workspace-actions"><h3>History for {task.name}</h3>
       <button className="button outlined" type="button" onClick={close}>Close</button></div>
-    {canWrite && !active && !latestBlocker && !['done', 'cancelled'].includes(task.status) && (selectedAgent ? (
-      <form className="workspace-form" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-        <div className="workspace-actions">
-          <label>Workflow<select disabled={busy} value={selectedMode} onChange={(event) => { setMode(event.target.value); setRecommendation(null); }}>
-            {workflows.map((item) => <option key={item} value={item}>{MODES[item]}</option>)}
-          </select></label>
-          <label>Agent<select disabled={busy} value={selectedAgent} onChange={(event) => setAgent(event.target.value)}>
-            {eligible.map((item) => <option key={item}>{item}</option>)}
-          </select></label>
-          {draftAvailable && <button className="button outlined" type="button" disabled={busy} onClick={recommend}>Recommend agent</button>}
-          <button className="button primary" disabled={busy || !jobs}>Start execution</button>
-        </div>
-        <p>Phases: {PHASES[selectedMode]?.join(' → ')}</p>
-        {selectedMode === 'REVIEW' && <p className="muted">This reviews the checkout’s latest commit. For an implementation artifact, choose Review this patch on its execution.</p>}
-        {recommendation && <p role="status"><strong>Ollama recommends {recommendation.agent}.</strong> {recommendation.reason}{selectedAgent !== recommendation.agent ? ' You selected a different agent.' : ''}</p>}
-      </form>
-    ) : <p>No agent is configured for this project.</p>)}
+    <p className="muted">Use Codex to implement and review this task. Choose Completed in the State dropdown to record the verified outcome.</p>
     {jobs === null && !error && <p role="status">Loading execution history…</p>}
     {jobs?.length === 0 && <p>No executions yet.</p>}
     {steps.length > 0 && <div className="execution-layout">
       <ol className="execution-steps" aria-label="Execution steps, newest first">
         {steps.map((step) => {
-          const { job, result, current } = step;
-          const mayChange = canWrite && task.status !== 'cancelled';
-          const mayCancel = mayChange && current && job.state !== 'CANCEL_REQUESTED' && ACTIVE.includes(job.state);
-          const mayRetry = mayChange && current && ['BLOCKED', 'FAILED'].includes(job.state) && (task.status !== 'done' || job.mode === 'APPLY_APPROVED');
-          const mayReview = mayChange && !job.guided_repair && !active && agents.codex?.includes('REVIEW') &&
-            job.agent === 'codex' && !progress.reviewed.has(job.key) && !progress.superseded.has(job.key) &&
-            (!job.repair_contract || result?.verification?.passed) &&
-            (!job.repair_review_key || result?.regression_proof?.passed) &&
-            result?.artifacts.some((item) => item.name === 'Local implementation patch');
-          const target = result?.reviewed_target;
-          const mayApply = mayChange && !active && task.status !== 'cancelled' &&
-            agents.codex?.includes('REVIEW') && target?.kind === 'implementation patch' &&
-            result.review_verdict === 'passed' && result.verification?.passed && job.repair_contract &&
-            !progress.superseded.has(target.execution_id) && !progress.applications.has(target.execution_id) &&
-            progress.latestReview.get(target.execution_id) === job.key;
-          const stopped = step.key === latestBlocker?.key && job.guided_repair;
-          const mayRepair = mayChange && !job.guided_repair && !active && agents.codex?.includes('IMPLEMENT') &&
-            agents.codex?.includes('REVIEW') &&
-            result?.review_verdict === 'blocking' && result.reviewed_target?.kind === 'implementation patch' &&
-            !progress.superseded.has(result.reviewed_target.execution_id) &&
-            progress.latestReview.get(result.reviewed_target.execution_id) === job.key;
+          const { job, result } = step;
           return <li key={step.key} className="execution-step" data-selected={selected?.key === step.key}>
             <button type="button" className="execution-step-select" aria-pressed={selected?.key === step.key}
               onClick={() => setSelection(step.key)}>
@@ -337,62 +230,20 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
                 <span className={step.attention ? 'execution-badge attention' : 'execution-badge'}>{step.state}</span></span>
               {(progress.superseded.has(job.key) || progress.superseded.has(result?.reviewed_target?.execution_id)) &&
                 <span className="muted">Superseded by a revised patch</span>}
-              {stopped && <span className="muted">Repair stopped. Review the unresolved finding.</span>}
               <span className="muted">{job.agent} · {job.mode === 'APPLY_APPROVED' ? 'Apply approved patch' : MODES[job.mode]}{step.attempts.length > 0 ?
                 ` · ${step.attempts.length} ${step.attempts.length === 1 ? 'attempt' : 'attempts'}` : ''}</span>
               <StepTimes step={step} now={now} compact />
             </button>
-            {(mayCancel || mayRetry || mayReview || mayRepair || mayApply) && <div className="execution-step-actions">
-              {mayRetry && <button type="button" className="button primary" disabled={busy || (job.state === 'FAILED' && active)}
-                onClick={() => submit(job, 'retry')}>Retry now</button>}
-              {mayCancel && <button type="button" className="button outlined" disabled={busy}
-                onClick={() => submit(job)}>Cancel execution</button>}
-              {mayReview && <button type="button" className="button outlined" disabled={busy}
-                onClick={() => submit(job, 'review-patch')}>Review this patch</button>}
-              {mayApply && <button type="button" className="button primary" disabled={busy}
-                onClick={() => { setSelection(step.key); setApplyApproval(step.key); }}>Apply approved patch</button>}
-              {mayRepair && <button type="button" className="button primary" disabled={busy}
-                onClick={() => { setSelection(step.key); setRepair(job.key); }}>Fix review findings</button>}
-            </div>}
           </li>;
         })}
       </ol>
-      {selected && <StepDetails step={selected} now={now} navigate={navigate}>
-    {applyApproval === selected.key && <form className="detail workspace-form"
-      onSubmit={(event) => { event.preventDefault(); submit(selected.job, 'apply-approved'); }}>
-      <h5>Approve application to a local fix branch</h5>
-      <p>The bridge will commit the reviewed patch, rerun the required checks below, and run a commit review if they pass. Publishing requires separate approval.</p>
-      {selected.job.repair_contract.test_paths.length
-        ? <ul>{selected.job.repair_contract.test_paths.map((test) => <li key={test}><code>{test}</code></li>)}</ul>
-        : <p>Required check is the Python test suite.</p>}
-      <div className="workspace-actions">
-        <button className="button primary" disabled={busy || active}>Apply to local fix branch</button>
-        <button type="button" className="button outlined" onClick={() => setApplyApproval(null)}>Cancel</button>
-      </div>
-    </form>}
-    {reviewBudget?.job.key === selected.job.key && <form className="detail workspace-form"
-      onSubmit={(event) => { event.preventDefault(); submit(reviewBudget.job, 'review-patch', true); }}>
-      <h5>Approve one more review attempt</h5>
-      <p>The earlier token allowance has been used. Continue if you want another model review of the same patch.</p>
-      <div className="workspace-actions"><button className="button primary" disabled={busy}>Review the same patch</button>
-        <button type="button" className="button outlined" onClick={() => setReviewBudget(null)}>Close</button></div>
-    </form>}
-    {repair === selected.job.key && <form className="detail workspace-form" onSubmit={startRepair}>
-      <h5>Approve one repair and independent review</h5>
-      <p>Codex will use the original task, the exact patch, and the recorded findings. It will reproduce the failure, test related cases, and send the revision for an independent review only if the required checks pass. The workflow stops if the review finds an unresolved issue.</p>
-      <div className="workspace-actions">
-        <button className="button primary" disabled={busy || active}>Approve repair</button>
-        <button className="button outlined" type="button" disabled={busy} onClick={() => setRepair(null)}>Cancel</button>
-      </div>
-    </form>}
-      </StepDetails>}
+      {selected && <StepDetails step={selected} now={now} navigate={navigate} />}
     </div>}
     {error && <p className="status error" role="alert">{error}</p>}
   </section>;
 }
 
-function EditTask({ task, close, send, refresh }) {
-  const [status, setStatus] = useState(task.status);
+function CompleteTask({ task, close, saveState }) {
   const [outcome, setOutcome] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -401,20 +252,16 @@ function EditTask({ task, close, send, refresh }) {
     setBusy(true);
     setError('');
     try {
-      await send(`/workspace/tasks/${task.key}`, { status, outcome: status === 'done' ? outcome : null });
-      refresh();
+      await saveState(task, 'done', outcome);
       close();
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
   }
   return <form className="detail workspace-form" onSubmit={save}>
-    <h3>Update {task.name}</h3>
-    <label>State<select value={status} onChange={(event) => setStatus(event.target.value)}>
-      {Object.entries(STATES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-    </select></label>
-    {status === 'done' && <label>Outcome and evidence<textarea required value={outcome}
-      maxLength={8000} rows={4} onChange={(event) => setOutcome(event.target.value)} /></label>}
-    <div className="workspace-actions"><button className="button primary" disabled={busy}>Save state</button>
+    <h3>Complete {task.name}</h3>
+    <label>Outcome and evidence<textarea required value={outcome}
+      maxLength={8000} rows={4} onChange={(event) => setOutcome(event.target.value)} /></label>
+    <div className="workspace-actions"><button className="button primary" disabled={busy}>Complete task</button>
       <button type="button" className="button outlined" onClick={close}>Close</button></div>
     {error && <p role="alert" className="status error">{error}</p>}
   </form>;
@@ -426,6 +273,12 @@ export default function ProjectWorkspace({ projectKey, token, navigate, onUnauth
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [editor, setEditor] = useState(null);
+  const [sort, setSort] = useState({ field: 'position', direction: 'ascending' });
+  const [dragged, setDragged] = useState(null);
+  const [drop, setDrop] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [actionError, setActionError] = useState('');
+  const [notice, setNotice] = useState('');
   const send = useCallback((suffix, body) => reviewRequest(`/projects/${encodeURIComponent(projectKey)}${suffix}`, { token, body }), [projectKey, token]);
   const refresh = useCallback(() => send('/workspace').then((result) => { setData(result); setError(''); })
     .catch((err) => { if (err.status === 401) onUnauthorized(); else setError(err.message); }), [send, onUnauthorized]);
@@ -434,7 +287,70 @@ export default function ProjectWorkspace({ projectKey, token, navigate, onUnauth
     const timer = window.setInterval(refresh, 10000);
     return () => window.clearInterval(timer);
   }, [refresh]);
+  const tasks = (data?.items || []).filter((item) => item.entity_type === 'Task');
+  tasks.sort((left, right) =>
+    (left.position ?? Infinity) - (right.position ?? Infinity) || left.key.localeCompare(right.key));
+  const taskPositions = new Map(tasks.map((item, index) => [item.key, index + 1]));
   const items = (data?.items || []).filter((item) => item.entity_type === kind && (kind !== 'Task' || states.includes(item.status)));
+  if (kind === 'Task') items.sort((left, right) => {
+    const value = (item) => sort.field === 'position' ? taskPositions.get(item.key) : Date.parse(item[sort.field]);
+    const a = value(left);
+    const b = value(right);
+    const direction = sort.direction === 'ascending' ? 1 : -1;
+    if (!Number.isFinite(a) || !Number.isFinite(b)) {
+      return Number(Number.isFinite(b)) - Number(Number.isFinite(a)) || left.key.localeCompare(right.key);
+    }
+    return direction * (a - b) || left.key.localeCompare(right.key);
+  });
+  const canMove = data?.can_write && sort.field === 'position' && !saving;
+  function setColumn(field) {
+    setSort(({ field: current, direction }) => ({
+      field,
+      direction: current === field && direction === 'ascending' ? 'descending' : 'ascending',
+    }));
+  }
+  async function saveState(task, status, outcome = null) {
+    setSaving(true);
+    setActionError('');
+    try {
+      const updated = await send(`/workspace/tasks/${task.key}`, { status, outcome });
+      setData((current) => ({
+        ...current, items: current.items.map((item) => item.key === task.key ? updated : item),
+      }));
+    } finally { setSaving(false); }
+  }
+  function changeState(task, status) {
+    setActionError('');
+    if (status === 'done') setEditor({ type: 'state', task });
+    else {
+      if (editor?.type === 'state') setEditor(null);
+      saveState(task, status).catch((err) => setActionError(err.message));
+    }
+  }
+  async function move(taskKey, anchorKey, placement) {
+    setDragged(null);
+    setDrop(null);
+    if (!canMove || taskKey === anchorKey) return;
+    setSaving(true);
+    setActionError('');
+    setNotice('');
+    try {
+      const positions = await send('/workspace/task-order', {
+        task_key: taskKey, anchor_key: anchorKey,
+        placement: sort.direction === 'ascending' ? placement : placement === 'before' ? 'after' : 'before',
+      });
+      setData((current) => ({
+        ...current,
+        items: current.items.map((item) => positions[item.key] === undefined ? item : { ...item, position: positions[item.key] }),
+      }));
+      setNotice('Task order saved.');
+    } catch (err) { setActionError(err.message); }
+    finally { setSaving(false); }
+  }
+  function dropPlacement(event) {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after';
+  }
   return <section aria-label="Project workspace">
     <div className="project-tabs" role="group" aria-label="Workspace views">
       {Object.entries(TYPES).map(([value, label]) => <button key={value} type="button" aria-pressed={kind === value}
@@ -451,22 +367,66 @@ export default function ProjectWorkspace({ projectKey, token, navigate, onUnauth
       {data?.can_write && <button className="button primary" type="button" onClick={() => setEditor({ type: 'create' })}>Add {kind.toLowerCase()}</button>}
     </div>
     {editor?.type === 'create' && <WorkEditor kind={kind} send={send} refresh={refresh} draftAvailable={data.draft_available} close={() => setEditor(null)} />}
-    {editor?.type === 'state' && <EditTask key={editor.task.key} task={editor.task} send={send} refresh={refresh} close={() => setEditor(null)} />}
-    {editor?.type === 'execution' && <TaskExecution key={editor.task.key} task={editor.task} send={send}
-      agents={data.agents} draftAvailable={data.draft_available} canWrite={data.can_write} navigate={navigate} close={() => { setEditor(null); refresh(); }} />}
+    {editor?.type === 'state' && <CompleteTask key={editor.task.key} task={editor.task} saveState={saveState} close={() => setEditor(null)} />}
+    {editor?.type === 'execution' && <TaskExecutionHistory key={editor.task.key} task={editor.task} send={send}
+      navigate={navigate} close={() => setEditor(null)} />}
     {error && <p className="status error" role="alert">{error}</p>}
+    {actionError && <p className="status error" role="alert">{actionError}</p>}
+    {notice && <p role="status">{notice}</p>}
     {!data && !error && <p role="status">Loading workspace…</p>}
     {data && <div className="table-scroll"><table className="change-table workspace-table">
-      <thead><tr><th scope="col">{kind}</th><th scope="col">State</th>{kind === 'Task' && <th scope="col">Actions</th>}</tr></thead>
-      <tbody>{items.map((item) => <tr key={item.key}>
-        <td><PreviewLink destination="entities" entityKey={item.key} navigate={navigate}>{item.name}</PreviewLink></td>
-        <td>{STATES[item.status] || item.status || '—'}</td>
-        {kind === 'Task' && <td><div className="workspace-actions">
-          {data.can_write && <button type="button" className="button outlined" onClick={() => setEditor({ type: 'state', task: item })}>Update state</button>}
-          <button type="button" className="button outlined" onClick={() => setEditor({ type: 'execution', task: item })}>
-            {data.can_write && !['done', 'cancelled'].includes(item.status) ? 'Execute' : 'Execution history'}
-          </button>
+      <thead><tr>
+        {kind === 'Task' && <th scope="col" aria-sort={sort.field === 'position' ? sort.direction : undefined}>
+          <button type="button" className="task-sort-header" onClick={() => setColumn('position')}>Order</button>
+        </th>}
+        <th scope="col">{kind}</th><th scope="col">State</th>
+        {kind === 'Task' && <>
+          {[['created_at', 'Start'], ['ended_at', 'End']].map(([field, label]) =>
+            <th scope="col" key={field} aria-sort={sort.field === field ? sort.direction : undefined}>
+              <button type="button" className="task-sort-header" onClick={() => setColumn(field)}>{label}</button>
+            </th>)}
+          <th scope="col">Actions</th>
+        </>}
+      </tr></thead>
+      <tbody>{items.map((item, index) => <tr key={item.key} data-task-drop={drop?.key === item.key ? drop.placement : undefined}
+        onDragOver={canMove && dragged && dragged !== item.key ? (event) => {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'move';
+          setDrop({ key: item.key, placement: dropPlacement(event) });
+        } : undefined}
+        onDrop={canMove && dragged ? (event) => {
+          event.preventDefault();
+          move(dragged, item.key, dropPlacement(event));
+        } : undefined}>
+        {kind === 'Task' && <td><div className="task-order-controls">
+          {canMove && <button className="task-drag-handle" type="button" draggable
+            aria-label={`Reorder ${item.name}. Drag or use the arrow keys.`}
+            onKeyDown={(event) => {
+              const offset = event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
+              if (!offset) return;
+              event.preventDefault();
+              const anchor = items[index + offset];
+              if (anchor) move(item.key, anchor.key, offset < 0 ? 'before' : 'after');
+            }}
+            onDragStart={(event) => {
+              event.dataTransfer.setData('text/plain', item.key);
+              event.dataTransfer.effectAllowed = 'move';
+              setDragged(item.key);
+            }}
+            onDragEnd={() => { setDragged(null); setDrop(null); }}>⠿</button>}
+          <span>{index + 1}</span>
         </div></td>}
+        <td><PreviewLink destination="entities" entityKey={item.key} navigate={navigate}>{item.name}</PreviewLink></td>
+        <td>{kind === 'Task' && data.can_write && item.status !== 'done' ?
+          <select aria-label={`State for ${item.name}`} value={item.status} disabled={saving}
+            onChange={(event) => changeState(item, event.target.value)}>
+            {Object.entries(STATES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select> : STATES[item.status] || item.status || '—'}</td>
+        {kind === 'Task' && <>
+          <td>{stamp(item.created_at)}</td><td>{stamp(item.ended_at)}</td>
+          <td><button type="button" className="button outlined"
+            onClick={() => setEditor({ type: 'execution', task: item })}>History</button></td>
+        </>}
       </tr>)}</tbody>
     </table>{items.length === 0 && <p>No {TYPES[kind].toLowerCase()} match this view.</p>}</div>}
   </section>;

@@ -17,6 +17,7 @@ from app.domain.project_workspace import (
     AssistDraft,
     RecommendAgent,
     StartExecution,
+    TaskMove,
     TaskUpdate,
     WorkDraft,
 )
@@ -77,6 +78,11 @@ def build_workspace_router(prefix, workspace, executor, capture):
             ValueError,
         ) as exc:
             raise HTTPException(503, "The local model could not generate a usable draft") from exc
+
+    @router.post("/{project}/workspace/task-order")
+    async def move(project: MemoryKey, data: TaskMove, request: Request):
+        authorize(project, request, write=True)
+        return await invoke(workspace.move_task, project, data)
 
     @router.post("/{project}/workspace/tasks/{task}")
     async def update(project: MemoryKey, task: MemoryKey, data: TaskUpdate, request: Request):
