@@ -15,7 +15,16 @@ export const helpTopics = {
       ['Project or repository?', 'A project describes an initiative and its work. A source repository is a codebase. A project can include several repositories, while decisions, goals, and tasks can belong to the project directly.'],
       ['Find project records', 'Search within project filters the inventory. Select a result to preview it in the inspector. Use Open full record for evidence and Explore relationships to see where it fits in the graph.'],
       ['Tracker activity', 'The Overview shows tracker configuration and recently processed events. Open a linked task to see its current status. A stale event is recorded for traceability and leaves the task unchanged.'],
-    ], related: ['decisions', 'code', 'review', 'effectiveness'],
+    ], related: ['develop-with-codex', 'decisions', 'code', 'review', 'effectiveness'],
+  },
+  'develop-with-codex': {
+    group: 'Get started', title: 'Develop with Codex',
+    brief: 'Use Codex for implementation and review, and record verified outcomes in MemoryGraphMCP.',
+    sections: [
+      ['Bring the task into Codex', 'In Project Overview, open Tasks and take the task link and acceptance criteria into a Codex session in the source repository. Read AGENTS.md and call get_project_guidance for the selected project. Follow the relevant ADR, constraint, and test citations.'],
+      ['Implement and review in Codex', 'Work on a focused branch, run the relevant checks, and review the exact diff or commit. Publishing requires explicit approval. Agent execution from the MemoryGraphMCP task panel is optional.'],
+      ['Record the verified outcome', 'Return to the task and select Update state. When verified, choose Completed and record the commit, checks and results, any unresolved findings, and follow-up links. Link relevant ADRs or evidence through the graph. If work remains, keep the task open and record the blocker in a linked observation.'],
+    ], related: ['projects', 'guidance', 'source-control'],
   },
   account: {
     group: 'Get started', title: 'Account and access',
@@ -131,7 +140,7 @@ export const helpTopics = {
       ['Choose the right scope', 'Global Guidance sets deployment-wide instructions. Use the Guidance tab inside a project for local rules such as branch policy or which tests to run.'],
       ['Draft and publish', 'Admins manage Global Guidance. Project writers and admins can save a project draft. An admin approves and publishes the saved revision. Version history records what was published and by whom.'],
       ['Read guidance from an agent', 'AGENTS.md is the repository entry point. Use get_project_guidance to retrieve current global and project instructions, accepted ADRs, and active constraints. The tool exposes published guidance.'],
-    ], related: ['account', 'projects'],
+    ], related: ['develop-with-codex', 'account', 'projects'],
   },
   'token-usage': {
     group: 'Measure outcomes', title: 'Token usage',
