@@ -255,7 +255,8 @@ class ProjectWorkspaceRepository:
             "suggested_contract": self.suggested_repair_contract(source, result["summary"]),
             "suggested_direction": (
                 "Adjust the approach to address the latest blockers. First add a regression "
-                "case for each blocker, then make the smallest change that passes those checks."
+                "case for each blocker that fails on the blocked patch. Then make the smallest "
+                "change that passes those same tests."
             ),
             "previous_review": earlier,
             "agent": "codex",
@@ -266,7 +267,13 @@ class ProjectWorkspaceRepository:
             "prompt": (
                 "Address the blocking review findings below in the staged implementation. "
                 "Preserve unrelated changes and run focused regression tests. "
-                "Report how each finding was addressed.\n\n" + result["summary"]
+                "Report how each finding was addressed.\n\n"
+                + result["summary"]
+                + (
+                    f"\n\nEarlier blockers to preserve in the tests:\n{earlier['findings']}"
+                    if earlier
+                    else ""
+                )
             )[:8000],
         }
 
@@ -527,6 +534,12 @@ class ProjectWorkspaceRepository:
                         (value for value in reversed(source.results) if value.get("verification")),
                         {},
                     )
+                    if source.repair_review_key and not (
+                        implementation.get("regression_proof") or {}
+                    ).get("passed"):
+                        raise ArchitectureGraphError(
+                            "Prove the regression on the blocked patch before model review"
+                        )
                     if not implementation.get("verification", {}).get("passed"):
                         raise ArchitectureGraphError("Required tests must pass before model review")
                     contract = source.repair_contract

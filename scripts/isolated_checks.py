@@ -57,4 +57,9 @@ def run_isolated_check(worktree: Path, image: str, command: list[str]) -> dict:
             return {"command": " ".join(command), "passed": False, "output": "Check timed out."}
         output.seek(max(0, output.tell() - 24_000))
         text = output.read().decode(errors="replace")
-    return {"command": " ".join(command), "passed": result.returncode == 0, "output": text}
+    return {
+        "command": " ".join(command),
+        "passed": result.returncode == 0,
+        "output": text,
+        "exit_code": result.returncode,
+    }

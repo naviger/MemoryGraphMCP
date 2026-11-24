@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 from app.domain.architecture import EntityName, TaskStatus
 from app.domain.execution_usage import ExecutionUsage
 from app.domain.models import MemoryKey
-from app.domain.repair_contract import RepairContract, RepairVerification
+from app.domain.repair_contract import RegressionProof, RepairContract, RepairVerification
 
 WorkType = Literal["Task", "Goal", "Risk", "Constraint"]
 AgentName = Literal["local", "codex", "claude-code", "openhands"]
@@ -82,6 +82,7 @@ class AgentResult(BaseModel):
     repaired_target: dict[str, str] | None = None
     verification: RepairVerification | None = None
     applied_commit: dict[str, str] | None = None
+    regression_proof: RegressionProof | None = None
     generated_contract: RepairContract | None = None
 
 

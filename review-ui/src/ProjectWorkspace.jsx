@@ -151,16 +151,28 @@ function StepDetails({ step, now, navigate, children }) {
       </div>}
       {(!result.applied_commit || result.reviewed_target) && <ReviewResult result={result} navigate={navigate} />}
       {result.verification && <details open={!result.verification.passed}>
-        <summary>{result.verification.passed ? 'Required regression tests passed' : 'Required regression tests failed'}</summary>
+        <summary>{result.verification.passed ? 'Required Docker tests passed' : 'Required Docker tests failed'}</summary>
         <p><code>{result.verification.command}</code></p>
         <pre>{result.verification.output}</pre>
+      </details>}
+      {result.regression_proof && <details open={!result.regression_proof.passed}>
+        <summary>{result.regression_proof.passed ? 'Regression reproduced and fixed' : 'Regression proof incomplete'}</summary>
+        <p>{result.regression_proof.summary}</p>
+        {[
+          ['Blocked patch with the revised tests', result.regression_proof.baseline],
+          ['Revised patch with the same failing tests', result.regression_proof.revision],
+        ].map(([label, check]) => check && <section key={label}>
+          <h5>{label}</h5>
+          <p><code>{check.command}</code></p>
+          <pre>{check.output}</pre>
+        </section>)}
       </details>}
       <p>{result.summary}</p>
       {result.plan && <section><h5>Plan</h5><p className="execution-text">{result.plan}</p></section>}
       {result.pull_request && <p><strong>Pull request</strong> {result.pull_request}</p>}
       {result.lesson && <p>{result.lesson}</p>}
       {[
-        ['Checks', result.tests],
+        ['Checks reported by the agent', result.tests],
         ['Files changed', result.files_modified],
         ['Review findings', result.review_comments.filter((item) => item !== result.summary)],
         ['Artifacts', result.artifacts.map((item) => `${item.name} — ${item.reference}`)],
@@ -341,6 +353,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
           const mayReview = mayChange && !active && agents.codex?.includes('REVIEW') &&
             job.agent === 'codex' && !progress.reviewed.has(job.key) && !progress.superseded.has(job.key) &&
             (!job.repair_contract || result?.verification?.passed) &&
+            (!job.repair_review_key || result?.regression_proof?.passed) &&
             result?.artifacts.some((item) => item.name === 'Local implementation patch');
           const target = result?.reviewed_target;
           const mayApply = mayChange && !active && task.status !== 'cancelled' &&
@@ -428,7 +441,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
             onChange={(event) => setRepair({ ...repair, tests: event.target.value })} />
         </label>
       </details>
-      <p className="muted">Starting approves one model repair attempt. Required checks run before any follow-up review.</p>
+      <p className="muted">Starting approves one model repair attempt. The revised tests must fail on the blocked patch and pass on the revision before a model can review it.</p>
       {!contractChanged && <p role="status">Change the acceptance criteria or tests before continuing.</p>}
       <label>Repair prompt<textarea ref={repairPrompt} rows={8} maxLength={8000} required disabled={busy}
         value={repair.prompt} onChange={(event) => setRepair({ ...repair, prompt: event.target.value })} /></label>

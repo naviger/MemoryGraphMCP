@@ -20,3 +20,11 @@ class RepairVerification(BaseModel):
     passed: bool
     command: str = Field(default="", max_length=2000)
     output: str = Field(default="", max_length=24000)
+
+
+class RegressionProof(BaseModel):
+    passed: bool
+    summary: str
+    baseline: RepairVerification | None = None
+    revision: RepairVerification | None = None
+    reproduced_tests: list[str] = Field(default_factory=list)

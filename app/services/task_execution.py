@@ -452,6 +452,17 @@ class TaskExecutor:
                     )
                 )
                 return
+            if claimed.repair_review_key and not result.regression_proof:
+                await anyio.to_thread.run_sync(
+                    partial(
+                        move,
+                        claimed,
+                        "FAILED",
+                        usage=result.usage,
+                        failure="The bridge did not report regression evidence for this repair",
+                    )
+                )
+                return
             if claimed.repair_review_key:
                 target = result.repaired_target or {}
                 if (

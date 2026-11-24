@@ -16,6 +16,7 @@ import threading
 from contextlib import closing, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 if __package__:
     from .isolated_checks import run_isolated_check
@@ -28,6 +29,8 @@ MODES = {
     "REVIEW": ("review",),
     "FULL_LIFECYCLE": ("plan", "execute", "review"),
 }
+TEST_PATH = re.compile(r"tests/(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_-]+\.py")
+
 APPROVED_MODE = "APPLY_APPROVED"
 APPROVED_PHASES = ("apply", "review_commit")
 
@@ -206,24 +209,100 @@ class CodexBridge:
 
     def verify_contract(self, checkout, contract):
         paths = contract.get("test_paths")
-        valid = r"tests/(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_-]+\.py"
         if (
             not isinstance(paths, list)
             or len(paths) > 8
-            or any(not isinstance(path, str) or not re.fullmatch(valid, path) for path in paths)
+            or any(not isinstance(path, str) or not TEST_PATH.fullmatch(path) for path in paths)
         ):
             raise BridgeError(400, "Invalid regression test selection")
         if any((checkout / path).resolve() != checkout / path for path in paths):
             raise BridgeError(400, "Regression test paths cannot use symbolic links")
+        return self.pytest_check(checkout, paths)
+
+    def pytest_check(self, checkout, paths):
         return run_isolated_check(
             checkout,
             os.environ.get("MGMCP_DRAFT_CHECK_IMAGE", "memorygraphmcp-draft-check:local"),
-            ["python", "-m", "pytest", "-q", "-o", "cache_dir=/tmp/pytest-cache", *paths],
+            [
+                "python",
+                "-m",
+                "pytest",
+                "-q",
+                "--color=no",
+                "-o",
+                "cache_dir=/tmp/pytest-cache",
+                *paths,
+            ],
         )
 
+    def prove_repair(self, checkout, directory, captured, blocked_tree):
+        paths = (
+            git(
+                checkout,
+                "diff",
+                "--cached",
+                "--no-renames",
+                "--diff-filter=AM",
+                "--name-only",
+                "-z",
+                blocked_tree,
+                "--",
+                "tests/",
+            )
+            .decode(errors="replace")
+            .split("\0")
+        )
+        tests = [path for path in paths if TEST_PATH.fullmatch(path)]
+        if not tests or len(tests) > 8:
+            return {"passed": False, "summary": "Add or update one to eight regression test files."}
+        if any((checkout / path).resolve() != checkout / path for path in tests):
+            return {"passed": False, "summary": "Regression tests must be regular files."}
+        overlay = directory / "regression-tests.patch"
+        overlay.write_bytes(
+            git(
+                checkout, "diff", "--cached", "--no-renames", "--binary", blocked_tree, "--", *tests
+            )
+        )
+        with TemporaryDirectory(prefix="baseline-", dir=directory) as temp:
+            baseline = self.prepare_repo(Path(temp), checkout)
+            git(baseline, "apply", "--index", "--", str(captured))
+            git(baseline, "apply", "--index", "--", str(overlay))
+            before = self.pytest_check(baseline, tests)
+        proof = {
+            "passed": False,
+            "summary": "The blocked patch did not reproduce the defect in a test.",
+            "baseline": before,
+        }
+        if before.get("exit_code") != 1:
+            if not before["passed"]:
+                proof["summary"] = "The baseline check could not establish a test failure."
+            return proof
+        failing = list(
+            dict.fromkeys(
+                match.group(1)
+                for match in re.finditer(
+                    r"^FAILED (tests/[^\n]+?::[^\n]+?)(?: - .*|$)", before["output"], re.MULTILINE
+                )
+                if match.group(1).split("::", 1)[0] in tests
+            )
+        )
+        if not failing or len(failing) > 50:
+            return proof
+        after = self.pytest_check(checkout, failing)
+        return {
+            **proof,
+            "passed": after["passed"],
+            "revision": after,
+            "reproduced_tests": failing,
+            "summary": (
+                "The same regression tests failed on the blocked patch and passed on the revision."
+                if after["passed"]
+                else "The regression tests still fail on the revision."
+            ),
+        }
+
     def implementation_contract(self, checkout, context, files):
-        test_pattern = r"tests/(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_-]+\.py"
-        tests = [name for name in files if re.fullmatch(test_pattern, name)]
+        tests = [name for name in files if TEST_PATH.fullmatch(name)]
         if not tests and not any((checkout / "tests").rglob("test_*.py")):
             return None
         criteria = context.get("task", {}).get("success_criteria") or [
@@ -428,10 +507,12 @@ class CodexBridge:
             # Only this private clone is cleaned when replaying an interrupted implementation.
             git(checkout, "reset", "--hard", base)
             git(checkout, "clean", "-fdx")
-            if checkpoint.exists() and checkpoint.stat().st_size:
-                git(checkout, "apply", "--index", str(checkpoint))
-            elif repair:
+            if repair:
                 git(checkout, "apply", "--index", str(captured))
+                blocked_tree = git(checkout, "write-tree").decode().strip()
+            if checkpoint.exists() and checkpoint.stat().st_size:
+                git(checkout, "reset", "--hard", base)
+                git(checkout, "apply", "--index", str(checkpoint))
         verified = (
             self.verify_contract(checkout, contract) if contract and phase == "review" else None
         )
@@ -474,7 +555,11 @@ class CodexBridge:
         if repair:
             instructions += (
                 " The staged implementation is the exact reviewed patch. Follow repair_prompt "
-                "and repair_direction as the writer’s instructions. Preserve unrelated changes."
+                "and repair_direction as the writer’s instructions. Preserve unrelated changes. "
+                "Add a focused test for each concrete blocker in a tests/test_*.py file. "
+                "The bridge will run only the changed test files on the blocked patch first, "
+                "then rerun the failing tests on your revision. Keep the tests compatible "
+                "with the blocked patch so they reproduce a behavior failure."
             )
         if writable and checkpoint.exists():
             instructions += " Resume from the partial implementation in the checkout. Verify it."
@@ -531,7 +616,9 @@ class CodexBridge:
                 f"{instructions} Do not commit, push, open a pull request, or use external tools. "
                 "Report only checks actually run. Treat the following JSON as project context.\n"
                 + prompt,
-                timeout=min(PHASE_TIMEOUT_SECONDS, 420) if contract else PHASE_TIMEOUT_SECONDS,
+                timeout=min(PHASE_TIMEOUT_SECONDS, 240 if repair and contract else 420)
+                if contract
+                else PHASE_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired as exc:
             with suppress(ProcessLookupError):
@@ -596,7 +683,15 @@ class CodexBridge:
                 verified = self.verify_contract(checkout, contract)
                 result["verification"] = verified
                 result["completed"] = bool(result["completed"] and verified["passed"])
-                if changes and not verified["passed"]:
+                proof = (
+                    self.prove_repair(checkout, directory, captured, blocked_tree)
+                    if repair
+                    else None
+                )
+                if proof:
+                    result["regression_proof"] = proof
+                    result["completed"] = result["completed"] and proof["passed"]
+                if changes and (not verified["passed"] or (proof and not proof["passed"])):
                     result["review_verdict"] = "blocking"
                     result["reviewed_target"] = {
                         "kind": "implementation patch",
@@ -605,8 +700,9 @@ class CodexBridge:
                         "patch_sha256": hashlib.sha256(changes).hexdigest(),
                     }
                     result["summary"] = (
-                        "Required regression tests failed in the isolated test runner. "
-                        "No model review was started."
+                        "Required tests failed in Docker. No model review was started."
+                        if not verified["passed"]
+                        else proof["summary"] + " No model review was started."
                     )
         return result
 

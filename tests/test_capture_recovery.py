@@ -444,6 +444,7 @@ def test_arango_recovery_and_workspace():
             summary="Saved new patch",
             usage=ExecutionUsage(input_tokens=90, output_tokens=10),
             verification={"passed": True},
+            regression_proof={"passed": True, "summary": "Reproduced and fixed"},
             artifacts=[
                 AgentArtifact(
                     name="Local implementation patch",
@@ -542,6 +543,7 @@ def test_arango_recovery_and_workspace():
         result=AgentResult(
             summary="Saved directed patch",
             verification=verified,
+            regression_proof={"passed": True, "summary": "Reproduced and fixed"},
             artifacts=[
                 AgentArtifact(
                     name="Local implementation patch",
