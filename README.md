@@ -330,7 +330,11 @@ docker compose -f docker-compose.yml -f docker-compose.local-auth.yml \
 
 Open `http://127.0.0.1:3200` and select **Sign in**. Keycloak listens on `127.0.0.1:8180` by default. Its local realm is imported on first startup and persisted in the Keycloak volume. The local realm uses a public PKCE client and the distinct `memorygraphmcp-api` access-token audience. Use the same Compose files on subsequent restarts to retain the local authentication settings.
 
-For a single API instance, set `MGMCP_OIDC_BROWSER_SESSION_DB=/var/lib/memorygraphmcp/sessions/browser.sqlite` and supply a stable Fernet key as `MGMCP_OIDC_BROWSER_SESSION_KEY`. The Compose session volume preserves encrypted sessions across API container restarts. Keep the key in private deployment configuration and reuse it on restart. Rotating the key invalidates existing stored sessions. The store is intended for a single API process.
+For persistent browser sessions, set `MGMCP_OIDC_BROWSER_SESSION_DB=/var/lib/memorygraphmcp/sessions/browser.sqlite` and supply a stable Fernet key as `MGMCP_OIDC_BROWSER_SESSION_KEY`. The Compose session volume preserves encrypted sessions across API container restarts. Keep the key in private deployment configuration and reuse it on restart. Rotating the key invalidates existing stored sessions. API replicas on one host can share the same writable session directory on a
+local filesystem that supports SQLite and advisory file locks. Use the same
+database filename, encryption key, issuer, client ID, and UI origin on each
+replica. Route the login start and callback to the same replica because
+pending login flows are held in memory.
 
 
 The `mgmcp-admin` account has the application admin role. Keycloak's administration console signs in to the separate `master` realm. Set `MGMCP_LOCAL_KEYCLOAK_ADMIN_USERNAME` and `MGMCP_LOCAL_KEYCLOAK_ADMIN_PASSWORD` before first startup to bootstrap a temporary Keycloak administrator. For an existing local database, use the same Compose configuration and stop Keycloak before recovery:
@@ -363,7 +367,7 @@ For a shared deployment, run the base Compose file with authentication enabled a
 | `MGMCP_OIDC_BROWSER_AUDIENCE` | Optional audience parameter for providers that require one |
 | `MGMCP_OIDC_ROLE_CLAIM` | Top-level access-token claim containing application role names, default `roles` |
 
-Register `<UI origin>/api/auth/callback` and `<UI origin>/` as the exact login and logout redirect URIs. The provider must issue RS256-signed JWTs. Keycloak's realm roles are also supported. If the provider advertises an end-session endpoint, sign-out ends both the local session and the provider session. Browser sessions live in the API process and expire with the provider tokens or after a service restart. Run one API worker for browser sign-in until shared session storage is configured.
+Register `<UI origin>/api/auth/callback` and `<UI origin>/` as the exact login and logout redirect URIs. The provider must issue RS256-signed JWTs. Keycloak's realm roles are also supported. If the provider advertises an end-session endpoint, sign-out ends both the local session and the provider session. Without persistent session storage, run one API worker for browser sign-in. Sessions expire according to the configured idle and absolute limits and the provider token lifetime.
 
 ### CI test runs
 

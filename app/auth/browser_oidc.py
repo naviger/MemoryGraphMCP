@@ -1,4 +1,5 @@
 from base64 import urlsafe_b64encode
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from hashlib import sha256
@@ -71,7 +72,6 @@ class BrowserOIDC:
         self.flows: dict[str, LoginFlow] = {}
         self.sessions: dict[str, BrowserSession] = {}
         self.store = None
-        self.store_lock = anyio.Lock()
         if self.enabled and settings.oidc_browser_session_db:
             key = settings.oidc_browser_session_key
             if not key or not key.get_secret_value():
@@ -90,22 +90,27 @@ class BrowserOIDC:
         except SQLiteError as exc:
             raise HTTPException(503, "Browser session storage is temporarily unavailable") from exc
 
-    async def get_session(self, session_id: str | None) -> BrowserSession | None:
-        if session_id is None:
-            return None
-        if session_id in self.sessions:
-            return self.sessions[session_id]
+    @asynccontextmanager
+    async def session_guard(self, session_id: str):
         if self.store is None:
+            yield
+            return
+        try:
+            async with self.store.guard(session_id):
+                yield
+        except (OSError, TimeoutError) as exc:
+            raise HTTPException(503, "Browser session coordination is temporarily unavailable") from exc
+
+    async def get_session(self, session_id: str) -> BrowserSession | None:
+        if self.store is None:
+            return self.sessions.get(session_id)
+        data = await self.storage(self.store.read, session_id, time())
+        if data is None:
+            self.sessions.pop(session_id, None)
             return None
-        async with self.store_lock:
-            if session_id in self.sessions:
-                return self.sessions[session_id]
-            data = await self.storage(self.store.read, session_id, time())
-            if data:
-                session = BrowserSession(**data)
-                self.sessions[session_id] = session
-                return session
-        return None
+        session = BrowserSession(**data)
+        self.sessions[session_id] = session
+        return session
 
     async def persist(self, session_id, session, now):
         if self.store is None:
@@ -123,18 +128,18 @@ class BrowserOIDC:
         if session_id is None:
             return
         if self.store:
-            async with self.store_lock:
-                await self.storage(self.store.delete, session_id)
-                self.sessions.pop(session_id, None)
-        else:
-            self.sessions.pop(session_id, None)
+            await self.storage(self.store.delete, session_id)
+        self.sessions.pop(session_id, None)
 
     async def end_session(self, session_id):
-        session = await self.get_session(session_id)
-        if session:
-            async with session.lock:
-                await self.discard(session_id)
-        return session
+        if session_id is None:
+            return None
+        async with self.session_guard(session_id):
+            session = await self.get_session(session_id)
+            if session:
+                async with session.lock:
+                    await self.discard(session_id)
+            return session
 
     def require_origin(self, origin: str | None) -> None:
         if not self.enabled or origin != self.origin:
@@ -150,6 +155,10 @@ class BrowserOIDC:
     async def claims(self, session_id: str | None, *, active: bool = False) -> dict | None:
         if session_id is None:
             return None
+        async with self.session_guard(session_id):
+            return await self._claims(session_id, active=active)
+
+    async def _claims(self, session_id: str, *, active: bool) -> dict | None:
         session = await self.get_session(session_id)
         if session is None:
             return None
@@ -198,6 +207,7 @@ class BrowserOIDC:
                         await self.discard(session_id)
                         return None
                     session.next_refresh_at = time() + 5
+                    changed = True
                 except (AuthenticationError, KeyError, TypeError, ValueError):
                     await self.discard(session_id)
                     return None
@@ -205,6 +215,8 @@ class BrowserOIDC:
             if self.sessions.get(session_id) is not session or not self.session_alive(session, now):
                 return None
             if now >= session.access_expires:
+                if changed:
+                    await self.persist(session_id, session, now)
                 raise HTTPException(503, "Session refresh is temporarily unavailable")
             if active:
                 session.last_activity = now

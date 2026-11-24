@@ -1,3 +1,4 @@
+import pytest
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI
@@ -125,12 +126,14 @@ def test_activity_refreshes_rotating_tokens_without_extending_absolute_session(m
     anyio.run(exercise)
 
 
-def test_browser_session_survives_restart_and_logout_revokes_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize("logout_replica", [0, 1])
+def test_warm_browser_replicas_share_refresh_and_logout(tmp_path, monkeypatch, logout_replica):
     import anyio
     from cryptography.fernet import Fernet
 
     from app.auth import browser_oidc
     from app.auth.browser_oidc import BrowserSession
+    from app.auth.jwt import JWTClaims
 
     now = 1000.0
     monkeypatch.setattr(browser_oidc, "time", lambda: now)
@@ -153,11 +156,12 @@ def test_browser_session_survives_restart_and_logout_revokes_it(tmp_path, monkey
         return BrowserOIDC(settings, JWTVerifier(settings))
 
     async def exercise():
+        nonlocal now
         first = new_browser()
         await first.persist(
             "opaque-cookie",
             BrowserSession(
-                claims={"subject": "writer", "raw": {}},
+                claims={"subject": "writer", "display_name": "Writer", "raw": {}},
                 id_token="secret-id-token",
                 end_session_endpoint=None,
                 access_expires=1140,
@@ -178,7 +182,32 @@ def test_browser_session_survives_restart_and_logout_revokes_it(tmp_path, monkey
             )
         )
         second = new_browser()
-        assert (await second.claims("opaque-cookie", active=True))["subject"] == "writer"
+        replicas = [first, second]
+        for replica in replicas:
+            assert (await replica.claims("opaque-cookie", active=True))["subject"] == "writer"
+
+        now = 1115.0
+        exchanges = []
+
+        async def exchange(self, client, endpoint, form):
+            exchanges.append(form["refresh_token"])
+            await anyio.sleep(0.05)
+            return {"access_token": "updated", "refresh_token": "rotated"}
+
+        monkeypatch.setattr(BrowserOIDC, "_exchange", exchange)
+        monkeypatch.setattr(JWTVerifier, "verify", lambda self, token: JWTClaims(
+            sub="writer", raw={"roles": ["reader"]}, exp=1300,
+        ))
+        results = []
+
+        async def refresh(replica):
+            results.append(await replica.claims("opaque-cookie", active=True))
+
+        async with anyio.create_task_group() as group:
+            for replica in replicas:
+                group.start_soon(refresh, replica)
+        assert exchanges == ["secret-refresh-token"]
+        assert all(result["raw"]["roles"] == ["reader"] for result in results)
 
         wrong_key = settings.model_copy(
             update={
@@ -188,7 +217,9 @@ def test_browser_session_survives_restart_and_logout_revokes_it(tmp_path, monkey
             }
         )
         assert await BrowserOIDC(wrong_key, JWTVerifier(wrong_key)).claims("opaque-cookie") is None
-        assert await second.end_session("opaque-cookie") is not None
+        assert await replicas[logout_replica].end_session("opaque-cookie") is not None
+        for replica in replicas:
+            assert await replica.claims("opaque-cookie", active=True) is None
         assert await new_browser().claims("opaque-cookie") is None
 
     anyio.run(exercise)
