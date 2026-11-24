@@ -73,3 +73,13 @@ def test_checked_in_pilot_manifest_is_small_and_covers_both_case_kinds():
     assert len(pilot.cases) == 4
     assert {case.project for case in pilot.cases} == {"MemoryGraphMCP", "Sextant"}
     assert {case.kind for case in pilot.cases} == {"retrieval", "delivery"}
+    plans = trial_plan(pilot)
+    assert all(bool(case["delivery_guidance"]) == (case["kind"] == "delivery") for case in plans)
+    assert all("expected" not in case for case in plans)
+
+
+def test_delivery_guidance_cannot_appear_in_a_retrieval_case():
+    document = manifest().model_dump(mode="json")
+    document["cases"][0]["delivery_guidance"] = ["Run a pinned check."]
+    with pytest.raises(ValueError, match="Only delivery cases"):
+        Benchmark.model_validate(document)

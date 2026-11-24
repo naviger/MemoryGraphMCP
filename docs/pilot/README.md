@@ -8,7 +8,9 @@ small test-writing task. Each case runs twice, for eight trials total.
 
 1. Generate the trial prompts with the plan command below. Give the agent only the
    selected case from that output. Keep the manifest's expected claims and citations
-   with the grader.
+   with the grader. Include the shared `delivery_guidance` in both conditions.
+   It states the pinned behavior and test runtime assumptions. Record its use
+   in the trial setup because it changes comparability with earlier delivery runs.
 2. Use fresh, disposable worktrees at the case's exact base commit and fresh agent
    sessions. Keep the model version, settings, tools apart from project memory,
    instructions, time budget, and check commands the same within each pair. Use a

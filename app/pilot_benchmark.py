@@ -35,11 +35,14 @@ class Case(Input):
     as_of: CalendarDate
     expected: list[ExpectedClaim] = Field(min_length=1)
     checks: dict[Text, Text] = Field(default_factory=dict)
+    delivery_guidance: list[Text] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_case(self):
         if bool(self.checks) != (self.kind == "delivery"):
             raise ValueError("Exactly the delivery cases need checks")
+        if self.delivery_guidance and self.kind != "delivery":
+            raise ValueError("Only delivery cases can include delivery guidance")
         if len({claim.id for claim in self.expected}) != len(self.expected):
             raise ValueError("Expected claim IDs must be unique within a case")
         return self

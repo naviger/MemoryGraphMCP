@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml README.md ./
 COPY app ./app
 COPY tests ./tests
+COPY docs/pilot/benchmark.json ./docs/pilot/benchmark.json
 
 RUN uv pip install --system --no-cache-dir .
 

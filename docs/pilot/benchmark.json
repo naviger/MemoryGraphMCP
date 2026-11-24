@@ -46,7 +46,12 @@
       ],
       "checks": {
         "validation-status": "node --test review-ui/tests/validationStatus.test.js"
-      }
+      },
+      "delivery_guidance": [
+        "The pinned validationStatus implementation treats a validation timestamp after the supplied as-of date as 'Never validated'. Write an assertion for that observable status.",
+        "Use an explicit as-of date earlier than last_validated and a later next_review_due, so the assertion exercises the future-validation guard. Append one test using the existing imports.",
+        "Cite repo:review-ui/src/validationStatus.js for the rule when citing repository evidence."
+      ]
     },
     {
       "project": "Sextant",
@@ -94,7 +99,13 @@
       ],
       "checks": {
         "jwks-cache": "cd api && python -m pytest -q tests/test_jwks_cache.py"
-      }
+      },
+      "delivery_guidance": [
+        "The check runs from api/. Import get_jwks from app.core.security and call it directly twice.",
+        "Use pytest's built-in monkeypatch fixture to replace app.core.security.httpx.get with a fake response. Implement raise_for_status() and json() on the fake. Assert both reads return the JWKS and the fake receives exactly one call.",
+        "Clear get_jwks.cache_clear() before the reads and in a finally block. Do not use an API endpoint, token, or mock of get_jwks itself.",
+        "Cite repo:docs/adr/adr-0009-jwks-caching.md when citing repository evidence for the cache decision."
+      ]
     }
   ]
 }
