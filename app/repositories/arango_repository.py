@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -30,6 +29,7 @@ from app.domain.knowledge_snapshot import (
     compare_knowledge,
 )
 from app.domain.models import (
+    markdown_adr_status,
     ADRAcceptanceConflictCheck,
     ADRConflict,
     ADRConflictListQuery,
@@ -1178,13 +1178,8 @@ class ArangoMemoryRepository:
         documents = []
         for row in rows:
             header = row.pop("header", "")
-            status = re.search(
-                r"^\s*-\s*Status:\s*(proposed|accepted|superseded|rejected)\b",
-                header or "",
-                re.IGNORECASE | re.MULTILINE,
-            )
-            if status:
-                row["status"] = status[1].lower()
+            if status := markdown_adr_status(header or ""):
+                row["status"] = status
             documents.append(ProjectDocument.model_validate(row))
         return documents
 
@@ -1232,11 +1227,14 @@ class ArangoMemoryRepository:
         """ + _VALIDITY_FILTER + """
             FILTER doc.status NOT IN ["proposed", "rejected", "archived", "inactive"]
             LET title = CONCAT_SEPARATOR(" ", doc.title, doc._key, doc.conflict_scope.topic)
-            LET body = CONCAT_SEPARATOR(" ", doc.decision, doc.content, doc.conflict_scope.system,
+            LET decision = CONCAT_SEPARATOR(" ", doc.decision, doc.rationale, doc.consequences)
+            LET body = CONCAT_SEPARATOR(" ", doc.content, doc.conflict_scope.system,
                 doc.conflict_scope.environment)
             LET title_matches = INTERSECTION(terms, TOKENS(title, "text_en"))
+            LET decision_matches = INTERSECTION(terms, TOKENS(decision, "text_en"))
             LET body_matches = INTERSECTION(terms, TOKENS(body, "text_en"))
-            LET score = 2 * LENGTH(title_matches) + LENGTH(body_matches)
+            LET score = 2 * LENGTH(title_matches) + 2 * LENGTH(decision_matches)
+                + LENGTH(MINUS(body_matches, decision_matches))
             FILTER score > 0
             SORT score DESC, doc.effective_date != null DESC, doc.kind == "adr" DESC, doc._key
             LIMIT @limit

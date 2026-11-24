@@ -61,6 +61,18 @@ class ContextPackage(BaseModel):
     )
 
 
+class ContextClaim(BaseModel):
+    text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    citations: list[Annotated[str, StringConstraints(min_length=1, max_length=512)]] = Field(
+        min_length=1, max_length=10,
+    )
+
+
+class ContextClaimCheck(BaseModel):
+    claim: ContextClaim
+    status: Literal["supported", "unknown_citation", "unsupported_text"]
+
+
 class UsageOutcome(BaseModel):
     completed: bool
     follow_up_retries: int = Field(default=0, ge=0, le=1000)

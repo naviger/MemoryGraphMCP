@@ -566,6 +566,12 @@ and static heuristics, so missing rationale stays unknown.
 
 ### Graph context packages and token usage
 
+After building context, callers can use `validate_context_citations` with the
+same query and proposed **verbatim** claim sentences. Send citation identifiers
+as `records:<key>` or `entities:<key>` from the returned context. The tool rebuilds
+the dated, scoped package and distinguishes unknown citation IDs from text that
+the cited excerpts do not contain. Review paraphrases separately.
+
 Call `build_context_package` with a question and optionally a project, entity,
 ADR, goal, or service key. An ADR anchor can use its graph key or stored record
 key. The tool uses graph anchors and direct relationships to collect compact

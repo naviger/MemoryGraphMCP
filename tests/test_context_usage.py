@@ -279,3 +279,92 @@ async def test_mcp_context_returns_usage_and_records_outcome(context_service):
             "completed": True, "follow_up_retries": 1, "response_tokens": 12,
         }})
         assert outcome.structured_content["outcome"]["follow_up_retries"] == 1
+        validation = await client.call_tool("validate_context_citations", {
+            "query": {"question": "How does AssetService work?", "service": "assets"},
+            "claims": [{"text": "Use canonical asset IDs.", "citations": ["records:record"]},
+                       {"text": "Use external IDs.", "citations": ["records:record"]}],
+        })
+        assert [row["status"] for row in validation.structured_content["result"]] == [
+            "supported", "unsupported_text",
+        ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("question", [
+    "How does the Sextant API avoid fetching signing keys for every token validation, and where is that behavior implemented?",
+    "Add a unit test in api/tests/test_jwks_cache.py showing that two reads reuse one fetched JWKS response. "
+    "Mock the network and clear the cache before and after the test. Preserve production behavior and cite the decision behind the test.",
+])
+async def test_pilot_jwks_markdown_adr_is_retrieved_and_invented_citations_are_rejected(context_service, question):
+    from app.domain.context_usage import ContextClaim
+
+    record = MemoryDocument(
+        key="docs__adr__adr-0009-jwks-caching.md", kind="adr", title="Adr 0009 Jwks Caching",
+        source="docs/adr/adr-0009-jwks-caching.md",
+        content=("# ADR-0009: JWKS caching\n\n- Status: Accepted\n\n## Decision\n\n"
+                 "We will cache the Keycloak JWKS response using an LRU cache in the security layer "
+                 "before token verification.\n\n## Evidence from code\n\n"
+                 "- [api/app/core/security.py](../../api/app/core/security.py) uses "
+                 "`@lru_cache(maxsize=1)` on `get_jwks()`.\n"
+                 "- The function fetches the Keycloak certs endpoint and caches the parsed JSON response.\n"
+                 "- The `decode_token` function delegates to token verification logic that assumes "
+                 "trusted signing material is available from the cached JWKS path."),
+    )
+    memory = context_service.memory
+    memory.project_documents = lambda *args: [record]
+    memory.search_question_documents = lambda *args, **kwargs: [record]
+    query = ContextQuery(
+        question=question, project_key="project", as_of=date(2026, 11, 24),
+    )
+    package, _, _ = await context_service.build(query)
+    expected = next((item for item in package.relevant_adrs if item.key == record.key), None)
+    assert expected is not None
+    assert "maxsize=1" in expected.text
+    claim = "We will cache the Keycloak JWKS response using an LRU cache in the security layer before token verification."
+    results = await context_service.check_claims(query, [
+        ContextClaim(text=claim, citations=[f"records:{record.key}"]),
+        ContextClaim(text=claim, citations=["records:adr-0009-jwks-caching.md"]),
+        ContextClaim(text="The API fetches JWKS for every token validation.", citations=[f"records:{record.key}"]),
+    ])
+    assert [entry.status for entry in results] == ["supported", "unknown_citation", "unsupported_text"]
+
+    record.content = record.content.replace("Status: Accepted", "Status: Proposed")
+    package, _, _ = await context_service.build(query)
+    assert record.key not in {item.key for item in package.relevant_adrs}
+
+
+@pytest.mark.asyncio
+async def test_pilot_review_schedule_includes_cited_expiration_consequence(context_service):
+    from app.domain.context_usage import ContextClaim
+
+    record = context_service.memory.read_document("record")
+    original = record.model_copy(update={"key": "memorygraphmcp-adr-evidence-revalidation",
+        "title": "Keep revalidation separate from expiration",
+        "decision": "Record reviewer, timestamp, and cited evidence when validating a record.",
+        "consequences": "The review queue surfaces overdue validations. Updating confidence does not move expiration.",
+    })
+    context_service.memory.project_documents = lambda *args: [record, original]
+    context_service.memory.search_question_documents = lambda *args, **kwargs: [original]
+    query = ContextQuery(
+        question="What happens to a MemoryGraphMCP record's applicability when a validation review is late? "
+                 "What does saving a validation do to the expiration date?",
+        project_key="project", as_of=date(2026, 11, 24), max_context_tokens=450,
+    )
+    package, _, _ = await context_service.build(query)
+    assert package.relevant_adrs[0].key == original.key
+    assert "Updating confidence does not move expiration." in package.relevant_adrs[0].text
+    results = await context_service.check_claims(query, [
+        ContextClaim(text="Updating confidence does not move expiration.", citations=[f"records:{original.key}"]),
+        ContextClaim(text="Saving a validation updates the expiration date.", citations=[f"records:{original.key}"]),
+    ])
+    assert [entry.status for entry in results] == ["supported", "unsupported_text"]
+
+    future = query.model_copy(update={"question": (
+        "Add one focused regression for a last_validated date later than the requested as-of date. "
+        "Keep the validation and expiration rules unchanged. Explain the rule the test verifies and cite the evidence."
+    )})
+    future_results = await context_service.check_claims(future, [ContextClaim(
+        text="The validation status is Current when last_validated is later than the requested as-of date.",
+        citations=[f"records:{original.key}"],
+    )])
+    assert future_results[0].status == "unsupported_text"

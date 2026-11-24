@@ -202,6 +202,7 @@ def review_api(monkeypatch, request):
                 key=key,
                 title="Authentication ADR",
                 date="2026-01-01",
+                status="accepted",
                 content="Use OIDC",
                 decision="Use OIDC",
                 rationale="Tenant isolation",
