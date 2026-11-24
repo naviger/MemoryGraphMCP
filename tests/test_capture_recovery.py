@@ -648,6 +648,7 @@ def test_arango_recovery_and_workspace():
     assert graph.read_entity(second.key).position == positions[second.key]
     assert workspace.move_task("alpha", move) == positions
     assert graph.read_entity(foreign.key).position is None
+    assert first.created_at is not None
     assert first.started_at is None and first.ended_at is None
     started = workspace.task_update("alpha", first.key, TaskUpdate(status="in_progress"), "writer")
     finished = workspace.task_update(
@@ -660,9 +661,14 @@ def test_arango_recovery_and_workspace():
         workspace.task_update("alpha", first.key, TaskUpdate(status="open"), "writer")
     assert graph.read_entity(first.key) == finished
     summary = next(node for node in workspace.entities("alpha") if node.key == first.key)
+    assert datetime.fromisoformat(summary.created_at) == first.created_at
     assert datetime.fromisoformat(summary.started_at) == finished.started_at
     assert datetime.fromisoformat(summary.ended_at) == finished.ended_at
     assert summary.position == finished.position
+    with graph._transaction() as tx:
+        tx.collection(graph._entities).update({"_key": first.key, "created_at": None})
+    legacy = next(node for node in workspace.entities("alpha") if node.key == first.key)
+    assert datetime.fromisoformat(legacy.created_at) == first.created_at
 
 
 def test_workspace_routes_require_project_and_writer_grants():

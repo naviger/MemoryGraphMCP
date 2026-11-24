@@ -194,6 +194,7 @@ TaskStatus = Literal["open", "in_progress", "done", "cancelled"]
 class Task(ArchitectureNode):
     entity_type: Literal["Task"] = "Task"
     status: TaskStatus = "open"
+    created_at: AwareDatetime | None = None
     started_at: AwareDatetime | None = None
     ended_at: AwareDatetime | None = None
     position: int | None = Field(default=None, ge=1)

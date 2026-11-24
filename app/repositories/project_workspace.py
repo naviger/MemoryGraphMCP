@@ -88,7 +88,7 @@ class ProjectWorkspaceRepository:
         elif draft.kind == "Goal":
             node = Goal(**base, project_key=project)
         else:
-            node = (Task if draft.kind == "Task" else Risk)(**base)
+            node = Task(**base, created_at=now) if draft.kind == "Task" else Risk(**base)
         with self.graph._transaction() as tx:
             self.graph._require_entity_type(tx.collection(self.graph._entities), project, "Project")
             self.put(tx, node)

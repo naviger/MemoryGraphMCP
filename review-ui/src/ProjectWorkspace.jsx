@@ -381,7 +381,7 @@ export default function ProjectWorkspace({ projectKey, token, navigate, onUnauth
         </th>}
         <th scope="col">{kind}</th><th scope="col">State</th>
         {kind === 'Task' && <>
-          {[['started_at', 'Start date/time'], ['ended_at', 'End date/time']].map(([field, label]) =>
+          {[['created_at', 'Start date/time'], ['ended_at', 'End date/time']].map(([field, label]) =>
             <th scope="col" key={field} aria-sort={sort.field === field ? sort.direction : undefined}>
               <button type="button" className="button outlined" onClick={() => setColumn(field)}>{label}</button>
             </th>)}
@@ -420,7 +420,7 @@ export default function ProjectWorkspace({ projectKey, token, navigate, onUnauth
             {Object.entries(STATES).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select> : STATES[item.status] || item.status || '—'}</td>
         {kind === 'Task' && <>
-          <td>{stamp(item.started_at)}</td><td>{stamp(item.ended_at)}</td>
+          <td>{stamp(item.created_at)}</td><td>{stamp(item.ended_at)}</td>
           <td><button type="button" className="button outlined"
             onClick={() => setEditor({ type: 'execution', task: item })}>History</button></td>
         </>}
