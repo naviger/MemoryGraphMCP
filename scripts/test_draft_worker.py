@@ -24,6 +24,7 @@ from app.domain.test_drafts import (
     PostVerification,
     WorkerDraft,
 )
+from scripts.isolated_checks import run_isolated_check
 
 ROOT = Path(os.environ.get("MGMCP_DRAFT_WORKTREE", ".")).resolve()
 TOKEN = os.environ["MGMCP_DRAFT_WORKER_TOKEN"]
@@ -129,53 +130,7 @@ def command_for(draft: Issue | WorkerDraft) -> list[str]:
 
 
 def check(worktree: Path, command: list[str]) -> DraftCheck:
-    name = "mgmcp-fix-" + uuid4().hex
-    args = [
-        "docker",
-        "run",
-        "--rm",
-        "--name",
-        name,
-        "--pull",
-        "never",
-        "--network",
-        "none",
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges",
-        "--pids-limit",
-        "96",
-        "--memory",
-        "1g",
-        "--cpus",
-        "1",
-        "--user",
-        "65532:65532",
-        "--tmpfs",
-        "/tmp:rw,nosuid,nodev,size=128m",
-        "--workdir",
-        "/src",
-        "--mount",
-        f"type=bind,source={worktree},target=/src,readonly",
-        IMAGE,
-        *command,
-    ]
-    with tempfile.TemporaryFile() as output:
-        try:
-            result = subprocess.run(args, stdout=output, stderr=subprocess.STDOUT, timeout=45)
-        except subprocess.TimeoutExpired:
-            subprocess.run(
-                ["docker", "rm", "-f", name],
-                capture_output=True,
-                timeout=10,
-                check=False,
-            )
-            return DraftCheck(command=" ".join(command), passed=False, output="Check timed out.")
-        output.seek(max(0, output.tell() - 24_000))
-        text = output.read().decode(errors="replace")
-    return DraftCheck(command=" ".join(command), passed=result.returncode == 0, output=text)
+    return DraftCheck.model_validate(run_isolated_check(worktree, IMAGE, command))
 
 
 def warning_found(issue: Issue | WorkerDraft, output: str) -> bool:

@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     mcp_mount_path: str = Field(default="/mcp")
 
     auth_required: bool = True
+    project_authorization_required: bool = False
+    project_grants_claim: str = Field(default="mgmcp_projects", min_length=1)
+    arango_provision_storage: bool = True
     jwt_issuer: str | None = None
     jwt_audience: str | None = None
     jwt_secret_key: str | None = None
@@ -46,6 +49,10 @@ class Settings(BaseSettings):
     oidc_browser_discovery_url: str = ""
     oidc_browser_scopes: str = ""
     oidc_browser_audience: str = ""
+    oidc_browser_session_db: str = ""
+    oidc_browser_session_key: SecretStr | None = None
+    oidc_browser_idle_seconds: int = Field(default=1800, ge=60, le=86400)
+    oidc_browser_max_seconds: int = Field(default=28800, ge=60, le=604800)
     oidc_browser_token_auth: Literal["client_secret_basic", "client_secret_post"] = "client_secret_basic"
     oidc_role_claim: str = "roles"
 
@@ -87,6 +94,10 @@ class Settings(BaseSettings):
     ci_github_publish_token: SecretStr | None = None
     test_fix_ollama_url: str = ""
     test_fix_ollama_model: str = "qwen3-coder:30b"
+    workspace_agent_urls: dict[str, str] = Field(default_factory=dict)
+    workspace_agent_allowed_urls: list[str] = Field(default_factory=list)
+    workspace_ollama_allowed_urls: list[str] = Field(default_factory=list)
+    workspace_agent_token: SecretStr | None = None
     draft_worker_url: str = ""
     draft_worker_token: SecretStr | None = None
     arango_documents_collection: str = Field(default="memory_documents")
@@ -166,6 +177,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_auth_configuration(self) -> "Settings":
+        if self.project_authorization_required and not self.auth_required:
+            raise ValueError("Project authorization requires authentication")
+        if self.project_authorization_required and self.arango_username == "root":
+            raise ValueError("Project authorization requires a non-root ArangoDB runtime account")
         if self.auth_required and not (self.jwt_secret_key or self.jwt_public_key):
             if not (self.keycloak_jwks_uri and self.effective_jwt_issuer and self.effective_jwt_audience):
                 raise ValueError("JWT authentication requires a signing key or an OIDC issuer, audience, and JWKS URI")

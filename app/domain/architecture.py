@@ -6,8 +6,10 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from app.domain.execution_usage import ExecutionAttempt
 from app.domain.knowledge_capture import CaptureSuggestion, Evidence
 from app.domain.models import MemoryKey
+from app.domain.repair_contract import RepairContract
 
 EntityName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
 EntityType = Literal[
@@ -29,6 +31,9 @@ EntityType = Literal[
     "Project",
     "Task",
     "ConversationSummary",
+    "Execution",
+    "Artifact",
+    "Agent",
 ]
 RelationshipType = Literal[
     "implements",
@@ -264,6 +269,52 @@ class Observation(ArchitectureNode):
     suggestions: list[CaptureSuggestion] = Field(default_factory=list, max_length=50)
 
 
+class Execution(ArchitectureNode):
+    entity_type: Literal["Execution"] = "Execution"
+    project_key: MemoryKey
+    task_key: MemoryKey
+    patch_execution_key: MemoryKey | None = None
+    approved_review_key: MemoryKey | None = None
+    approved_patch: dict[str, str] | None = None
+    guided_repair: bool = False
+    repair_review_key: MemoryKey | None = None
+    repair_patch_sha256: str | None = None
+    repair_prompt: str | None = None
+    repair_direction: str | None = None
+    repair_contract: RepairContract | None = None
+    repair_token_ceiling: int | None = None
+    approve_review_attempt: bool = False
+    additional_review_tokens: int | None = None
+    agent: Literal["local", "codex", "claude-code", "openhands"]
+    mode: Literal["PLAN_ONLY", "IMPLEMENT", "REVIEW", "FULL_LIFECYCLE", "APPLY_APPROVED"]
+    state: Literal[
+        "BACKLOG", "PLANNED", "READY", "RUNNING", "BLOCKED", "REVIEW", "COMPLETED", "FAILED",
+        "CANCEL_REQUESTED", "CANCELLED",
+    ] = "READY"
+    phase: int = 0
+    revision: int = 0
+    requested_by: str
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
+    lease_until: AwareDatetime | None = None
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
+    context_keys: list[MemoryKey] = Field(default_factory=list)
+    results: list[dict[str, Any]] = Field(default_factory=list)
+    attempts: list[ExecutionAttempt] = Field(default_factory=list)
+    failure: str | None = None
+
+
+class Artifact(ArchitectureNode):
+    entity_type: Literal["Artifact"] = "Artifact"
+    project_key: MemoryKey
+    reference: str
+
+
+class Agent(ArchitectureNode):
+    entity_type: Literal["Agent"] = "Agent"
+    project_key: MemoryKey
+
+
 ArchitectureEntity = Annotated[
     ArchitectureADR
     | DomainConcept
@@ -282,7 +333,10 @@ ArchitectureEntity = Annotated[
     | Observation
     | Project
     | Task
-    | ConversationSummary,
+    | ConversationSummary
+    | Execution
+    | Artifact
+    | Agent,
     Field(discriminator="entity_type"),
 ]
 

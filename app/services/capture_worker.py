@@ -1,11 +1,12 @@
 """Background adapters for local commits, GitHub activity, and graph changes."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from io import BytesIO
 from pathlib import Path, PurePosixPath
-from zipfile import BadZipFile, ZipFile
+from zipfile import ZipFile
 
 import anyio
 import httpx
@@ -19,6 +20,12 @@ from app.domain.architecture import (
     Task,
     architecture_key,
 )
+from app.domain.capture_checkpoint import (
+    CaptureCheckpoint,
+    CaptureHistoryInput,
+    CaptureStatus,
+    CaptureStream,
+)
 from app.domain.exceptions import ArchitectureGraphError
 from app.domain.knowledge_capture import CaptureEvent, CommitCapture, CommitEnvelope
 from app.domain.test_runs import TestRun
@@ -27,6 +34,7 @@ from app.services.python_architecture import MAX_FILES, MAX_SOURCE_BYTES, Python
 
 logger = structlog.get_logger(__name__)
 _MAX_ENVELOPE_BYTES = 24_000_000
+_UNREACHABLE_HEAD = "Previous branch head is no longer reachable. Request a backfill to establish a new baseline."
 
 
 class CaptureWorker:
@@ -37,20 +45,98 @@ class CaptureWorker:
         self.project = settings.capture_project_key
         self.repository = settings.capture_repository_key
 
+    def streams(self) -> list[CaptureStream]:
+        streams: list[CaptureStream] = ["graph"]
+        if self.settings.capture_spool and self.repository:
+            streams.append("spool")
+        if self.settings.capture_github_repository and self.repository:
+            streams.extend(["commits", "pulls"])
+            if self.settings.capture_index_github:
+                streams.append("index")
+        return streams
+
+    def checkpoint_scope(self, stream: CaptureStream) -> str:
+        if stream == "graph":
+            return "journal"
+        if stream == "spool":
+            return self.repository
+        branch = self.settings.ci_github_branch if stream != "pulls" else ""
+        return f"{self.repository}:{self.settings.capture_github_repository}:{branch}"
+
+    def checkpoint(self, stream: CaptureStream) -> CaptureCheckpoint:
+        return self.graph.read_capture_checkpoint(self.project, self.checkpoint_scope(stream), stream)
+
+    def save_checkpoint(self, checkpoint: CaptureCheckpoint) -> CaptureCheckpoint:
+        return self.graph.save_capture_checkpoint(
+            self.project, self.checkpoint_scope(checkpoint.stream), checkpoint,
+        )
+
+    def status(self) -> CaptureStatus:
+        checkpoints = []
+        for stream in self.streams():
+            checkpoint = self.checkpoint(stream)
+            if stream == "graph":
+                count, oldest = self.graph.capture_journal_lag(self.project)
+                checkpoint.pending_count = count
+                checkpoint.oldest_pending = oldest
+            if stream == "spool":
+                pending = []
+                for path in Path(self.settings.capture_spool).glob("*.capture"):
+                    with suppress(FileNotFoundError):
+                        pending.append(path.lstat().st_mtime)
+                checkpoint.pending_count = len(pending)
+                checkpoint.oldest_pending = datetime.fromtimestamp(min(pending), UTC) if pending else None
+            checkpoints.append(checkpoint)
+        return CaptureStatus(configured=True, interval_seconds=self.settings.capture_interval, streams=checkpoints)
+
+    def request_history(self, command: CaptureHistoryInput, actor: str) -> CaptureCheckpoint:
+        current = self.checkpoint(command.stream)
+        if current.history and not current.failure:
+            raise ArchitectureGraphError("A history scan is already queued for this stream")
+        return self.save_checkpoint(current.model_copy(update={
+            "history": command.action, "history_since": command.since,
+            "history_requested_by": actor, "retry_at": None,
+        }))
+
+    async def poll_stream(self, stream: CaptureStream, job) -> None:
+        try:
+            checkpoint = await anyio.to_thread.run_sync(self.checkpoint, stream)
+            now = datetime.now(UTC)
+            if checkpoint.retry_at and checkpoint.retry_at > now:
+                return
+            try:
+                progress = await job(checkpoint)
+            except Exception as exc:
+                failures = checkpoint.consecutive_failures + 1
+                reason = str(exc) if isinstance(exc, CaptureHistoryError) else type(exc).__name__
+                if isinstance(exc, httpx.HTTPStatusError):
+                    reason = f"GitHub HTTP {exc.response.status_code}"
+                updates = {
+                    "failure": reason, "last_failure": now, "consecutive_failures": failures,
+                    "retry_at": now + timedelta(seconds=min(3600, self.settings.capture_interval * 2 ** min(failures - 1, 10))),
+                }
+            else:
+                updates = {
+                    **(progress or {}), "last_success": datetime.now(UTC), "failure": None,
+                    "consecutive_failures": 0, "retry_at": None,
+                    "history": None, "history_since": None,
+                }
+                if checkpoint.history:
+                    updates.update(last_history_action=checkpoint.history, last_history_completed=updates["last_success"])
+            updates.update(observed_head=checkpoint.observed_head, observed_timestamp=checkpoint.observed_timestamp)
+            await anyio.to_thread.run_sync(self.save_checkpoint, checkpoint.model_copy(update=updates))
+        except Exception as exc:
+            logger.warning("knowledge_capture_checkpoint_failed", stream=stream, error_type=type(exc).__name__)
+
     async def run(self) -> None:
         while True:
-            for job in (self.read_spool, self.read_graph):
-                try:
-                    await anyio.to_thread.run_sync(job)
-                except Exception as exc:
-                    logger.warning("knowledge_capture_source_failed", source=job.__name__,
-                                   error_type=type(exc).__name__)
-            if self.settings.capture_github_repository:
-                try:
-                    await self.read_github()
-                except Exception as exc:
-                    logger.warning("knowledge_capture_source_failed", source="github",
-                                   error_type=type(exc).__name__)
+            for stream in self.streams():
+                if stream == "graph":
+                    await self.poll_stream(stream, lambda _: anyio.to_thread.run_sync(self.read_graph))
+                elif stream == "spool":
+                    await self.poll_stream(stream, lambda _: anyio.to_thread.run_sync(self.read_spool))
+                else:
+                    await self.poll_stream(stream, self.read_github)
             await anyio.sleep(self.settings.capture_interval)
 
     def read_spool(self) -> None:
@@ -68,17 +154,13 @@ class CaptureWorker:
             except (OSError, ValueError) as exc:
                 logger.warning("knowledge_capture_invalid_file", error_type=type(exc).__name__)
                 path.rename(path.with_suffix(".invalid"))
-                continue
+                raise CaptureHistoryError("Malformed spool item moved to quarantine") from exc
             self.capture_local_commit(item)
             path.unlink(missing_ok=True)
 
     def capture_local_commit(self, item: CommitEnvelope) -> None:
         if item.python_snapshot is not None:
-            try:
-                self.index_snapshot(item.commit, item.python_snapshot, item.queued_at or item.commit.timestamp)
-            except ArchitectureGraphError as exc:
-                logger.warning("knowledge_capture_index_rejected", commit=item.commit.sha,
-                               error_type=type(exc).__name__)
+            self.index_snapshot(item.commit, item.python_snapshot, item.queued_at or item.commit.timestamp)
         self.capture.commit(self.project, self.repository, item.commit)
 
     def index_snapshot(
@@ -183,32 +265,101 @@ class CaptureWorker:
                 related_keys=related, evidence=[f"Graph entity {node.key}"],
             ))
 
-    async def read_github(self) -> None:
-        slug = self.settings.capture_github_repository
-        token = self.settings.ci_github_read_token
+    async def read_github(self, checkpoint: CaptureCheckpoint) -> dict:
         headers = {"Accept": "application/vnd.github+json"}
+        token = self.settings.ci_github_read_token
         if token:
             headers["Authorization"] = f"Bearer {token.get_secret_value()}"
         async with httpx.AsyncClient(
-            base_url=f"https://api.github.com/repos/{slug}/", headers=headers, timeout=10,
+            base_url=f"https://api.github.com/repos/{self.settings.capture_github_repository}/",
+            headers=headers, timeout=10,
         ) as github:
-            for view, params in (
-                ("pulls", {"state": "all", "sort": "updated", "direction": "desc"}),
-                ("commits", {"sha": self.settings.ci_github_branch}),
-            ):
-                response = await github.get(view, params={**params, "per_page": 25})
-                response.raise_for_status()
-                rows = response.json()
-                if view == "commits" and self.settings.capture_index_github and rows:
-                    try:
-                        await self.index_github_head(github, rows[0])
-                    except (httpx.HTTPError, ArchitectureGraphError, BadZipFile, ValueError) as exc:
-                        logger.warning("knowledge_capture_index_rejected", error_type=type(exc).__name__)
-                for row in reversed(rows):
-                    if view == "pulls":
-                        await self.read_github_change(github, row, pull=True)
-                    else:
-                        await self.read_github_change(github, row, pull=False)
+            return await self.scan_github(github, checkpoint)
+
+    async def scan_github(self, github: httpx.AsyncClient, checkpoint: CaptureCheckpoint) -> dict:
+        stream = checkpoint.stream
+        pull = stream == "pulls"
+        path = "pulls" if pull else "commits"
+        params = {"state": "all", "sort": "updated", "direction": "desc"} if pull else {
+            "sha": self.settings.ci_github_branch,
+        }
+        if checkpoint.history_since and not pull:
+            params["since"] = checkpoint.history_since.isoformat()
+
+        async def page_rows(number, size):
+            response = await github.get(path, params={**params, "page": number, "per_page": size})
+            response.raise_for_status()
+            return response.json()
+
+        latest = await page_rows(1, 1)
+        if not latest:
+            if checkpoint.cursor and not checkpoint.history and not pull:
+                raise CaptureHistoryError(_UNREACHABLE_HEAD)
+            return {}
+        head = latest[0]
+        stamp = _github_time(head, pull)
+        identity = head["updated_at"] if pull else head["sha"]
+        checkpoint.observed_head = identity
+        checkpoint.observed_timestamp = stamp
+        progress = {"cursor": identity, "source_timestamp": stamp}
+        if stream == "index":
+            await self.index_github_head(github, head)
+            return progress
+        if not pull and checkpoint.cursor and not checkpoint.history:
+            if identity != checkpoint.cursor:
+                await self.compare_commits(github, checkpoint.cursor, identity)
+            return progress
+
+        baseline = not checkpoint.cursor and not checkpoint.history
+        per_page = 25 if baseline else 100
+        floor = checkpoint.history_since
+        if pull and not floor and checkpoint.source_timestamp:
+            floor = checkpoint.source_timestamp - timedelta(minutes=5)
+        if not pull:
+            params["sha"] = identity
+        pending = []
+        for page in range(1, 101):
+            rows = await page_rows(page, per_page)
+            eligible = [row for row in rows if not floor or _github_time(row, pull) >= floor]
+            pending.extend(eligible)
+            if len(rows) < per_page or (pull and len(eligible) < len(rows)) or baseline:
+                break
+        else:
+            raise CaptureHistoryError("History scan exceeded 10,000 items. Request a narrower backfill.")
+        if pull and (await page_rows(1, 1)) != latest:
+            raise CaptureHistoryError("Pull requests changed during pagination. Retrying from the saved cursor.")
+        for row in reversed(pending):
+            await self.read_github_change(github, row, pull=pull)
+        if checkpoint.history == "replay":
+            return {}
+        if checkpoint.history == "backfill" and checkpoint.cursor and (
+            pull or checkpoint.failure != _UNREACHABLE_HEAD
+        ):
+            return {}
+        return progress
+
+    async def compare_commits(self, github: httpx.AsyncClient, base: str, head: str) -> None:
+        path = f"compare/{base}...{head}"
+        rows = []
+        for page in range(1, 101):
+            response = await github.get(path, params={"page": page, "per_page": 100})
+            if response.status_code == 404:
+                raise CaptureHistoryError(_UNREACHABLE_HEAD)
+            response.raise_for_status()
+            payload = response.json()
+            if payload["status"] not in {"ahead", "identical"}:
+                raise CaptureHistoryError(_UNREACHABLE_HEAD)
+            rows.extend(payload["commits"])
+            if len(rows) >= payload["total_commits"]:
+                break
+            if not payload["commits"]:
+                raise CaptureHistoryError("GitHub omitted part of the commit comparison")
+        else:
+            raise CaptureHistoryError("Commit comparison exceeded 10,000 items. Request a backfill.")
+        if len({row["sha"] for row in rows}) != payload["total_commits"]:
+            raise CaptureHistoryError("GitHub returned an incomplete commit comparison")
+        for row in rows:
+            await self.read_github_change(github, row, pull=False)
 
     async def index_github_head(self, github: httpx.AsyncClient, head: dict) -> None:
         commit = CommitCapture(
@@ -235,7 +386,7 @@ class CaptureWorker:
             event_id = f"{self.repository}:{number}:{row['head']['sha']}:{row['state']}:{row['updated_at']}"
             path, source = f"pulls/{number}/files", "pull_request"
             timestamp = datetime.fromisoformat(row["updated_at"])
-            why = f"{row['title']} ({'merged' if row['merged_at'] else row['state']})"
+            why = f"{row['title']} ({'merged' if row.get('merged_at') else row['state']})"
         else:
             sha = row["sha"]
             if len(sha) != 40 or any(letter not in "0123456789abcdef" for letter in sha):
@@ -258,6 +409,14 @@ class CaptureWorker:
             explicit=[self.repository], paths=paths, repository_key=self.repository, why=why,
             evidence=[row["html_url"]], partial=len(diff) > 250_000 or len(files) >= 100,
         ))
+
+
+class CaptureHistoryError(RuntimeError):
+    pass
+
+
+def _github_time(row: dict, pull: bool) -> datetime:
+    return datetime.fromisoformat(row["updated_at"] if pull else row["commit"]["committer"]["date"])
 
 
 def _read_python_zip(archive: bytes | bytearray) -> dict[str, str]:
