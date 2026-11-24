@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, Field, StringConstraints
+from pydantic import AwareDatetime, BaseModel, Field, StringConstraints, model_validator
 
 from app.domain.keys import MemoryKey
 
@@ -11,12 +11,45 @@ CaptureSource = Literal[
 Evidence = Annotated[str, StringConstraints(min_length=1, max_length=1200)]
 
 
-class CaptureSuggestion(BaseModel):
+SuggestionType = Literal["implements", "validates", "persists_to", "supports_goal", "references"]
+
+
+class SuggestedRelationship(BaseModel):
     source_key: MemoryKey
     target_key: MemoryKey
-    relationship_type: Literal["implements", "validates", "persists_to", "supports_goal", "references"]
+    relationship_type: SuggestionType
+
+
+class CaptureSuggestion(SuggestedRelationship):
     confidence: float = Field(ge=0, le=1)
     evidence: Evidence
+
+
+class SuggestionDecision(SuggestedRelationship):
+    action: Literal["accept", "reject", "replace"]
+    rationale: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
+    replacement: SuggestedRelationship | None = None
+
+    @model_validator(mode="after")
+    def validate_replacement(self):
+        if (self.action == "replace") != (self.replacement is not None):
+            raise ValueError("Provide a replacement only when replacing a suggestion")
+        if self.replacement and self.replacement == SuggestedRelationship.model_validate({
+            "source_key": self.source_key, "target_key": self.target_key,
+            "relationship_type": self.relationship_type,
+        }):
+            raise ValueError("The replacement must differ from the original relationship")
+        return self
+
+
+class SuggestionResolution(BaseModel):
+    project_key: MemoryKey
+    observation_key: MemoryKey
+    suggestion: CaptureSuggestion
+    decision: SuggestionDecision
+    reviewer: str
+    resolved_at: AwareDatetime
+    relationship_key: MemoryKey | None = None
 
 
 class ChangeReflectionInput(BaseModel):

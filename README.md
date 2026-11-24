@@ -140,6 +140,13 @@ authority, enforcement status, governed entities, and validating tests.
 `add_conversation_summary` stores concise summaries with links to decisions,
 risks, and tasks surfaced by the conversation.
 
+Reviewers with project write access can resolve inferred relationships from
+**Project → Review → Suggested relationships**. Repeated suggestions for
+the same relationship appear once. Accept confirms the suggestion, reject
+records the decision, and replace confirms the corrected relationship. Each
+decision records the reviewer, time, rationale, and cited suggestion. See
+**Recent suggestion decisions** for the audit trail.
+
 ## Semantic Retrieval
 
 Semantic search is server-driven. Clients can still pass embeddings, but they no longer need to.

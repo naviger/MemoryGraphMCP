@@ -12,6 +12,7 @@ import { Network, Search } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { reviewRequest } from './api.js';
 import { formatDate, formatWindow } from './Details.jsx';
+import { SuggestionItem, SuggestionResolutionDetail } from './SuggestionReview.jsx';
 
 const CODE_TYPES = new Set(['Repository', 'Service', 'Module', 'Class', 'Function',
   'SourceFile', 'ApiEndpoint', 'DatabaseCollection', 'TestSuite']);
@@ -130,7 +131,12 @@ function projectTab(requested) {
   return TABS.includes(tab) ? tab : 'Overview';
 }
 
-function ProjectReview({ projectKey, asOf, token, navigate, onUnauthorized, active }) {
+function ProjectReview({ projectKey, entities, asOf, token, navigate, onUnauthorized, active }) {
+  const [review, setReview] = useState(null);
+  const [reload, setReload] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState('');
+  const base = `/projects/${encodeURIComponent(projectKey)}`;
   const [queue, setQueue] = useState(null);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -140,15 +146,37 @@ function ProjectReview({ projectKey, asOf, token, navigate, onUnauthorized, acti
     if (asOf) params.set('as_of', asOf);
     setQueue(null);
     setError('');
-    reviewRequest(`/queue?${params}`, { token, signal: controller.signal }).then((data) => {
-      if (!controller.signal.aborted) setQueue(data);
-    }).catch((err) => {
+    const options = { token, signal: controller.signal };
+    Promise.all([reviewRequest(`/queue?${params}`, options), reviewRequest(`${base}/suggestion-resolutions`, options)])
+      .then(([data, decisions]) => {
+        if (controller.signal.aborted) return;
+        setQueue(data);
+        setReview(decisions);
+      }).catch((err) => {
       if (controller.signal.aborted) return;
       if (err.status === 401) onUnauthorized();
       else setError(err.message);
     });
     return () => controller.abort();
-  }, [active, projectKey, asOf, token, onUnauthorized]);
+  }, [active, projectKey, asOf, token, onUnauthorized, reload, base]);
+
+  async function save(observation, body) {
+    setBusy(true);
+    setActionError('');
+    try {
+      await reviewRequest(`${base}/suggestions/${encodeURIComponent(observation)}/resolve`, { token, body });
+      setReload((version) => version + 1);
+      return true;
+    } catch (err) {
+      if (err.status === 401) onUnauthorized();
+      else setActionError(err.message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const names = new Map([[projectKey, 'Project'], ...entities.map((node) => [node.key, node.name])]);
 
   if (error) return <p role="alert" className="status error">{error}</p>;
   if (!queue) return <p role="status">Loading project review…</p>;
@@ -166,22 +194,21 @@ function ProjectReview({ projectKey, asOf, token, navigate, onUnauthorized, acti
           {' and '}<PreviewLink entityKey={item.competing.key} navigate={navigate}>{item.competing.title}</PreviewLink></>
       )} />
     <a href="/review/conflicts" onClick={(event) => navigate(event, '/review/conflicts')}>Open conflict queue</a>
+    {actionError && <p className="status error" role="alert">{actionError}</p>}
     <InventoryGroup title="Suggested relationships" items={queue.inferred_relationships ?? []} open
       renderItem={(item) => (
         <details>
           <summary>{item.summary.split('\n')[0]} · {item.suggestions.length} suggestions</summary>
-          <ul>{item.suggestions.map((link) => (
-            <li key={`${link.source_key}/${link.relationship_type}/${link.target_key}`}>
-              <PreviewLink destination="entities" entityKey={link.source_key} navigate={navigate}>Source</PreviewLink>
-              {' '}{link.relationship_type}{' '}
-              <PreviewLink destination="entities" entityKey={link.target_key} navigate={navigate}>Target</PreviewLink>
-              {' · '}{Math.round(link.confidence * 100)}% confidence
-              <p className="muted">{link.evidence}</p>
-            </li>
-          ))}</ul>
+          <ul>{item.suggestions.map((link) => <SuggestionItem
+            key={`${link.source_key}/${link.relationship_type}/${link.target_key}`}
+            observation={item.key} link={link} names={names} navigate={navigate}
+            canWrite={review?.can_write} busy={busy} save={save} />)}</ul>
           <PreviewLink destination="entities" entityKey={item.key} navigate={navigate}>Open observation</PreviewLink>
         </details>
       )} />
+    <InventoryGroup title="Recent suggestion decisions" items={(review?.resolutions ?? []).map((entry) => ({
+      ...entry, key: `${entry.suggestion.source_key}/${entry.suggestion.relationship_type}/${entry.suggestion.target_key}`,
+    }))} renderItem={(entry) => <SuggestionResolutionDetail entry={entry} names={names} navigate={navigate} />} />
   </>;
 }
 
@@ -275,7 +302,7 @@ function Inventory({ project, navigate, searching, tab, setTab, token, asOf, onU
             <p className="muted">Validity {formatWindow(doc.effective_date, doc.expiration_date)}</p>}
         </>
       )} />],
-      ['Review', <ProjectReview projectKey={project.key} asOf={asOf} token={token}
+      ['Review', <ProjectReview projectKey={project.key} entities={project.entities} asOf={asOf} token={token}
         navigate={navigate} onUnauthorized={onUnauthorized} active={tab === 'Review'} />],
     ].map(([name, panel]) => (
       <section key={name} role="tabpanel" id={`project-panel-${tabSlug(name)}`} aria-labelledby={`project-tab-${tabSlug(name)}`}
