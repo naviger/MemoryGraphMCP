@@ -155,6 +155,8 @@ class CodexBridge:
         context = json.loads(prompt)
         mode = context.get("mode")
         phases = APPROVED_PHASES if mode == APPROVED_MODE else MODES.get(mode, ())
+        if mode == "IMPLEMENT" and context.get("guided_repair") is True:
+            phases = ("execute", "review")
         if context.get("project_key") != self.project or phase not in phases:
             raise BridgeError(403, "Project or execution mode is unavailable")
         with self.lock, closing(self.database()) as db:
@@ -437,7 +439,12 @@ class CodexBridge:
         if phase == "apply":
             return self.apply_approved(identity, directory, context)
         repair = phase == "execute" and bool(context.get("repair_patch_sha256"))
-        target = context.get("patch_execution_key") if phase == "review" or repair else None
+        guided_review = phase == "review" and context.get("guided_repair") is True
+        target = (
+            context.get("patch_execution_key")
+            if repair or (phase == "review" and not guided_review)
+            else None
+        )
         if repair and (not target or mode != "IMPLEMENT" or not context.get("repair_prompt")):
             raise BridgeError(
                 400, "Repair requires the original patch and an editable repair prompt"
@@ -488,7 +495,7 @@ class CodexBridge:
                 reviewed_target = self.applied_review_target(identity, checkout)
             if phase == "review":
                 reviewed_target = {"kind": "checkout commit", "commit": base}
-                if mode == "FULL_LIFECYCLE":
+                if mode == "FULL_LIFECYCLE" or guided_review:
                     patch = directory / "implementation.patch"
                     if not patch.is_file():
                         raise BridgeError(409, "The implementation phase did not save a patch")
@@ -563,6 +570,11 @@ class CodexBridge:
             )
         if writable and checkpoint.exists():
             instructions += " Resume from the partial implementation in the checkout. Verify it."
+        if guided_review:
+            instructions += (
+                " Check the underlying requirement beyond the reported example. Use the "
+                "deterministic test evidence in the context. Report findings in plain language."
+            )
         if phase == "review" and reviewed_target["kind"] == "implementation patch":
             instructions += (
                 " Review the staged patch shown by git diff --cached HEAD, including new files. "

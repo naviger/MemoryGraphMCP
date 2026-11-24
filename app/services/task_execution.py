@@ -357,6 +357,7 @@ class TaskExecutor:
                 "approved_patch": job.approved_patch,
                 "approved_review_key": job.approved_review_key,
                 "repair_patch_sha256": job.repair_patch_sha256,
+                "guided_repair": job.guided_repair,
                 "repair_prompt": job.repair_prompt,
                 "repair_direction": job.repair_direction,
                 "repair_contract": job.repair_contract
@@ -437,7 +438,7 @@ class TaskExecutor:
             )
             if not claimed:
                 return
-            phases = PHASES[claimed.mode]
+            phases = ("execute", "review") if claimed.guided_repair else PHASES[claimed.mode]
             phase = phases[claimed.phase]
             with anyio.fail_after(570):
                 result = await provider.perform(phase, claimed.key, prompt)
@@ -452,7 +453,7 @@ class TaskExecutor:
                     )
                 )
                 return
-            if claimed.repair_review_key and not result.regression_proof:
+            if claimed.repair_review_key and phase == "execute" and not result.regression_proof:
                 await anyio.to_thread.run_sync(
                     partial(
                         move,
@@ -463,7 +464,7 @@ class TaskExecutor:
                     )
                 )
                 return
-            if claimed.repair_review_key:
+            if claimed.repair_review_key and phase == "execute":
                 target = result.repaired_target or {}
                 if (
                     target.get("execution_id") != claimed.patch_execution_key
@@ -476,6 +477,33 @@ class TaskExecutor:
                             "FAILED",
                             usage=result.usage,
                             failure="Bridge did not confirm the reviewed repair input.",
+                        )
+                    )
+                    return
+            if claimed.guided_repair and phase == "review":
+                target = result.reviewed_target or {}
+                patch_digest = next(
+                    (
+                        item.get("sha256")
+                        for item in claimed.results[0].get("artifacts", [])
+                        if item.get("name") == "Local implementation patch"
+                    ),
+                    None,
+                )
+                if (
+                    target.get("execution_id") != claimed.key
+                    or target.get("kind") != "implementation patch"
+                    or not patch_digest
+                    or target.get("patch_sha256") != patch_digest
+                    or result.review_verdict is None
+                ):
+                    await anyio.to_thread.run_sync(
+                        partial(
+                            move,
+                            claimed,
+                            "FAILED",
+                            usage=result.usage,
+                            failure="The bridge did not review the exact revised patch",
                         )
                     )
                     return
@@ -581,7 +609,17 @@ class TaskExecutor:
             state = "REVIEW"
         elif phase == "review_commit":
             state = "COMPLETED" if result.review_verdict == "passed" else "REVIEW"
-        elif not final and phase == "execute" and not result.completed:
+        elif (
+            not final
+            and phase == "execute"
+            and (
+                not result.completed
+                or (
+                    claimed.guided_repair
+                    and (not result.regression_proof.passed or not result.verification.passed)
+                )
+            )
+        ):
             state = "REVIEW"
         elif not final:
             state = "READY"

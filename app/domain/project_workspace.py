@@ -44,6 +44,7 @@ class StartExecution(BaseModel):
     agent: AgentName
     mode: ExecutionMode
     patch_execution_key: MemoryKey | None = None
+    guided_repair: bool = False
     repair_review_key: MemoryKey | None = None
     repair_prompt: WorkText | None = None
     repair_direction: WorkText | None = None

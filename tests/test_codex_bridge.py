@@ -232,6 +232,28 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(json.dumps({
     assert b"+repaired in a new clone" in Path(result["artifacts"][0]["reference"]).read_bytes()
     assert sha256(original.read_bytes()).hexdigest() == original_digest
 
+    review_prompt = json.dumps(
+        {
+            **prompt,
+            "guided_repair": True,
+            "repair_patch_sha256": original_digest,
+        }
+    )
+    with pytest.raises(BridgeError, match="earlier phase"):
+        bridge.run("2" * 64, "review", review_prompt)
+    cli.write_text("""#!/usr/bin/env python3
+import json, pathlib, sys
+assert "Check the underlying requirement" in sys.stdin.read()
+assert pathlib.Path("fixture.txt").read_text() == "repaired in a new clone"
+assert sys.argv[sys.argv.index("--sandbox") + 1] == "read-only"
+pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(json.dumps({
+    "summary": "Independent review passed.", "tests": [], "approved": True,
+}))
+""")
+    reviewed = bridge.run("3" * 64, "review", review_prompt)
+    assert reviewed["reviewed_target"]["execution_id"] == "3" * 64
+    assert reviewed["reviewed_target"]["patch_sha256"] == result["artifacts"][0]["sha256"]
+
 
 def test_required_regression_failure_skips_the_model_reviewer(bridge, monkeypatch):
     implementation = bridge.run(

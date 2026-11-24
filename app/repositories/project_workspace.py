@@ -277,6 +277,57 @@ class ProjectWorkspaceRepository:
             )[:8000],
         }
 
+    def fix_findings(self, project, task, review_key, request_id, actor):
+        draft = self.repair_draft(project, task, review_key)
+        review = self.graph.read_entity(review_key)
+        source = self.graph.read_entity(draft["patch_execution_key"])
+        if review.guided_repair or source.guided_repair:
+            raise ArchitectureGraphError(
+                "This repair already received an independent review. Resolve the open finding "
+                "before approving another repair."
+            )
+        history = []
+        seen = {review_key}
+        for _ in range(6):
+            earlier = self.previous_blocking_review(source, project, task, self.graph.read_entity)
+            if not earlier or earlier["execution_key"] in seen:
+                break
+            seen.add(earlier["execution_key"])
+            history.append(earlier["findings"][:600])
+            ancestor = self.graph.read_entity(earlier["execution_key"])
+            _, target = self.repair_target(ancestor, project, task)
+            source = self.graph.read_entity(target["execution_id"])
+            if not isinstance(source, Execution):
+                break
+        evidence = review.results[-1].get("verification") or {}
+        prompt = (
+            "Own this repair end to end. Read the original task and exact staged patch. "
+            "Infer the general requirement behind the findings. Reproduce the latest failure, "
+            "then test adjacent cases, boundary sizes, and interactions between multiple records "
+            "where relevant. Preserve earlier fixes. Implement the smallest coherent repair and "
+            "write regression tests before requesting independent review.\n\n"
+            + draft["prompt"][:3000]
+            + "\n\nEarlier findings:\n"
+            + "\n".join(history)
+            + "\n\nRecorded deterministic test evidence:\n"
+            + str(evidence.get("output", ""))[:850]
+        )
+        return self.start(
+            project,
+            task,
+            StartExecution(
+                request_id=request_id,
+                agent="codex",
+                mode="IMPLEMENT",
+                guided_repair=True,
+                repair_review_key=review_key,
+                repair_prompt=prompt[:8000],
+                repair_direction=draft["suggested_direction"],
+                repair_contract=draft["suggested_contract"],
+            ),
+            actor,
+        )
+
     def apply_approved(self, project, key, review_key, actor) -> Execution:
         task = self.task(project, key)
         now = datetime.now(UTC)
@@ -393,6 +444,7 @@ class ProjectWorkspaceRepository:
                 execution = Execution.model_validate(existing)
                 if (
                     execution.agent,
+                    execution.guided_repair,
                     execution.mode,
                     execution.requested_by,
                     execution.patch_execution_key if not execution.repair_review_key else None,
@@ -404,6 +456,7 @@ class ProjectWorkspaceRepository:
                     execution.approve_review_attempt,
                 ) != (
                     command.agent,
+                    command.guided_repair,
                     command.mode,
                     actor,
                     command.patch_execution_key,
@@ -473,6 +526,10 @@ class ProjectWorkspaceRepository:
                     )
                 ):
                     raise ArchitectureGraphError("Execution has no reviewable patch for this task")
+                if source.guided_repair:
+                    raise ArchitectureGraphError(
+                        "This patch is managed by the guided repair and independent review."
+                    )
                 if command.repair_review_key:
 
                     def read_in_transaction(execution_key):
@@ -494,6 +551,7 @@ class ProjectWorkspaceRepository:
                         )
                     if (
                         earlier
+                        and not command.guided_repair
                         and source.repair_contract
                         and (
                             source.repair_contract.acceptance_criteria
@@ -562,6 +620,7 @@ class ProjectWorkspaceRepository:
                 task_key=key,
                 patch_execution_key=source_key,
                 repair_review_key=command.repair_review_key,
+                guided_repair=command.guided_repair,
                 repair_patch_sha256=patch_hash,
                 repair_prompt=command.repair_prompt,
                 repair_direction=command.repair_direction,

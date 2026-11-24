@@ -74,3 +74,13 @@ test('a finished repair stays finished when its patch review is blocked', () => 
   assert.equal(repair.state, 'Finished');
   assert.equal(review.state, 'Changes required');
 });
+
+test('guided repairs show independent review as a separate phase', () => {
+  const [review, repair] = executionSteps([run({
+    mode: 'IMPLEMENT', guided_repair: true, state: 'REVIEW', phase: 2,
+    results: [{ completed: true }, { review_verdict: 'blocking' }],
+  })]);
+  assert.equal(repair.state, 'Finished');
+  assert.equal(review.phase, 'Review');
+  assert.equal(review.state, 'Changes required');
+});
