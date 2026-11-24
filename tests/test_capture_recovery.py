@@ -723,6 +723,62 @@ def test_arango_recovery_and_workspace():
     assert target.key in {entry.key for entry in graph.project_scope("alpha", strict_scope=True).entities}
     assert target.key not in {entry.key for entry in graph.project_scope("beta", strict_scope=True).entities}
 
+    from app.domain.knowledge_capture import CaptureEvent, CaptureSuggestion, SuggestionDecision
+
+    candidates = [
+        CaptureSuggestion(source_key="repo", target_key="service", relationship_type=kind,
+                          confidence=0.7, evidence=f"Captured proof for {kind}")
+        for kind in ("references", "implements", "validates")
+    ]
+    for timestamp, key in ((STAMP, "first-observation"), (STAMP + timedelta(hours=1), "second-observation")):
+        capture.store(CaptureEvent(
+            source="commit", event_id=key, project_key="alpha", timestamp=timestamp,
+            summary="Capture evidence", suggestions=candidates,
+        ), key=key)
+    pending, = graph.capture_review("alpha", 10, None)
+    assert pending.key == "second-observation" and len(pending.suggestions) == 3
+    edges = graph._database().collection(graph._edges)
+    assert not list(edges.find({"source": "reviewed-inference"}))
+
+    def decision(index, action, **values):
+        return SuggestionDecision(
+            **candidates[index].model_dump(exclude={"confidence", "evidence"}),
+            action=action, rationale="Reviewed the captured evidence", **values,
+        )
+
+    with pytest.raises(ArchitectureGraphError):
+        graph.resolve_suggestion("beta", pending.key, decision(0, "accept"), "writer")
+    with pytest.raises(ArchitectureGraphError, match="within this project"):
+        graph.resolve_suggestion("alpha", pending.key, decision(1, "replace", replacement={
+            "source_key": "other-repo", "target_key": "repo", "relationship_type": "supports_goal",
+        }), "writer")
+    assert not graph.suggestion_resolutions("alpha")
+    assert not list(edges.find({"source": "reviewed-inference"}))
+
+    accepted = graph.resolve_suggestion("alpha", pending.key, decision(0, "accept"), "writer")
+    assert graph.resolve_suggestion("alpha", pending.key, decision(0, "accept"), "writer") == accepted
+    with pytest.raises(ArchitectureGraphError, match="already been resolved"):
+        graph.resolve_suggestion("alpha", "first-observation", decision(0, "reject"), "writer")
+    rejected = graph.resolve_suggestion("alpha", pending.key, decision(2, "reject"), "writer")
+    replaced = graph.resolve_suggestion("alpha", pending.key, decision(1, "replace", replacement={
+        "source_key": "service", "target_key": "repo", "relationship_type": "persists_to",
+    }), "writer")
+    assert rejected.relationship_key is None
+    assert accepted.suggestion.evidence == candidates[0].evidence
+    assert accepted.reviewer == "writer" and accepted.resolved_at > pending.timestamp
+    assert replaced.decision.rationale == "Reviewed the captured evidence"
+    assert graph.capture_review("alpha", 10, None) == []
+    assert [entry.decision.action for entry in graph.suggestion_resolutions("alpha")] == [
+        "replace", "reject", "accept",
+    ]
+    assert graph.suggestion_resolutions("beta") == []
+    confirmed = {(edge["source_key"], edge["relationship_type"], edge["target_key"])
+                 for edge in edges.find({"source": "reviewed-inference"})}
+    assert len(confirmed) == 2
+    assert ("repo", "references", "service") in confirmed
+    assert ("service", "persists_to", "repo") in confirmed
+
+
 
 
 def test_workspace_routes_require_project_and_writer_grants():
@@ -758,6 +814,12 @@ def test_workspace_routes_require_project_and_writer_grants():
         entities=lambda project: [],
         create=lambda project, data, actor: data,
         move_task=lambda project, data: {data.task_key: 1},
+        graph=SimpleNamespace(
+            suggestion_resolutions=lambda project: [],
+            resolve_suggestion=lambda project, observation, data, actor: {
+                "project": project, "observation": observation, "actor": actor,
+            },
+        ),
         apply_approved=lambda project, task, review, actor: {"review": review, "actor": actor},
     )
 
@@ -787,9 +849,37 @@ def test_workspace_routes_require_project_and_writer_grants():
     assert api.post(f"{path}/task-order", headers={"role": "writer"}, json=move).json() == {"task": 1}
     assert api.post(f"{path.replace('alpha', 'beta')}/task-order", headers={"role": "writer"}, json=move).status_code == 403
 
+    base = path.removesuffix("/workspace")
+    history = api.get(f"{base}/suggestion-resolutions", headers={"role": "reader"})
+    assert history.json() == {"can_write": False, "resolutions": []}
+    resolve = f"{base}/suggestions/observation/resolve"
+    decision = {"source_key": "repo", "target_key": "service", "relationship_type": "references",
+                "action": "accept", "rationale": "Verified source"}
+    assert api.post(resolve, headers={"role": "reader"}, json=decision).status_code == 403
+    assert api.post(resolve.replace("alpha", "beta"), headers={"role": "writer"}, json=decision).status_code == 403
+    assert api.post(resolve, headers={"role": "writer"}, json=decision).json() == {
+        "project": "alpha", "observation": "observation", "actor": "writer",
+    }
+
     apply = f"{path}/tasks/task/executions/review/apply-approved"
     assert api.post(apply, headers={"role": "reader"}).status_code == 403
     assert api.post(apply.replace("alpha", "beta"), headers={"role": "writer"}).status_code == 403
     approved = api.post(apply, headers={"role": "writer"})
     assert approved.status_code == 200
     assert approved.json() == {"review": "review", "actor": "writer"}
+
+
+def test_resolution_requires_replacement_only_for_replace():
+    from pydantic import ValidationError
+
+    from app.domain.knowledge_capture import SuggestionDecision
+
+    base = dict(source_key="source", target_key="adr", relationship_type="implements",
+                rationale="Reviewed the cited source")
+    with pytest.raises(ValidationError, match="replacement"):
+        SuggestionDecision(**base, action="replace")
+    with pytest.raises(ValidationError, match="replacement"):
+        SuggestionDecision(**base, action="reject", replacement={
+            "source_key": "other", "target_key": "adr", "relationship_type": "validates",
+        })
+    assert SuggestionDecision(**base, action="accept").replacement is None

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
+from hashlib import sha256
 
 from arango.database import StandardDatabase, TransactionDatabase
 from arango.exceptions import ArangoServerError, CollectionCreateError
@@ -41,7 +42,7 @@ from app.domain.capture_checkpoint import CaptureCheckpoint, CaptureStream
 from app.domain.context_usage import UsageOutcome, UsageReceipt, UsageScope
 from app.domain.effectiveness import DevelopmentOutcome, OutcomeReceipt
 from app.domain.exceptions import ArchitectureGraphError
-from app.domain.knowledge_capture import CaptureReviewItem
+from app.domain.knowledge_capture import CaptureReviewItem, SuggestionDecision, SuggestionResolution
 from app.domain.project_changes import BranchCleanup
 from app.domain.project_guidance import (
     GuidanceDraft,
@@ -338,25 +339,116 @@ class ArangoArchitectureRepository:
                 FILTER @as_of == null OR LEFT(node.timestamp, 10) <= @as_of
                 FILTER @projects == null OR project IN @projects
                 FILTER @entities_allowed == null OR node._key IN @entities_allowed
-                LET suggestions = (
-                    FOR link IN node.suggestions
-                        FILTER @entities_allowed == null OR
-                            (link.source_key IN @entities_allowed AND link.target_key IN @entities_allowed)
-                        RETURN link
-                )
-                FILTER LENGTH(suggestions) > 0
-                SORT node.timestamp DESC, node._key DESC
-                LIMIT @limit
-                RETURN {key: node._key, project_key: project, summary: node.summary,
-                        timestamp: node.timestamp, suggestions}
+                FOR link IN node.suggestions
+                    FILTER @entities_allowed == null OR
+                        (link.source_key IN @entities_allowed AND link.target_key IN @entities_allowed)
+                    LET identity = SHA256(CONCAT_SEPARATOR("|", project, link.source_key,
+                                                           link.relationship_type, link.target_key))
+                    FILTER DOCUMENT(@events, CONCAT("inference-", identity)) == null
+                    COLLECT suggestion_id = identity INTO candidates = {
+                        key: node._key, project_key: project, summary: node.summary,
+                        timestamp: node.timestamp, suggestion: link
+                    }
+                    LET latest = FIRST(
+                        FOR candidate IN candidates
+                            SORT DATE_TIMESTAMP(candidate.timestamp) DESC, candidate.key DESC
+                            LIMIT 1
+                            RETURN candidate
+                    )
+                    SORT DATE_TIMESTAMP(latest.timestamp) DESC, suggestion_id
+                    LIMIT @limit
+                    RETURN latest
             """,
             bind_vars={
-                "@entities": self._entities, "project": project_key,
+                "@entities": self._entities, "project": project_key, "events": self._events,
                 "limit": limit, "as_of": as_of, "projects": allowed_projects,
                 "entities_allowed": allowed_entity_keys,
             },
         )
-        return [CaptureReviewItem.model_validate(row) for row in rows]
+        items = {}
+        for row in rows:
+            item = items.setdefault(row["key"], {**row, "suggestions": []})
+            item["suggestions"].append(row["suggestion"])
+        return [CaptureReviewItem.model_validate(item) for item in items.values()]
+
+    def suggestion_resolutions(self, project: str, *, limit: int = 20) -> list[SuggestionResolution]:
+        keys = {project, *(node.key for node in self.project_scope(project, strict_scope=True).entities)}
+        rows = self._database().aql.execute(
+            """
+            FOR row IN @@events
+                FILTER row.event_type == "capture.suggestion.resolved" AND row.project_key == @project
+                LET entry = row.payload
+                FILTER entry.observation_key IN @keys
+                    AND entry.suggestion.source_key IN @keys AND entry.suggestion.target_key IN @keys
+                FILTER entry.decision.replacement == null OR (
+                    entry.decision.replacement.source_key IN @keys AND entry.decision.replacement.target_key IN @keys
+                )
+                SORT DATE_TIMESTAMP(entry.resolved_at) DESC, row._key DESC
+                LIMIT @limit
+                RETURN entry
+            """,
+            bind_vars={"@events": self._events, "project": project, "limit": limit, "keys": sorted(keys)},
+        )
+        return [SuggestionResolution.model_validate(row) for row in rows]
+
+    def resolve_suggestion(
+        self, project: str, observation: str, decision: SuggestionDecision, reviewer: str,
+    ) -> SuggestionResolution:
+        identity = "|".join((project, decision.source_key, decision.relationship_type, decision.target_key))
+        key = "inference-" + sha256(identity.encode()).hexdigest()
+        with self._transaction(with_events=True, write_edges=True) as tx:
+            nodes = tx.collection(self._entities)
+            note = self._require_entity_type(nodes, observation, "Observation")
+            keys = {project, *(node.key for node in self.project_scope(
+                project, strict_scope=True, database=tx,
+            ).entities)}
+            if observation not in keys or note.get("metadata", {}).get("capture_project") != project:
+                raise ArchitectureGraphError("Observation is outside this project")
+            suggestion = next((
+                item for item in Observation.model_validate(note).suggestions
+                if (item.source_key, item.target_key, item.relationship_type)
+                == (decision.source_key, decision.target_key, decision.relationship_type)
+            ), None)
+            if suggestion is None:
+                raise ArchitectureGraphError("Suggestion was not found on this observation")
+            chosen = decision.replacement or decision
+            if {decision.source_key, decision.target_key, chosen.source_key, chosen.target_key} - keys:
+                raise ArchitectureGraphError("Both relationships must stay within this project")
+            journal = tx.collection(self._events)
+            previous = journal.get(key)
+            if previous:
+                saved = SuggestionResolution.model_validate(previous["payload"])
+                if saved.decision == decision and saved.observation_key == observation and saved.reviewer == reviewer:
+                    return saved
+                raise ArchitectureGraphError("This suggestion has already been resolved")
+
+            now = datetime.now(UTC)
+            relationship_key = None
+            if decision.action != "reject":
+                link = ArchitectureLink(
+                    source_key=chosen.source_key, target_key=chosen.target_key,
+                    relationship_type=chosen.relationship_type, source="reviewed-inference",
+                    confidence=suggestion.confidence if decision.action == "accept" else 1,
+                )
+                payload = self._edge_payload(link, now.isoformat())
+                edges = tx.collection(self._edges)
+                matching = edges.find({field: payload[field] for field in ("_from", "_to", "relationship_type")})
+                existing = next((edge for edge in matching if edge["source"] != _STATIC_SOURCE), None)
+                relationship_key = existing["_key"] if existing else payload["_key"]
+                if existing is None:
+                    payload["cited_code"] = []
+                    for endpoint in (chosen.source_key, chosen.target_key):
+                        location = _ENTITY.validate_python(nodes.get(endpoint)).code_location()
+                        if location:
+                            payload["cited_code"].append(location.model_dump(mode="json", exclude={"url"}))
+                    edges.insert(payload)
+            resolution = SuggestionResolution(
+                project_key=project, observation_key=observation, suggestion=suggestion,
+                decision=decision, reviewer=reviewer, resolved_at=now, relationship_key=relationship_key,
+            )
+            journal.insert({"_key": key, "event_type": "capture.suggestion.resolved",
+                            "project_key": project, "payload": resolution.model_dump(mode="json")})
+            return resolution
 
     def save_project_goal(self, goal: Goal) -> Goal:
         if goal.project_key is None:
@@ -890,7 +982,7 @@ class ArangoArchitectureRepository:
         )
 
     def put_link(self, link: ArchitectureLink) -> ArchitectureRelationship:
-        if link.source == _STATIC_SOURCE or link.source_revision is not None:
+        if link.source in {_STATIC_SOURCE, "reviewed-inference"} or link.source_revision is not None:
             raise ArchitectureGraphError(
                 "The static-analysis source is reserved for Python ingestion"
             )
@@ -1527,8 +1619,8 @@ class ArangoArchitectureRepository:
             bind_vars={"@entities": self._entities},
         ))
 
-    def project_scope(self, key: str, *, strict_scope: bool = False) -> ProjectScope:
-        rows = self._database().aql.execute(
+    def project_scope(self, key: str, *, strict_scope: bool = False, database: TransactionDatabase | None = None) -> ProjectScope:
+        rows = (self._database() if database is None else database).aql.execute(
             """
             WITH @@entities
             LET direct = (

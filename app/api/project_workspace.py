@@ -12,6 +12,7 @@ from app.auth.permissions import WRITER_REQUIRED, writer_subject
 from app.auth.project_access import current_project_access
 from app.domain.capture_checkpoint import CaptureHistoryInput, CaptureStatus
 from app.domain.exceptions import ArchitectureGraphError
+from app.domain.knowledge_capture import SuggestionDecision
 from app.domain.models import MemoryKey
 from app.domain.project_workspace import (
     AssistDraft,
@@ -171,6 +172,20 @@ def build_workspace_router(prefix, workspace, executor, capture):
             raise HTTPException(409, str(exc)) from exc
         except httpx.HTTPError as exc:
             raise HTTPException(503, "The agent could not confirm cancellation") from exc
+
+    @router.get("/{project}/suggestion-resolutions")
+    async def suggestion_resolutions(project: MemoryKey, request: Request):
+        actor = authorize(project, request)
+        access = current_project_access.get()
+        can_write = bool(
+            actor and (not access or access.unrestricted or access.grants.get(project) == "write")
+        )
+        return {"can_write": can_write, "resolutions": await invoke(workspace.graph.suggestion_resolutions, project)}
+
+    @router.post("/{project}/suggestions/{observation}/resolve")
+    async def resolve_suggestion(project: MemoryKey, observation: MemoryKey, data: SuggestionDecision, request: Request):
+        actor = authorize(project, request, write=True)
+        return await invoke(workspace.graph.resolve_suggestion, project, observation, data, actor)
 
     @router.get("/{project}/capture")
     async def capture_status(project: MemoryKey, request: Request) -> CaptureStatus:
