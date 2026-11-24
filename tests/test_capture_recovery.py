@@ -137,6 +137,7 @@ def test_arango_recovery_and_workspace():
         AgentArtifact,
         AgentResult,
         StartExecution,
+        TaskMove,
         TaskUpdate,
         WorkDraft,
     )
@@ -635,6 +636,30 @@ def test_arango_recovery_and_workspace():
     assert completed.key == approved.key and completed.state == "COMPLETED"
     assert graph.read_entity(repair_task.key).status == "done"
 
+    first = workspace.create("alpha", WorkDraft(kind="Task", name="First", description="One"), "writer")
+    second = workspace.create("alpha", WorkDraft(kind="Task", name="Second", description="Two"), "writer")
+    foreign = workspace.create("beta", WorkDraft(kind="Task", name="Foreign", description="Other"), "writer")
+    with pytest.raises(ArchitectureGraphError, match="exclusively"):
+        workspace.move_task("alpha", TaskMove(task_key=first.key, anchor_key=foreign.key, placement="before"))
+    assert graph.read_entity(first.key).position is None
+    move = TaskMove(task_key=second.key, anchor_key=first.key, placement="before")
+    positions = workspace.move_task("alpha", move)
+    assert positions[second.key] + 1 == positions[first.key]
+    assert graph.read_entity(second.key).position == positions[second.key]
+    assert workspace.move_task("alpha", move) == positions
+    assert graph.read_entity(foreign.key).position is None
+    assert first.started_at is None and first.ended_at is None
+    started = workspace.task_update("alpha", first.key, TaskUpdate(status="in_progress"), "writer")
+    finished = workspace.task_update(
+        "alpha", first.key, TaskUpdate(status="done", outcome="Verified"), "writer",
+    )
+    assert finished.started_at == started.started_at
+    assert finished.ended_at >= finished.started_at
+    assert finished.position == positions[first.key]
+    with pytest.raises(ArchitectureGraphError, match="read-only"):
+        workspace.task_update("alpha", first.key, TaskUpdate(status="open"), "writer")
+    assert graph.read_entity(first.key) == finished
+
 
 def test_workspace_routes_require_project_and_writer_grants():
     from types import SimpleNamespace
@@ -668,6 +693,7 @@ def test_workspace_routes_require_project_and_writer_grants():
     workspace = SimpleNamespace(
         entities=lambda project: [],
         create=lambda project, data, actor: data,
+        move_task=lambda project, data: {data.task_key: 1},
         apply_approved=lambda project, task, review, actor: {"review": review, "actor": actor},
     )
 
@@ -691,6 +717,11 @@ def test_workspace_routes_require_project_and_writer_grants():
     assert api.post(path, headers={"role": "reader"}, json=data).status_code == 403
     assert api.post(path, headers={"role": "writer"}, json=data).status_code == 200
     assert api.get(path.replace("alpha", "beta"), headers={"role": "writer"}).status_code == 403
+
+    move = {"task_key": "task", "anchor_key": "another", "placement": "before"}
+    assert api.post(f"{path}/task-order", headers={"role": "reader"}, json=move).status_code == 403
+    assert api.post(f"{path}/task-order", headers={"role": "writer"}, json=move).json() == {"task": 1}
+    assert api.post(f"{path.replace('alpha', 'beta')}/task-order", headers={"role": "writer"}, json=move).status_code == 403
 
     apply = f"{path}/tasks/task/executions/review/apply-approved"
     assert api.post(apply, headers={"role": "reader"}).status_code == 403

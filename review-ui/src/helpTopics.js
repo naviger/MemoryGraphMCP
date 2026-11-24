@@ -22,8 +22,8 @@ export const helpTopics = {
     brief: 'Use Codex for implementation and review, and record verified outcomes in MemoryGraphMCP.',
     sections: [
       ['Bring the task into Codex', 'In Project Overview, open Tasks and take the task link and acceptance criteria into a Codex session in the source repository. Read AGENTS.md and call get_project_guidance for the selected project. Follow the relevant ADR, constraint, and test citations.'],
-      ['Implement and review in Codex', 'Work on a focused branch, run the relevant checks, and review the exact diff or commit. Publishing requires explicit approval. Open Execution history on a task to inspect past agent runs.'],
-      ['Record the verified outcome', 'Return to the task and select Update state. When verified, choose Completed and record the commit, checks and results, any unresolved findings, and follow-up links. Link relevant ADRs or evidence through the graph. If work remains, keep the task open and record the blocker in a linked observation.'],
+      ['Implement and review in Codex', 'Work on a focused branch, run the relevant checks, and review the exact diff or commit. Publishing requires explicit approval. Open History on a task to inspect past agent runs.'],
+      ['Record the verified outcome', 'Return to the task and choose Completed from the State dropdown and record the commit, checks and results, any unresolved findings, and follow-up links. Link relevant ADRs or evidence through the graph. If work remains, keep the task open and record the blocker in a linked observation.'],
     ], related: ['projects', 'guidance', 'source-control'],
   },
   account: {

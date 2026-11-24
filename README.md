@@ -422,7 +422,7 @@ including validating test keys, are returned alongside both guidance fields.
    project. Open the cited ADRs, constraints, or tests that apply.
 2. Implement on a focused branch. Run the relevant checks and use Codex to
    review the exact diff or commit. Get explicit approval before publishing.
-3. Return to the same task. In **Update state**, record the reviewed commit,
+3. Return to the same task. Choose **Completed** in the **State** dropdown and record the reviewed commit,
    checks and results, unresolved findings, and any follow-up. Link relevant
    ADRs or evidence through the graph. Set the task to **Completed** when the
    result is verified. For unfinished work, keep the task open and record
@@ -431,7 +431,7 @@ including validating test keys, are returned alongside both guidance fields.
 For example, a completed outcome could read “Reviewed commit `abc1234`.
 The changed-app pytest suite passed 24 tests. Diff review found no blockers.
 Publishing is pending approval.” The project Help topic **Develop with Codex**
-describes the same handoff. The task panel shows past agent executions in read-only Execution history.
+describes the same handoff. The task panel shows past agent executions in the read-only **History** panel.
 
 ### Approved knowledge snapshots
 

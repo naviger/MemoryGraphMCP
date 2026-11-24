@@ -24,6 +24,7 @@ from app.domain.project_workspace import (
     AgentArtifact,
     AgentResult,
     StartExecution,
+    TaskMove,
     TaskUpdate,
     WorkDraft,
 )
@@ -137,6 +138,8 @@ class ProjectWorkspaceRepository:
                 raise ArchitectureGraphError("An execution is already active for this task")
             if task.status == update.status:
                 return task
+            if task.status == "done":
+                raise ArchitectureGraphError("Completed tasks are read-only")
             if update.status == "done":
                 latest = task.metadata.get("latest_execution")
                 row = tx.collection(self.graph._entities).get(latest) if latest else None
@@ -156,9 +159,43 @@ class ProjectWorkspaceRepository:
                     now,
                     uuid4().hex,
                 )
-            task = task.model_copy(update={"status": update.status})
+            task = task.model_copy(update=task.status_changes(update.status, now))
             self.put(tx, task)
         return task
+
+    def move_task(self, project, move: TaskMove):
+        if move.task_key == move.anchor_key:
+            raise ArchitectureGraphError("Choose a different task as the destination")
+        with self.graph._transaction() as tx:
+            nodes = tx.collection(self.graph._entities)
+            edges = tx.collection(self.graph._edges)
+            project_id = f"{self.graph._entities}/{project}"
+            task_keys = {
+                edge[other]
+                for endpoint, other in (("_from", "target_key"), ("_to", "source_key"))
+                for edge in edges.find({endpoint: project_id})
+                if edge["relationship_type"] in {"defines", "related_to", "references"}
+            }
+            ordered = []
+            for key in task_keys:
+                row = nodes.get(key)
+                if row and row["entity_type"] == "Task" and self.graph._direct_projects(
+                    nodes, edges, key
+                ) == {project}:
+                    ordered.append(Task.model_validate(row))
+            ordered.sort(key=lambda task: (task.position is None, task.position or 0, task.key))
+            moving = next((task for task in ordered if task.key == move.task_key), None)
+            if moving is None or not any(task.key == move.anchor_key for task in ordered):
+                raise ArchitectureGraphError("Both tasks must belong exclusively to this project")
+            ordered.remove(moving)
+            anchor = next(index for index, task in enumerate(ordered) if task.key == move.anchor_key)
+            ordered.insert(anchor + (move.placement == "after"), moving)
+            positions = {}
+            for index, task in enumerate(ordered, start=1):
+                if task.position != index:
+                    nodes.update({"_key": task.key, "position": index})
+                positions[task.key] = index
+        return positions
 
     @staticmethod
     def repair_target(review, project, task_key):
@@ -641,7 +678,7 @@ class ProjectWorkspaceRepository:
                 tx,
                 task.model_copy(
                     update={
-                        "status": task.status if command.patch_execution_key else "in_progress",
+                        **task.status_changes(task.status if command.patch_execution_key else "in_progress", now),
                         "metadata": {**task.metadata, "active_execution": job.key},
                     }
                 ),
@@ -715,7 +752,7 @@ class ProjectWorkspaceRepository:
                 tx,
                 task.model_copy(
                     update={
-                        "status": task.status if job.approved_review_key else "in_progress",
+                        **task.status_changes(task.status if job.approved_review_key else "in_progress", now),
                         "metadata": {**task.metadata, "active_execution": job.key},
                     }
                 ),
@@ -830,7 +867,7 @@ class ProjectWorkspaceRepository:
                 status = (
                     "done" if state == "COMPLETED" and task.status != "cancelled" else task.status
                 )
-                self.put(tx, task.model_copy(update={"status": status, "metadata": metadata}))
+                self.put(tx, task.model_copy(update={**task.status_changes(status, now), "metadata": metadata}))
                 if state == "COMPLETED" and result:
                     artifact_keys = []
                     produced = []

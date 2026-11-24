@@ -1,6 +1,6 @@
 # Recoverable capture and task execution
 
-Project Overview opens on Tasks with Open and In progress selected. Writers can create tasks, goals, risks, and constraints. Select **Help me draft** to generate editable text with the configured local model. The model call does not save a record. Writers can mark a task complete with an outcome and evidence, which creates a linked Observation in the same graph transaction.
+Project Overview opens on Tasks with Open and In progress selected. Writers can create tasks, goals, risks, and constraints. Select **Help me draft** to generate editable text with the configured local model. The model call does not save a record. Writers can mark a task complete with an outcome and evidence, which creates a linked Observation in the same graph transaction. Completed states are read-only in Project Overview. Start and end reflect recorded state transitions. Select a date column to sort, or sort by Order and drag the row handle or use the arrow buttons to save the project-wide order.
 
 ## Capture operations
 
@@ -20,7 +20,7 @@ Observations use stable identities. If the process stops after writing an observ
 
 ## Legacy agent execution
 
-Use an interactive Codex session for new work. In Project Overview, **Execution history** opens past runs, and **Update state** records the verified outcome. The following sections document the legacy worker and adapter contract for operators and describe how past runs were initiated.
+Use an interactive Codex session for new work. In Project Overview, **History** opens past runs. Choose **Completed** in the **State** dropdown to record the verified outcome. The following sections document the legacy worker and adapter contract for operators and describe how past runs were initiated.
 
 | Agent | Setup |
 | --- | --- |

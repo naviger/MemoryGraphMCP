@@ -602,6 +602,11 @@ class ArangoArchitectureRepository:
                     updates = event.model_dump(
                         include={"name", "description", "status"}, exclude_none=True,
                     )
+                    if "status" in updates:
+                        previous = Task.model_validate(task) if task else Task(
+                            key=event.task_key, name=event.name
+                        )
+                        updates.update(previous.status_changes(updates["status"], event.occurred_at))
                     if task is None:
                         nodes.insert(self._entity_payload(Task(key=event.task_key, **updates)))
                         link = ArchitectureLink(
@@ -611,11 +616,23 @@ class ArangoArchitectureRepository:
                         edges.insert(self._edge_payload(link, now.isoformat()))
                         affected.append(project_key)
                     else:
-                        nodes.update({"_key": event.task_key, **updates})
+                        nodes.update({
+                            "_key": event.task_key,
+                            **Task.model_validate(task).model_copy(update=updates).model_dump(
+                                mode="json", include=set(updates)
+                            ),
+                        })
                 else:
                     if task is None:
                         raise ArchitectureGraphError(f"Task '{event.task_key}' was not found")
-                    nodes.update({"_key": event.task_key, "status": "done"})
+                    previous = Task.model_validate(task)
+                    changes = previous.status_changes("done", event.occurred_at)
+                    nodes.update({
+                        "_key": event.task_key,
+                        **previous.model_copy(update=changes).model_dump(
+                            mode="json", include=set(changes)
+                        ),
+                    })
 
             receipt = GraphEventReceipt(
                 event_id=event.event_id, event_type=event.event_type,
