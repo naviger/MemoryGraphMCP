@@ -70,14 +70,15 @@ def register_context_usage(mcp: FastMCP, service: ContextPackageService, usage: 
 
     @mcp.tool
     async def build_context_package(query: ContextQuery) -> MeasuredContextPackage:
-        """Gather compact, dated evidence by traversing direct architecture relationships."""
+        """Blend graph and document evidence with dated ADR conflicts and budget exclusions."""
         try:
             package, baseline, count = await service.build(query)
         except ArchitectureGraphError as exc:
             raise ToolError(str(exc)) from exc
         receipt = await usage.record(
             request_or_none(), "ContextPackage", query.question, package, project=query.project_key,
-            baseline=baseline, entities=count, path="graph anchors → direct relationships → budgeted context",
+            baseline=baseline, entities=count,
+            path="graph and document evidence → ADR conflict lookup → budgeted context",
         )
         return MeasuredContextPackage(**package.model_dump(), usage=receipt)
 

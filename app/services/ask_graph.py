@@ -141,19 +141,19 @@ class AskGraphService:
                     )
             except ArchitectureGraphError:
                 pass
-        if records:
-            if evidence is not None:
-                evidence.path = "graph anchors → direct ADRs → evidence synthesis"
-        else:
-            search = self.repository.search_question_documents
-            if project is not None:
-                search = partial(search, document_keys=[doc.key for doc in project.documents])
-            records = await anyio.to_thread.run_sync(search, " ".join(terms), as_of, _LIMIT)
-            if evidence is not None:
-                evidence.lexical = True
-                evidence.path = "graph lookup → lexical evidence → evidence synthesis" if self.context else (
-                    "lexical evidence → evidence synthesis"
-                )
+        document_keys = [doc.key for doc in project.documents] if project is not None else None
+        search = self.repository.search_question_documents
+        if document_keys is not None:
+            search = partial(search, document_keys=document_keys)
+        lexical = await anyio.to_thread.run_sync(search, " ".join(terms), as_of, _LIMIT)
+        if evidence is not None:
+            evidence.lexical = bool(lexical) or not records
+            evidence.path = ("graph and document evidence → synthesis" if records
+                             else "lexical evidence → synthesis")
+        combined = {}
+        for record in [*records, *lexical]:
+            combined.setdefault(record.key, record)
+        records = list(combined.values())
         if evidence is not None:
             evidence.baseline = document_baseline(records)
         if not records:
@@ -185,8 +185,11 @@ class AskGraphService:
                 if record.conflict_scope is None:
                     gaps.append(f"{record.title} lacks a scope for automated conflict checks.")
                 else:
+                    lookup = self.repository.find_adr_conflicts
+                    if document_keys is not None:
+                        lookup = partial(lookup, allowed_document_keys=document_keys)
                     pairs = await anyio.to_thread.run_sync(
-                        self.repository.find_adr_conflicts,
+                        lookup,
                         ADRConflictQuery(key=record.key, as_of=as_of, limit=10),
                     )
                     for pair in pairs:

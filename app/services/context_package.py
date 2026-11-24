@@ -1,12 +1,19 @@
-from datetime import UTC, datetime
+from collections import Counter
+from datetime import UTC, date, datetime
 from typing import NamedTuple
 
 import anyio
 
 from app.domain.architecture import ArchitectureSearch, ArchitectureTrace, Project
-from app.domain.context_usage import ContextEvidence, ContextItem, ContextPackage, ContextQuery
+from app.domain.context_usage import (
+    ContextConflict,
+    ContextEvidence,
+    ContextItem,
+    ContextPackage,
+    ContextQuery,
+)
 from app.domain.exceptions import ArchitectureGraphError
-from app.domain.models import ArchitecturalDecisionRecord
+from app.domain.models import ADRConflictQuery, ArchitecturalDecisionRecord
 from app.repositories.architecture_protocol import ArchitectureRepository
 from app.repositories.protocol import MemoryRepository
 from app.services.token_usage import estimate_tokens, words
@@ -33,6 +40,36 @@ def _short(value: str, limit: int = 260) -> str:
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
+def _conflict_difference(original: str, competing: str) -> dict[str, str]:
+    original, competing = (" ".join(text.split()) for text in (original, competing))
+    if original == competing or _short(original) != _short(competing):
+        return {}
+    shared = next(
+        (index for index, (left, right) in enumerate(zip(original, competing)) if left != right),
+        min(len(original), len(competing)),
+    )
+    start = max(0, shared - 40)
+
+    def excerpt(text: str) -> str:
+        prefix = "…" if start else ""
+        suffix = " [end of decision]" if shared == len(text) else ""
+        return prefix + _short(text[start:] + suffix, 260 - len(prefix))
+
+    return {
+        "original_decision_excerpt": excerpt(original),
+        "competing_decision_excerpt": excerpt(competing),
+    }
+
+
+def _applicable(record: object, day: date) -> bool:
+    return isinstance(record, ArchitecturalDecisionRecord) and bool(
+        record.key
+        and (record.status == "accepted" or record.status == "superseded" and record.expiration_date)
+        and (record.effective_date is None or record.effective_date <= day)
+        and (record.expiration_date is None or day < record.expiration_date)
+    )
+
+
 class ContextPackageService:
     def __init__(self, graph: ArchitectureRepository, memory: MemoryRepository):
         self.graph = graph
@@ -45,11 +82,18 @@ class ContextPackageService:
         day = query.as_of or datetime.now(UTC).date()
         inventory = None
         scoped = None
+        document_keys = None
         if query.project_key:
             if not isinstance(self.graph.read_entity(query.project_key), Project):
                 raise ArchitectureGraphError("Project not found")
-            inventory = self.graph.project_scope(query.project_key).entities
+            scope = self.graph.project_scope(query.project_key)
+            inventory = scope.entities
             scoped = {item.key for item in inventory}
+            linked = sorted({node.memory_key or node.key for node in inventory
+                             if node.entity_type == "ADR" or node.memory_key})
+            document_keys = [doc.key for doc in self.memory.project_documents(
+                query.project_key, scope.repository_names, linked, "", None,
+            )]
         terms = set(words(query.question)) - _STOP
         seeds = {}
         for key, kind in ((query.entity, None), (query.adr, "ADR"), (query.goal, "Goal"), (query.service, "Service")):
@@ -86,8 +130,7 @@ class ContextPackageService:
 
         package = ContextPackage(
             as_of=day,
-            summary="Direct architecture evidence for the question." if seeds
-                    else "No graph anchors matched. Name an entity, ADR, goal, or service.",
+            summary="Dated architecture evidence for the question.",
         )
         candidates = {key: (node, "Matched graph anchor") for key, node in seeds.items()}
         for seed in seeds.values():
@@ -103,8 +146,8 @@ class ContextPackageService:
                             node, _short(f"{seed.name} {link.relationship_type} {node.name} ({link.source})", 150),
                         )
 
-        baseline_documents = {}
-        supplied = 0
+        graph_items = []
+        records = {}
         for node, reason in candidates.values():
             group = _GROUPS.get(node.entity_type)
             if not group:
@@ -114,39 +157,115 @@ class ContextPackageService:
                                text=_short(node.description, 150))
             if node.entity_type == "ADR":
                 record = self.memory.read_document(node.memory_key or node.key)
-                if not isinstance(record, ArchitecturalDecisionRecord) or record.key in baseline_documents:
-                    continue
-                if (record.status not in {"accepted", "superseded"}
-                        or record.status == "superseded" and not record.expiration_date
-                        or record.effective_date and record.effective_date > day
-                        or record.expiration_date and day >= record.expiration_date):
-                    continue
-                full = {"title": record.title, "decision": record.decision, "rationale": record.rationale,
-                        "consequences": record.consequences, "content": record.content}
-                baseline_documents[record.key] = full
-                item.key, item.title, item.destination = record.key, _short(record.title, 100), "records"
-                item.text = (record.content or "\n".join(full.values())) if query.include_full_adrs else _short(
-                    record.rationale if "why" in words(query.question) else record.decision,
-                )
-                citation = next((item for validation in reversed(record.validation_history)
-                                 for item in validation.evidence), record.source_id or record.source)
-                evidence = ContextEvidence(key=record.key, citation=_short(citation or reason, 150))
+                if _applicable(record, day):
+                    records.setdefault(record.key, (record, reason))
+                continue
             elif node.entity_type == "Constraint":
                 if not node.rule or node.enforcement_status in {None, "retired", "proposed"}:
                     continue
                 item.text = _short(node.rule)
             elif node.source_path:
                 evidence.citation = _short(f"{reason}. {node.source_path}", 150)
-            items = getattr(package, group)
-            items.append(item)
-            package.evidence.append(evidence)
-            if estimate_tokens(package) > query.max_context_tokens:
-                items.pop()
-                package.evidence.pop()
-            else:
-                supplied += 1
+            graph_items.append((group, item, evidence))
 
-        if seeds and not supplied:
-            package.summary = "Graph anchors matched, but no applicable evidence fit the scope, date, and token budget."
-        baseline = estimate_tokens(list(baseline_documents.values())) if baseline_documents else None
+        if terms:
+            filters = {"document_keys": document_keys} if document_keys is not None else {}
+            for record in self.memory.search_question_documents(
+                " ".join(sorted(terms)), day, 8, adrs_only=True, **filters,
+            ):
+                if _applicable(record, day):
+                    records.setdefault(record.key, (record, "Matched document search"))
+
+        ordered = {}
+        conflicts = {}
+        scope_filter = {"allowed_document_keys": document_keys} if document_keys is not None else {}
+        for key, (record, reason) in records.items():
+            ordered.setdefault(key, (record, reason))
+            if record.conflict_scope is None:
+                continue
+            for pair in self.memory.find_adr_conflicts(
+                ADRConflictQuery(key=key, as_of=day, limit=100), **scope_filter,
+            ):
+                other_key = pair.competing.key
+                identity = tuple(sorted((key, other_key)))
+                if identity in conflicts:
+                    continue
+                other, other_reason = records.get(other_key, (None, "Unresolved ADR conflict"))
+                if other is None:
+                    other = self.memory.read_document(other_key)
+                if _applicable(other, day):
+                    ordered.setdefault(other_key, (other, other_reason))
+                    conflicts[identity] = ContextConflict(
+                        original_key=key, competing_key=other_key,
+                        overlap_start=pair.overlap_start, overlap_end=pair.overlap_end,
+                        **_conflict_difference(record.decision, other.decision),
+                    )
+
+        conflict_keys = {key for identity in conflicts for key in identity}
+        adr_items = {}
+        baseline_documents = []
+        rationale = bool({"why", "rationale"}.intersection(words(query.question)))
+        for record, reason in ordered.values():
+            full = {"title": record.title, "decision": record.decision, "rationale": record.rationale,
+                    "consequences": record.consequences, "content": record.content}
+            baseline_documents.append(full)
+            excerpt = _short(record.decision)
+            if rationale:
+                excerpt = _short(record.rationale)
+                if record.key in conflict_keys:
+                    excerpt = f"{_short(record.decision)}\nRationale: {excerpt}"
+            if query.include_full_adrs:
+                excerpt = record.content or "\n".join(full.values())
+                if record.key in conflict_keys and record.decision not in excerpt:
+                    excerpt = f"{record.decision}\n{excerpt}"
+            item = ContextItem(key=record.key, title=_short(record.title, 100),
+                               destination="records", text=excerpt)
+            citation = next((item for validation in reversed(record.validation_history)
+                             if validation.checked_at.date() <= day
+                             for item in validation.evidence), record.source_id or record.source)
+            adr_items[record.key] = ("relevant_adrs", item, ContextEvidence(
+                key=record.key, citation=_short(citation or reason, 150),
+            ))
+
+        entries = [*adr_items.values(), *graph_items]
+        package.budget_excluded = dict(Counter(group for group, _, _ in entries))
+        if conflicts:
+            package.budget_excluded["conflicts"] = len(conflicts)
+        supplied = 0
+        supplied_adrs = set()
+        for conflict in conflicts.values():
+            missing = [key for key in (conflict.original_key, conflict.competing_key)
+                       if key not in supplied_adrs]
+            if self._fit(package, query.max_context_tokens,
+                         *(adr_items[key] for key in missing), ("conflicts", conflict, None)):
+                supplied_adrs.update(missing)
+        supplied += len(supplied_adrs)
+        unrelated_adrs = (entry for key, entry in adr_items.items() if key not in conflict_keys)
+        for entry in (*unrelated_adrs, *graph_items):
+            supplied += self._fit(package, query.max_context_tokens, entry)
+        if not supplied:
+            package.summary = ("No matching evidence fit the budget." if entries
+                               else "No applicable evidence matched the question.")
+        baseline = estimate_tokens(baseline_documents) if baseline_documents else None
         return BuiltContext(package, baseline, supplied)
+
+    @staticmethod
+    def _fit(
+        package: ContextPackage, budget: int,
+        *entries: tuple[str, ContextItem | ContextConflict, ContextEvidence | None],
+    ) -> bool:
+        for group, item, evidence in entries:
+            getattr(package, group).append(item)
+            if evidence is not None:
+                package.evidence.append(evidence)
+            package.budget_excluded[group] -= 1
+            if not package.budget_excluded[group]:
+                del package.budget_excluded[group]
+        if estimate_tokens(package) <= budget:
+            return True
+        for group, _, evidence in reversed(entries):
+            package.budget_excluded[group] = package.budget_excluded.get(group, 0) + 1
+            getattr(package, group).pop()
+            if evidence is not None:
+                package.evidence.pop()
+        return False

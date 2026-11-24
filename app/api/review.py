@@ -220,7 +220,8 @@ def build_review_router(
             raise HTTPException(404, str(exc)) from exc
         receipt = await usage.record(
             request, "ContextPackage", query.question, package, project=query.project_key,
-            baseline=baseline, entities=count, path="graph anchors → direct relationships → budgeted context",
+            baseline=baseline, entities=count,
+            path="graph and document evidence → ADR conflict lookup → budgeted context",
         )
         response.headers["Cache-Control"] = "no-store"
         return MeasuredContextPackage(**package.model_dump(), usage=receipt)

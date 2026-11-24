@@ -53,7 +53,9 @@ class MemoryRepository(Protocol):
     ) -> ArchitecturalDecisionRecord:
         ...
 
-    def find_adr_conflicts(self, request: ADRConflictQuery) -> list[ADRConflict]:
+    def find_adr_conflicts(
+        self, request: ADRConflictQuery, *, allowed_document_keys: list[str] | None = None,
+    ) -> list[ADRConflict]:
         ...
 
     def list_adr_conflicts(
@@ -100,6 +102,7 @@ class MemoryRepository(Protocol):
 
     def search_question_documents(
         self, terms: str, as_of: date, limit: int, *, document_keys: list[str] | None = None,
+        adrs_only: bool = False,
     ) -> list[MemoryDocument]:
         ...
 

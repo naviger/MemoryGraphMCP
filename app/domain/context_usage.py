@@ -34,6 +34,15 @@ class ContextEvidence(BaseModel):
     citation: str
 
 
+class ContextConflict(BaseModel):
+    original_key: MemoryKey
+    competing_key: MemoryKey
+    overlap_start: date | None = None
+    overlap_end: date | None = None
+    original_decision_excerpt: str | None = None
+    competing_decision_excerpt: str | None = None
+
+
 class ContextPackage(BaseModel):
     summary: str
     as_of: date
@@ -42,6 +51,12 @@ class ContextPackage(BaseModel):
     relevant_services: list[ContextItem] = Field(default_factory=list)
     relevant_tests: list[ContextItem] = Field(default_factory=list)
     evidence: list[ContextEvidence] = Field(default_factory=list)
+    conflicts: list[ContextConflict] = Field(
+        default_factory=list, description="Unresolved conflicts with both cited ADRs in the package.",
+    )
+    budget_excluded: dict[str, int] = Field(
+        default_factory=dict, description="Counts of applicable candidates omitted by package field.",
+    )
 
 
 class UsageOutcome(BaseModel):
