@@ -118,7 +118,6 @@ function detailLocation() {
   if (/^\/search\/?$/.test(window.location.pathname)) return { destination: 'search' };
   const help = window.location.pathname.match(/^\/help(?:\/([a-z0-9-]+))?\/?$/);
   if (help) return { destination: 'help', key: help[1] };
-  if (/^\/help\/?$/.test(window.location.pathname)) return { destination: 'help' };
   if (window.location.pathname.replace(/\/$/, '') === '/agent-settings') return { destination: 'agent-settings' };
   if (/^\/global-guidance\/?$/.test(window.location.pathname)) return { destination: 'global-guidance' };
   if (/^\/token-usage\/?$/.test(window.location.pathname)) return { destination: 'token-usage' };
@@ -497,6 +496,9 @@ function App() {
           )}
           {route?.destination === 'help' && <HelpPage topicKey={route.key} projectKey={projectKey}
             navigate={navigate} token={token} signedIn={Boolean(session)} onUnauthorized={expireSession} />}
+          {session && route?.destination === 'agent-settings' && (session.role === 'admin'
+            ? <AgentSettings token={token} onUnauthorized={expireSession} />
+            : <p role="alert">Administrator access is required.</p>)}
           {session && route?.destination === 'global-guidance' && <>
             <header className="page-heading"><div>
               <div className="heading-with-help"><h1>Global Guidance</h1><ContextHelp topic="guidance" /></div>
@@ -512,8 +514,7 @@ function App() {
             <p role="status">Loading projects…</p>}
           {session && route?.destination === 'token-usage' && <TokenUsagePage projectKey={projectKey}
             token={token} onUnauthorized={expireSession} />}
-          {(route?.destination === 'help' || session && ['ask', 'search', 'graph', 'projects', 'global-guidance', 'token-usage', 'effectiveness'].includes(route?.destination))
-          {session && ['ask', 'search', 'graph', 'projects', 'help', 'global-guidance', 'agent-settings', 'token-usage', 'effectiveness'].includes(route?.destination)
+          {(route?.destination === 'help' || session && ['ask', 'search', 'graph', 'projects', 'global-guidance', 'agent-settings', 'token-usage', 'effectiveness'].includes(route?.destination))
             ? null : session && !isQueueRoute ? (
             <EntityDetailPage key={`${route.destination}/${route.key}`}
               route={route} token={token} navigate={navigate} onUnauthorized={expireSession}
