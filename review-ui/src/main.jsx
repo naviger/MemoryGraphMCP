@@ -561,7 +561,7 @@ function App() {
                 {!selected ? <EmptyDetail>{loading ? 'Loading review items…' : queueError ? 'Refresh to try loading the queue again.' :
                   section === 'validations' ? 'No overdue validations on this page.' : 'No unresolved conflicts on this page.'}</EmptyDetail>
                 : section === 'validations'
-                  ? <ValidationDetail record={selected} canWrite={session.can_write} busy={saving || loading} navigate={navigate}
+                  ? <ValidationDetail record={selected} asOf={queue?.review_date} canWrite={session.can_write} busy={saving || loading} navigate={navigate}
                     onSubmit={(key, evidence, confidence) => save(
                       `/records/${encodeURIComponent(key)}/revalidate`, { evidence, confidence },
                       (result) => `Validation saved. Next review ${formatDate(result.next_review_due)}.`,

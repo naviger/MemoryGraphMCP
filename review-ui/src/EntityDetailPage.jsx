@@ -3,7 +3,7 @@ import { SimilarRecords } from './SimilarRecords.jsx';
 import { CircleAlert, FileCode2, FileText, FlaskConical, Link2, Waypoints } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { reviewRequest } from './api.js';
-import { CodeEvidenceLink, DetailLink, Evidence, formatDate, formatScore } from './Details.jsx';
+import { CodeEvidenceLink, DetailLink, ValidationEvidence, ValidityDates, formatScore } from './Details.jsx';
 
 const LINK_GROUPS = [
   ['ADR', 'ADRs', FileText],
@@ -63,19 +63,10 @@ function EmbeddingDiagnostics({ embedding }) {
 }
 
 function RecordDetails({ record, embedding }) {
-  const facts = [
-    ['Effective date', formatDate(record.effective_date)],
-    ['Expiration date', formatDate(record.expiration_date)],
-    ['Last validated', formatDate(record.last_validated)],
-    ['Next review due', formatDate(record.next_review_due)],
-    ['Confidence', formatScore(record.confidence)],
-  ];
-  if (record.date) facts.push(['Decision date', formatDate(record.date)]);
   return (
     <>
-      <dl className="facts">{facts.map(([label, value]) => (
-        <div key={label}><dt>{label}</dt><dd>{value}</dd></div>
-      ))}</dl>
+      <ValidationEvidence record={record} />
+      <ValidityDates record={record} />
       {record.decision ? (
         <dl className="record-text">
           {Object.entries({ Decision: record.decision, Rationale: record.rationale, Consequences: record.consequences })
@@ -88,9 +79,6 @@ function RecordDetails({ record, embedding }) {
         <h2>Confidence history</h2>
         <ConfidenceHistory history={record.validation_history} />
       </section>
-      <div className="record-section">
-        <Evidence history={record.validation_history.slice().reverse()} source={record.source} sourceId={record.source_id} />
-      </div>
       {embedding && <EmbeddingDiagnostics key={record.key} embedding={embedding} />}
     </>
   );

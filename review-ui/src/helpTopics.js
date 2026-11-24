@@ -93,7 +93,7 @@ export const helpTopics = {
     group: 'Explore knowledge', title: 'Record details and the inspector',
     brief: 'Read validity dates, cited evidence, and related records. The inspector gives a quick preview while keeping your place.',
     sections: [
-      ['Read the history', 'Record details show the validity window, revalidation history, citations, and changes to confidence where available. Evidence may be a source reference, file, or validation artifact.'],
+      ['Check confidence and validation', 'Record details group the stored confidence score, review status, and citations. Validity dates appear separately. Expand the record to see the confidence history and the evidence supplied by each reviewer.'],
       ['Explore linked records', 'Open the linked decisions, services, source files, and tests. Explore relationships opens the graph centered on the selected item. Use Back to return to the prior view.'],
       ['Inspect embedding diagnostics', 'Expand diagnostics to check the stored provider, model, version, and dimensions against the active search profile. Similar records loads vector matches on demand.'],
     ], related: ['review', 'search', 'graph'],

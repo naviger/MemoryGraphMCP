@@ -1,7 +1,7 @@
 import { Network, X } from 'lucide-react';
 import { createContext, useContext, useEffect, useId, useRef, useState } from 'react';
 import { reviewRequest } from './api.js';
-import { DetailLink, formatDate } from './Details.jsx';
+import { DetailLink, ValidationEvidence, ValidityDates } from './Details.jsx';
 
 const InspectorContext = createContext(null);
 
@@ -50,12 +50,9 @@ function Inspector({ selection, close, token, navigate, onUnauthorized }) {
   const { record, entity } = detail ?? {};
   const facts = [
     ['Status', record?.status || entity?.status],
-    ['Source', record?.source],
     ['File', entity?.source_path],
     ['Qualified name', entity?.qualified_name],
     ['Endpoint', entity?.method && entity?.path ? `${entity.method} ${entity.path}` : null],
-    ['Effective date', record?.effective_date && formatDate(record.effective_date)],
-    ['Expiration date', record?.expiration_date && formatDate(record.expiration_date)],
   ].filter(([, value]) => Boolean(value));
   const description = record?.decision || record?.content || entity?.summary || entity?.description;
   const graphKey = entity?.key ?? (record && `record:${record.key}`);
@@ -81,6 +78,7 @@ function Inspector({ selection, close, token, navigate, onUnauthorized }) {
         <h3>{record?.title ?? entity?.name}</h3>
         {description && <p className="inspector-description">{excerpt(description)}</p>}
         {record?.rationale && <div><h4>Rationale</h4><p>{excerpt(record.rationale)}</p></div>}
+        {record && <><ValidationEvidence record={record} latestOnly /><ValidityDates record={record} /></>}
         {facts.length > 0 && <dl className="graph-node-facts">
           {facts.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
         </dl>}
