@@ -1,17 +1,20 @@
-"""Encrypted storage for browser sessions in a single API deployment."""
+"""Encrypted SQLite browser sessions shared by API processes on one host."""
 
+import fcntl
 import json
+import os
 import sqlite3
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from hashlib import sha256
 from pathlib import Path
 
+import anyio
 from cryptography.fernet import Fernet, InvalidToken
 
 
 class BrowserSessionStore:
     def __init__(self, path: str, key: str, namespace: str):
-        self.path = Path(path)
+        self.path = Path(path).resolve()
         self.cipher = Fernet(key.encode())
         self.namespace = namespace
 
@@ -33,6 +36,25 @@ class BrowserSessionStore:
 
     def identity(self, session_id: str) -> str:
         return sha256(f"{self.namespace}\x00{session_id}".encode()).hexdigest()
+
+    @asynccontextmanager
+    async def guard(self, session_id: str):
+        # Keep the number of lock files bounded. Keep their inodes stable
+        # across requests so different API processes lock the same resource.
+        stripe = self.identity(session_id)[:2]
+        path = self.path.with_name(f"{self.path.name}.lock-{stripe}")
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            with anyio.fail_after(15):
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        await anyio.sleep(0.02)
+            yield
+        finally:
+            os.close(fd)
 
     def read(self, session_id: str, now: float) -> dict | None:
         key = self.identity(session_id)
