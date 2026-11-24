@@ -210,6 +210,8 @@ class OverdueValidation(MemoryValidity):
     kind: MemoryKind
     status: str | None = None
     next_review_due: CalendarDate
+    source: str | None = None
+    source_id: str | None = None
     last_validation: MemoryValidation | None = None
 
 

@@ -760,6 +760,8 @@ class ArangoMemoryRepository:
                 kind: NOT_NULL(doc.kind, "memory"),
                 status: doc.status,
                 next_review_due: doc.next_review_due,
+                source: doc.source,
+                source_id: doc.source_id,
                 effective_date: doc.effective_date,
                 expiration_date: doc.expiration_date,
                 last_validated: doc.last_validated,

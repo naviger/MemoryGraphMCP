@@ -258,7 +258,10 @@ The React client is packaged in the `review-ui` container. Docker Compose starts
 
 For an existing stack, run `docker compose up -d --build memorygraphmcp review-ui` to create the UI service and load changes. The `docker compose restart` command restarts containers that already exist.
 
-Use **Open record** on a validation or **Open ADR** on either side of a conflict to see the record's validity window, confidence history, and citations. The detail view also shows linked ADRs, services, source files, and tests. Architecture links come from the graph, so an existing ADR needs a graph entry and explicit links to show its related code and tests. Supersession links from the ADR lifecycle appear directly.
+The validation queue and record details group the stored content confidence,
+review status, and citations. Validity dates are shown separately. A review
+becomes overdue after its due date. An expired record can still have a current
+validation. Open the full record for its confidence history. The detail view also shows linked ADRs, services, source files, and tests. Architecture links come from the graph, so an existing ADR needs a graph entry and explicit links to show its related code and tests. Supersession links from the ADR lifecycle appear directly.
 
 Sign in through OIDC or connect with a bearer token accepted by the configured
 issuer and audience. Readers can inspect the queue and its evidence. Writers

@@ -1,5 +1,6 @@
 import { CalendarClock, Check, CircleAlert, FileCheck2, FileText, GitPullRequest, Link2 } from 'lucide-react';
 import { useState } from 'react';
+import { validationStatus, validityStatus } from './validationStatus.js';
 
 const dateFormat = new Intl.DateTimeFormat(undefined, {
   month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC',
@@ -71,6 +72,38 @@ export function Evidence({ history, source, sourceId }) {
   );
 }
 
+export function ValidationEvidence({ record, asOf, latestOnly = false }) {
+  const history = record.validation_history?.slice().reverse() ?? [];
+  const entries = latestOnly ? history.slice(0, 1) : history;
+  const citations = (record.last_validation ? [record.last_validation] : entries)
+    .filter((entry) => !asOf || entry.checked_at.slice(0, 10) <= asOf);
+
+  return (
+    <section className="record-section validation-evidence">
+      <h2>Confidence and validation</h2>
+      <dl className="facts">
+        <div><dt>Content confidence</dt><dd>{record.confidence == null ? 'Unrecorded' : formatScore(record.confidence)}</dd></div>
+        <div><dt>Validation status</dt><dd>{validationStatus(record, asOf)}</dd></div>
+        <div><dt>Last validated</dt><dd>{formatDate(record.last_validated)}</dd></div>
+        <div><dt>Next review due</dt><dd>{formatDate(record.next_review_due)}</dd></div>
+      </dl>
+      <Evidence history={citations} source={record.source} sourceId={record.source_id} />
+    </section>
+  );
+}
+
+export function ValidityDates({ record, asOf }) {
+  const status = validityStatus(record, asOf);
+  return (
+    <dl className="facts record-validity">
+      <div><dt>Effective date</dt><dd>{formatDate(record.effective_date)}</dd></div>
+      <div><dt>Expiration date</dt><dd>{formatDate(record.expiration_date)}</dd></div>
+      {status && <div><dt>Validity status</dt><dd>{status}</dd></div>}
+      {record.date && <div><dt>Decision date</dt><dd>{formatDate(record.date)}</dd></div>}
+    </dl>
+  );
+}
+
 function WriterNotice() {
   return <p className="notice"><CircleAlert size={16} aria-hidden="true" /> A writer or admin token is required to save changes.</p>;
 }
@@ -108,7 +141,7 @@ export function DetailLink({ destination = 'records', entityKey, navigate, child
   return <a className={className} href={href} onClick={(event) => navigate(event, href)}>{children}</a>;
 }
 
-export function ValidationDetail({ record, canWrite, busy, onSubmit, navigate }) {
+export function ValidationDetail({ record, asOf, canWrite, busy, onSubmit, navigate }) {
   return (
     <article className="detail">
       <div className="detail-header">
@@ -116,13 +149,8 @@ export function ValidationDetail({ record, canWrite, busy, onSubmit, navigate })
         <div><p className="item-key">{record.key}</p><h2>{record.title}</h2></div>
         <DetailLink entityKey={record.key} navigate={navigate} className="button outlined open-record">Open record</DetailLink>
       </div>
-      <dl className="facts">
-        <div><dt>Review due</dt><dd>{formatDate(record.next_review_due)}</dd></div>
-        <div><dt>Last validated</dt><dd>{formatDate(record.last_validated)}</dd></div>
-        <div><dt>Confidence</dt><dd>{formatScore(record.confidence)}</dd></div>
-        <div><dt>Expiration</dt><dd>{formatDate(record.expiration_date)}</dd></div>
-      </dl>
-      <Evidence history={record.last_validation ? [record.last_validation] : []} />
+      <ValidationEvidence record={record} asOf={asOf} />
+      <ValidityDates record={record} asOf={asOf} />
       {canWrite ? <RevalidateForm key={record.key} record={record} busy={busy} onSubmit={onSubmit} /> : <WriterNotice />}
     </article>
   );
