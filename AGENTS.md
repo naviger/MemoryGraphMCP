@@ -11,8 +11,8 @@ Use the running MemoryGraphMCP as the development memory for this repository. Us
 ## Development workflow
 
 Use an interactive Codex session for implementation, testing, and review. Use
-MemoryGraphMCP to read project context and record the outcome. The task panel’s
-agent execution workflow is optional.
+MemoryGraphMCP to read project context and record the outcome. The task panel keeps
+past agent executions available as read-only history.
 
 - Work on a focused feature branch based on current `origin/main`. Inspect existing local edits before branching or integrating upstream. Use a separate worktree when needed to preserve the user's checkout.
 - Before changing architecture or starting a recorded follow-up, call MemoryGraphMCP's `get_project_guidance` with project key `230a0395ec1b86f503063b1e1dfdf9503e9309c5eb6054046fcc5e1cc566f97a`. Read the published global and project guidance, relevant ADRs, and constraint tests. Use the Project Overview if the tool is unavailable.

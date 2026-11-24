@@ -431,7 +431,7 @@ including validating test keys, are returned alongside both guidance fields.
 For example, a completed outcome could read “Reviewed commit `abc1234`.
 The changed-app pytest suite passed 24 tests. Diff review found no blockers.
 Publishing is pending approval.” The project Help topic **Develop with Codex**
-describes the same handoff. Agent execution from the task panel remains optional.
+describes the same handoff. The task panel shows past agent executions in read-only Execution history.
 
 ### Approved knowledge snapshots
 
