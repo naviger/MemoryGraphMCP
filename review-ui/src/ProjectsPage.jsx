@@ -1,5 +1,6 @@
 import { projectHelpTopics } from './helpTopics.js';
 import { ContextHelp } from './ContextHelp.jsx';
+import ProjectWorkspace, { CaptureStatus } from './ProjectWorkspace.jsx';
 import ProjectGuidance from './ProjectGuidance.jsx';
 import TrackerOverview from './TrackerOverview.jsx';
 import { InspectorView, PreviewLink } from './RecordInspector.jsx';
@@ -10,10 +11,6 @@ import { useEffect, useState } from 'react';
 import { reviewRequest } from './api.js';
 import { formatDate, formatWindow } from './Details.jsx';
 
-const GROUPS = [
-  ['Goals, constraints, risks, and tasks', ['Goal', 'Constraint', 'Risk', 'Task']],
-  ['Other linked entities', ['DomainConcept', 'Observation', 'ConversationSummary']],
-];
 const CODE_TYPES = new Set(['Repository', 'Service', 'Module', 'Class', 'Function',
   'SourceFile', 'ApiEndpoint', 'DatabaseCollection', 'TestSuite']);
 const BATCH_SIZE = 25;
@@ -221,14 +218,6 @@ function Inventory({ project, navigate, searching, tab, setTab, token, asOf, onU
     <PreviewLink entityKey={doc.key} navigate={navigate}>{doc.title}</PreviewLink>
   );
   const code = project.entities.filter((item) => CODE_TYPES.has(item.entity_type));
-  const openWork = project.entities.filter((item) =>
-    item.entity_type === 'Task' && ['open', 'in_progress'].includes(item.status));
-  const counts = [
-    ['Decisions', decisions.length],
-    ['Code', code.length],
-    ['Memory', project.documents.length],
-  ];
-
   return <>
     <div role="tablist" aria-label="Project sections" className="project-tabs"
       onKeyDown={(event) => {
@@ -247,22 +236,10 @@ function Inventory({ project, navigate, searching, tab, setTab, token, asOf, onU
       ))}
     </div>
     {[
-      ['Overview', <>
-        <ul className="project-counts">
-          {counts.map(([name, count]) => (
-            <li key={name}><button type="button" className="button outlined" onClick={() => {
-              setTab(name);
-              document.getElementById(`project-tab-${name}`)?.focus();
-            }}>{name} <strong>{count}</strong></button></li>
-          ))}
-        </ul>
-        <TrackerOverview projectKey={project.key} token={token} active={tab === 'Overview'}
-          navigate={navigate} onUnauthorized={onUnauthorized} />
-        <InventoryGroup title="Open work" items={openWork} renderItem={renderEntity} open />
-        {GROUPS.map(([title, types]) => (
-          <InventoryGroup key={title} title={title} items={project.entities.filter((item) => types.includes(item.entity_type))}
-            renderItem={renderEntity} />
-        ))}
+      ['Overview', tab === 'Overview' && <>
+        <ProjectWorkspace projectKey={project.key} token={token} navigate={navigate} onUnauthorized={onUnauthorized} />
+        <CaptureStatus projectKey={project.key} token={token} />
+        <TrackerOverview projectKey={project.key} token={token} active navigate={navigate} onUnauthorized={onUnauthorized} />
       </>],
       ['Guidance', <ProjectGuidance projectKey={project.key} token={token}
         onUnauthorized={onUnauthorized} active={tab === 'Guidance'} />],
@@ -340,6 +317,8 @@ export function ProjectsPage({ projectKey, token, navigate, onUnauthorized, requ
       <section className="project-page">
         <header className="page-heading"><div><div className="heading-with-help"><h1>Project Overview</h1><ContextHelp topic={projectHelpTopics[tab]} /></div>
           <p>Browse graph entities and memory documents associated with a project.</p></div></header>
+        <header className="page-heading"><div><h1>Project Overview</h1>
+          <p>Manage project work and explore its architectural memory.</p></div></header>
         {!projectKey && <p className="muted">Choose a project in the top bar to browse its inventory.</p>}
         <form className="detail ask-form" onSubmit={(event) => {
           event.preventDefault();

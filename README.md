@@ -231,6 +231,10 @@ By default, the queue uses the current UTC date for overdue reviews and includes
 
 ### Review web client
 
+Project Overview provides a task-first workspace with state filters, Goals, Risks, and Constraints.
+See [recoverable capture and task execution](docs/recoverable-capture-and-task-execution.md) for lag,
+replay, backfill, local drafting, and agent setup.
+
 The React client is packaged in the `review-ui` container. Docker Compose starts it with the stack. Set `MGMCP_REVIEW_PORT` to change the host port. [Open the local review UI](http://127.0.0.1:3200).
 
 For an existing stack, run `docker compose up -d --build memorygraphmcp review-ui` to create the UI service and load changes. The `docker compose restart` command restarts containers that already exist.
@@ -294,6 +298,9 @@ docker compose -f docker-compose.yml -f docker-compose.local-auth.yml \
 
 Open `http://127.0.0.1:3200` and select **Sign in**. Keycloak listens on `127.0.0.1:8180` by default. Its local realm is imported on first startup and persisted in the Keycloak volume. The local realm uses a public PKCE client and the distinct `memorygraphmcp-api` access-token audience. Use the same Compose files on subsequent restarts to retain the local authentication settings.
 
+For a single API instance, set `MGMCP_OIDC_BROWSER_SESSION_DB=/var/lib/memorygraphmcp/sessions/browser.sqlite` and supply a stable Fernet key as `MGMCP_OIDC_BROWSER_SESSION_KEY`. The Compose session volume preserves encrypted sessions across API container restarts. Keep the key in private deployment configuration and reuse it on restart. Rotating the key invalidates existing stored sessions. The store is intended for a single API process.
+
+
 The `mgmcp-admin` account has the application admin role. Keycloak's administration console signs in to the separate `master` realm. Set `MGMCP_LOCAL_KEYCLOAK_ADMIN_USERNAME` and `MGMCP_LOCAL_KEYCLOAK_ADMIN_PASSWORD` before first startup to bootstrap a temporary Keycloak administrator. For an existing local database, use the same Compose configuration and stop Keycloak before recovery:
 
 ```sh
@@ -317,6 +324,8 @@ For a shared deployment, run the base Compose file with authentication enabled a
 | `MGMCP_OIDC_BROWSER_ORIGIN` | Public HTTPS origin of the review UI |
 | `MGMCP_OIDC_BROWSER_CLIENT_ID` | OIDC browser client |
 | `MGMCP_OIDC_BROWSER_CLIENT_SECRET` | Secret for a confidential client, if applicable |
+| `MGMCP_OIDC_BROWSER_SESSION_DB` | Optional path to a private SQLite session file on a persistent volume |
+| `MGMCP_OIDC_BROWSER_SESSION_KEY` | Stable Fernet encryption key for the browser session file |
 | `MGMCP_OIDC_BROWSER_TOKEN_AUTH` | `client_secret_basic` or `client_secret_post` |
 | `MGMCP_OIDC_BROWSER_SCOPES` | Additional access-token scopes, when required |
 | `MGMCP_OIDC_BROWSER_AUDIENCE` | Optional audience parameter for providers that require one |
@@ -404,6 +413,61 @@ The read-only MCP tool returns the two published scopes separately.
 contains project instructions. Each field is null until its first publication.
 Drafts stay in the editors. Current accepted ADRs and active constraints,
 including validating test keys, are returned alongside both guidance fields.
+
+### Approved knowledge snapshots
+
+For snapshots that reference each other's ADRs, restore them in one transaction:
+
+```sh
+python -m scripts.knowledge_snapshot import-batch --project PROJECT \
+  --snapshot /path/to/repo-a COMMIT_A REPOSITORY_A \
+  --snapshot /path/to/repo-b COMMIT_B REPOSITORY_B
+```
+
+Use `check-batch` for a read-only preview. Set up the project and linked repository records
+before restore. Shared ownership links require their destination project records to exist.
+The restore validates every Git snapshot before writing, installs all ADRs before resolving
+cross-repository coexistence, and rolls back if any snapshot cannot be verified.
+
+From the repository root, use `python -m scripts.knowledge_snapshot` with
+`--project PROJECT_KEY --repository SOURCE_REPOSITORY_KEY`. This maintenance
+command uses the configured ArangoDB credentials. Set the linked Repository
+node's `metadata.git_checkout` to the absolute path of its trusted local Git
+checkout. The command accepts that repository and its linked worktrees. For
+`check` and `import`, the snapshot's source commit must be an ancestor of, or
+equal to, the commit containing the snapshot. Review the snapshot before
+committing it.
+
+- `export` writes JSON to stdout for review and placement at
+  `knowledge/approved.json`. It includes accepted ADRs owned by the selected
+  repository, their
+  documented coexistence resolutions, and current published project guidance.
+  Export requires a stored review deadline for every included ADR. Backfill
+  missing deadlines before exporting. Coexistence keeps its audit history when
+  an ADR's scope changes. Only a resolution with the same pair, scope, and
+  overlap suppresses a current conflict. Legacy resolutions match the pair,
+  system, environment, and overlap recorded at the time.
+  The snapshot identifies the owning project, linked source repository, and
+  Git commit selected at export. Repository-owned ADRs carry ownership data
+  used to restore their defining links and direct project links and detect
+  ownership drift. A direct project link alone leaves an ADR in project
+  guidance without assigning it to a repository snapshot.
+- `check` reads that path from a local commit selected by `--ref` (default
+  `HEAD`). It exits with status 1 on drift and reports records present only in
+  Git, records present only in the database, differing records with both
+  values, and occupied keys that would prevent a safe import.
+- `import` reads the same committed snapshot. If the only differences are
+  new records from Git, it validates coexistence resolutions against the ADR
+  pair and checks newly imported ADRs for unresolved conflicts. It verifies the resulting
+  snapshot before committing the database transaction, and journals the
+  imported record keys and both Git revisions. Re-importing matching content
+  succeeds without writes. For other differences, it exits with status 1 and
+  leaves the database intact for review. An unresolved conflict also aborts
+  the import and reports both decisions and their available evidence.
+
+Snapshots cover current approved project knowledge. The database retains
+guidance drafts, earlier publications, global guidance, supersession links,
+and search embeddings.
 
 ### Automated knowledge capture
 

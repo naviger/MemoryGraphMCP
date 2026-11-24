@@ -1,6 +1,27 @@
 const BASE = '/api/review';
 let usageSession;
 
+// Interaction keeps a browser session active. Background polling carries no activity marker.
+let activityHeartbeat;
+let lastHeartbeat = 0;
+if (typeof window !== 'undefined') {
+  const reportInteraction = (event) => {
+    if (!event.isTrusted || document.visibilityState !== 'visible' || activityHeartbeat) return;
+    const delay = Math.max(0, 30000 - (Date.now() - lastHeartbeat));
+    activityHeartbeat = window.setTimeout(() => {
+      activityHeartbeat = undefined;
+      if (document.visibilityState !== 'visible') return;
+      lastHeartbeat = Date.now();
+      fetch(BASE + '/session', {
+        headers: { 'X-MemoryGraph-Activity': '1' }, cache: 'no-store',
+      }).catch(() => {});
+    }, delay);
+  };
+  for (const event of ['pointerdown', 'keydown', 'wheel']) {
+    window.addEventListener(event, reportInteraction, { passive: true });
+  }
+}
+
 function newSessionId() {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }

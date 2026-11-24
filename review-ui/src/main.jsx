@@ -1,3 +1,4 @@
+import AgentSettings from './AgentSettings.jsx';
 import {
   Activity, BarChart3, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, CircleHelp, FolderKanban, GitPullRequest,
   House, KeyRound, MessageCircleQuestion, Network, RefreshCw, Search, ShieldCheck,
@@ -117,6 +118,8 @@ function detailLocation() {
   if (/^\/search\/?$/.test(window.location.pathname)) return { destination: 'search' };
   const help = window.location.pathname.match(/^\/help(?:\/([a-z0-9-]+))?\/?$/);
   if (help) return { destination: 'help', key: help[1] };
+  if (/^\/help\/?$/.test(window.location.pathname)) return { destination: 'help' };
+  if (window.location.pathname.replace(/\/$/, '') === '/agent-settings') return { destination: 'agent-settings' };
   if (/^\/global-guidance\/?$/.test(window.location.pathname)) return { destination: 'global-guidance' };
   if (/^\/token-usage\/?$/.test(window.location.pathname)) return { destination: 'token-usage' };
   if (/^\/effectiveness\/?$/.test(window.location.pathname)) return { destination: 'effectiveness' };
@@ -447,6 +450,12 @@ function App() {
                 <ShieldCheck size={18} aria-hidden="true" /> Global Guidance
               </a>
             )}
+            {session?.role === 'admin' && <a href="/agent-settings"
+              className={route?.destination === 'agent-settings' ? 'nav-item active' : 'nav-item'}
+              aria-current={route?.destination === 'agent-settings' ? 'page' : undefined}
+              onClick={(event) => navigate(event, '/agent-settings')}>
+              <ShieldCheck size={18} aria-hidden="true" /> Agent Settings
+            </a>}
           </nav>
           <div className="rail-footer">
             <nav className="rail-help" aria-label="Help">
@@ -504,6 +513,7 @@ function App() {
           {session && route?.destination === 'token-usage' && <TokenUsagePage projectKey={projectKey}
             token={token} onUnauthorized={expireSession} />}
           {(route?.destination === 'help' || session && ['ask', 'search', 'graph', 'projects', 'global-guidance', 'token-usage', 'effectiveness'].includes(route?.destination))
+          {session && ['ask', 'search', 'graph', 'projects', 'help', 'global-guidance', 'agent-settings', 'token-usage', 'effectiveness'].includes(route?.destination)
             ? null : session && !isQueueRoute ? (
             <EntityDetailPage key={`${route.destination}/${route.key}`}
               route={route} token={token} navigate={navigate} onUnauthorized={expireSession}

@@ -6,11 +6,12 @@ from typing import Annotated, Literal, get_args
 from urllib.parse import quote
 
 import anyio
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from app.auth.jwt import profile_name
 from app.auth.permissions import WRITER_REQUIRED, access_role, writer_subject
+from app.auth.project_access import current_project_access
 from app.domain.architecture import (
     DEFAULT_GRAPH_HOPS,
     FORWARD_RELATIONSHIPS,
@@ -147,7 +148,13 @@ def build_review_router(
     context_packages: ContextPackageService | None = None,
     usage: TokenUsageService | None = None,
 ) -> APIRouter:
-    router = APIRouter(prefix=REVIEW_API_PREFIX, tags=["Review"])
+    async def authorize_project_route(request: Request):
+        access = current_project_access.get()
+        route = request.scope.get("route")
+        if access and route and route.path.startswith(f"{REVIEW_API_PREFIX}/projects/{{key}}"):
+            access.require(request.path_params["key"], write=request.method not in {"GET", "HEAD"})
+
+    router = APIRouter(prefix=REVIEW_API_PREFIX, tags=["Review"], dependencies=[Depends(authorize_project_route)])
 
     def health_for_project(key: str, run: TestRunDetail | None) -> ProjectCIHealth:
         comparable = key == ci_project_key and (run is None or run.repository_key == ci_repository_key)
@@ -348,8 +355,10 @@ def build_review_router(
         before_version: Annotated[int | None, Query(ge=1)] = None,
     ) -> GuidanceEditor:
         claims = getattr(request.state, "auth_claims", {})
+        access = current_project_access.get()
+        project_writer = access is None or access.unrestricted or access.grants.get(key) == "write"
         result = await details.get_guidance_editor(
-            key, writer_subject(claims) is not None, access_role(claims) == "admin", before_version,
+            key, project_writer and writer_subject(claims) is not None, access_role(claims) == "admin", before_version,
         )
         if result is None:
             raise HTTPException(404, "Project not found")
