@@ -274,7 +274,7 @@ class ContextPackageService:
             if not isinstance(project, Project):
                 raise ArchitectureGraphError("Project not found")
             terms.difference_update(words(project.name))
-            scope = self.graph.project_scope(query.project_key)
+            scope = self.graph.project_scope(query.project_key, include_details=False)
             inventory = scope.entities
             scoped = {item.key for item in inventory}
             linked = sorted({node.memory_key or node.key for node in inventory

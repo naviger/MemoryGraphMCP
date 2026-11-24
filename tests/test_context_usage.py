@@ -69,7 +69,7 @@ def context_service():
         for node in (nodes["assets"], nodes["adr"], nodes["test-suite"])
     ], dependencies=[], repository_names=[])
     graph = SimpleNamespace(
-        read_entity=nodes.get, project_scope=lambda key: scope,
+        read_entity=nodes.get, project_scope=lambda key, *, include_details: scope,
         search=lambda request: list(nodes.values()), trace=trace,
         find_memory_entities=lambda key: [nodes["adr"]] if key == "record" else [],
     )
