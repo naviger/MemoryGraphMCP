@@ -1,6 +1,6 @@
 # Recoverable capture and task execution
 
-Project Overview opens on Tasks with Open and In progress selected. Writers can create tasks, goals, risks, and constraints. Select **Help me draft** to generate editable text with the configured local model. The model call does not save a record. Writers can mark a task complete with an outcome and evidence, which creates a linked Observation in the same graph transaction. Completed states are read-only in Project Overview. Start shows when the task was created. Older tasks created by the workspace or tracker can use the original project link timestamp. End shows recorded completion or cancellation. Select a date column to sort, or sort by Order and drag the row handle or use the arrow buttons to save the project-wide order.
+Project Overview opens on Tasks with Open and In progress selected. Writers can create tasks, goals, risks, and constraints. Select **Help me draft** to generate editable text with the configured local model. The model call does not save a record. Writers can mark a task complete with an outcome and evidence, which creates a linked Observation in the same graph transaction. Completed states are read-only in Project Overview. Start shows when the task was created. Older tasks created by the workspace or tracker can use the original project link timestamp. End shows recorded completion or cancellation. Select a date column to sort, or sort by Order and drag the row handle or focus it and use the arrow keys to save the project-wide order.
 
 ## Capture operations
 

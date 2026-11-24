@@ -377,13 +377,13 @@ export default function ProjectWorkspace({ projectKey, token, navigate, onUnauth
     {data && <div className="table-scroll"><table className="change-table workspace-table">
       <thead><tr>
         {kind === 'Task' && <th scope="col" aria-sort={sort.field === 'position' ? sort.direction : undefined}>
-          <button type="button" className="button outlined" onClick={() => setColumn('position')}>Order</button>
+          <button type="button" className="task-sort-header" onClick={() => setColumn('position')}>Order</button>
         </th>}
         <th scope="col">{kind}</th><th scope="col">State</th>
         {kind === 'Task' && <>
-          {[['created_at', 'Start date/time'], ['ended_at', 'End date/time']].map(([field, label]) =>
+          {[['created_at', 'Start'], ['ended_at', 'End']].map(([field, label]) =>
             <th scope="col" key={field} aria-sort={sort.field === field ? sort.direction : undefined}>
-              <button type="button" className="button outlined" onClick={() => setColumn(field)}>{label}</button>
+              <button type="button" className="task-sort-header" onClick={() => setColumn(field)}>{label}</button>
             </th>)}
           <th scope="col">Actions</th>
         </>}
@@ -399,19 +399,22 @@ export default function ProjectWorkspace({ projectKey, token, navigate, onUnauth
           move(dragged, item.key, dropPlacement(event));
         } : undefined}>
         {kind === 'Task' && <td><div className="task-order-controls">
-          <span>{taskPositions.get(item.key)}</span>
-          {canMove && <><span className="task-drag-handle" draggable aria-hidden="true"
+          {canMove && <button className="task-drag-handle" type="button" draggable
+            aria-label={`Reorder ${item.name}. Drag or use the arrow keys.`}
+            onKeyDown={(event) => {
+              const offset = event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
+              if (!offset) return;
+              event.preventDefault();
+              const anchor = items[index + offset];
+              if (anchor) move(item.key, anchor.key, offset < 0 ? 'before' : 'after');
+            }}
             onDragStart={(event) => {
               event.dataTransfer.setData('text/plain', item.key);
               event.dataTransfer.effectAllowed = 'move';
               setDragged(item.key);
             }}
-            onDragEnd={() => { setDragged(null); setDrop(null); }}>⠿</span>
-            <button type="button" className="button outlined" aria-label={`Move ${item.name} up`} disabled={index === 0}
-              onClick={() => move(item.key, items[index - 1].key, 'before')}>↑</button>
-            <button type="button" className="button outlined" aria-label={`Move ${item.name} down`} disabled={index === items.length - 1}
-              onClick={() => move(item.key, items[index + 1].key, 'after')}>↓</button>
-          </>}
+            onDragEnd={() => { setDragged(null); setDrop(null); }}>⠿</button>}
+          <span>{index + 1}</span>
         </div></td>}
         <td><PreviewLink destination="entities" entityKey={item.key} navigate={navigate}>{item.name}</PreviewLink></td>
         <td>{kind === 'Task' && data.can_write && item.status !== 'done' ?
