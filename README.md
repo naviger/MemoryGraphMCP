@@ -147,6 +147,9 @@ records the decision, and replace confirms the corrected relationship. Each
 decision records the reviewer, time, rationale, and cited suggestion. See
 **Recent suggestion decisions** for the audit trail.
 
+For a paired comparison of repository-only and MemoryGraphMCP-assisted work,
+see the [small retrieval and delivery pilot](docs/pilot/README.md).
+
 ## Semantic Retrieval
 
 Semantic search is server-driven. Clients can still pass embeddings, but they no longer need to.

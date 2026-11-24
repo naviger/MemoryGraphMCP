@@ -1,0 +1,100 @@
+{
+  "cases": [
+    {
+      "project": "MemoryGraphMCP",
+      "repository": "naviger/MemoryGraphMCP",
+      "commit": "476f35a429db0769d1db5f2244443a41cbdb7717",
+      "as_of": "2026-11-24",
+      "id": "memory-review-schedule",
+      "kind": "retrieval",
+      "prompt": "What happens to a MemoryGraphMCP record's applicability when a validation review is late? What does saving a validation do to the expiration date?",
+      "expected": [
+        {
+          "id": "independent-dates",
+          "claim": "An overdue review and expiration are separate; the review date alone does not end applicability.",
+          "citations": [
+            "repo:README.md",
+            "records:memorygraphmcp-adr-evidence-revalidation"
+          ]
+        },
+        {
+          "id": "unchanged-expiration",
+          "claim": "Revalidating records the evidence and refreshes validation dates while preserving expiration.",
+          "citations": [
+            "repo:README.md",
+            "records:memorygraphmcp-adr-evidence-revalidation"
+          ]
+        }
+      ]
+    },
+    {
+      "project": "MemoryGraphMCP",
+      "repository": "naviger/MemoryGraphMCP",
+      "commit": "476f35a429db0769d1db5f2244443a41cbdb7717",
+      "as_of": "2026-11-24",
+      "id": "memory-future-validation",
+      "kind": "delivery",
+      "prompt": "Add one focused regression for a last_validated date later than the requested as-of date. Keep the validation and expiration rules unchanged. Explain the rule the test verifies and cite the evidence.",
+      "expected": [
+        {
+          "id": "as-of-validation",
+          "claim": "A future check is not counted as a validation at an earlier review date.",
+          "citations": [
+            "repo:review-ui/src/validationStatus.js"
+          ]
+        }
+      ],
+      "checks": {
+        "validation-status": "node --test review-ui/tests/validationStatus.test.js"
+      }
+    },
+    {
+      "project": "Sextant",
+      "repository": "naviger/Sextant",
+      "commit": "d1bcb6d43be8a6e656d41837f3f1fb68c993f9b8",
+      "as_of": "2026-11-24",
+      "id": "sextant-jwks-decision",
+      "kind": "retrieval",
+      "prompt": "How does the Sextant API avoid fetching signing keys for every token validation, and where is that behavior implemented?",
+      "expected": [
+        {
+          "id": "cache-decision",
+          "claim": "Sextant caches the Keycloak JWKS with a single-entry LRU cache.",
+          "citations": [
+            "repo:docs/adr/adr-0009-jwks-caching.md",
+            "records:docs__adr__adr-0009-jwks-caching.md"
+          ]
+        },
+        {
+          "id": "implementation",
+          "claim": "get_jwks in api/app/core/security.py owns the cache.",
+          "citations": [
+            "repo:api/app/core/security.py"
+          ]
+        }
+      ]
+    },
+    {
+      "project": "Sextant",
+      "repository": "naviger/Sextant",
+      "commit": "d1bcb6d43be8a6e656d41837f3f1fb68c993f9b8",
+      "as_of": "2026-11-24",
+      "id": "sextant-jwks-regression",
+      "kind": "delivery",
+      "prompt": "Add a unit test in api/tests/test_jwks_cache.py showing that two reads reuse one fetched JWKS response. Mock the network and clear the cache before and after the test. Preserve production behavior and cite the decision behind the test.",
+      "expected": [
+        {
+          "id": "cache-rationale",
+          "claim": "The test enforces the accepted choice to reuse the JWKS response between token validations.",
+          "citations": [
+            "repo:docs/adr/adr-0009-jwks-caching.md",
+            "records:docs__adr__adr-0009-jwks-caching.md"
+          ]
+        }
+      ],
+      "checks": {
+        "jwks-cache": "cd api && python -m pytest -q tests/test_jwks_cache.py"
+      }
+    }
+  ]
+}
