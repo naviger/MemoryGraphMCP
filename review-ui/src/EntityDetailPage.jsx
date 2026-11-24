@@ -3,7 +3,7 @@ import { SimilarRecords } from './SimilarRecords.jsx';
 import { CircleAlert, FileCode2, FileText, FlaskConical, Link2, Waypoints } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { reviewRequest } from './api.js';
-import { DetailLink, Evidence, formatDate, formatScore } from './Details.jsx';
+import { CodeEvidenceLink, DetailLink, Evidence, formatDate, formatScore } from './Details.jsx';
 
 const LINK_GROUPS = [
   ['ADR', 'ADRs', FileText],
@@ -111,6 +111,13 @@ function RelatedEntities({ links, navigate }) {
                   <li key={`${link.destination}/${link.key}`}>
                     <DetailLink destination={link.destination} entityKey={link.key} navigate={navigate}>{link.name}</DetailLink>
                     {link.source_path && <code>{link.source_path}</code>}
+                    <CodeEvidenceLink location={link.code_location} label="Indexed source at" />
+                    {(link.cited_code || []).filter((location) =>
+                      location.revision.commit !== link.code_location?.revision.commit
+                      || location.path !== link.code_location?.path
+                      || location.line !== link.code_location?.line
+                    ).map((location, index) => <CodeEvidenceLink
+                      key={index} location={location} label="Linked evidence at" />)}
                     <span>{link.relationships.map((kind) => kind.replaceAll('_', ' ')).join(' · ')}
                       {link.index_state === 'stale' ? ' · Stale index' : ''}</span>
                   </li>
@@ -171,12 +178,17 @@ export function EntityDetailPage({ route, token, navigate, onUnauthorized, retur
               {record ? <RecordDetails record={record} embedding={detail.embedding} /> : (
                 <>
                   {entity.source_path && <dl className="facts"><div><dt>Source path</dt><dd><code>{entity.source_path}</code></dd></div></dl>}
+                  {detail.code_location && <dl className="facts">
+                    <div><dt>Repository key</dt><dd><code>{detail.code_location.revision.repository_key}</code></dd></div>
+                    <div><dt>Indexed revision</dt><dd><CodeEvidenceLink location={detail.code_location} /></dd></div>
+                  </dl>}
+                  {entity.index_state && !detail.code_location && <p className="muted">Indexed revision unavailable.</p>}
                   {entity.description && <p className="record-content">{entity.description}</p>}
                   {entity.evidence?.length > 0 && <section>
                     <h3>Evidence</h3>
                     <ul>{entity.evidence.map((citation, index) => <li key={index}>{citation}</li>)}</ul>
                   </section>}
-                  {!entity.source_path && !entity.description && <p className="muted">No additional details recorded.</p>}
+                  {!entity.source_path && !entity.description && !detail.code_location && <p className="muted">No additional details recorded.</p>}
                 </>
               )}
             </article>

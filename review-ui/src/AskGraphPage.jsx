@@ -2,7 +2,7 @@ import { ContextHelp } from './ContextHelp.jsx';
 import { CircleAlert, FileText, GitPullRequest, Search } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { reviewRequest } from './api.js';
-import { DetailLink, Evidence, formatDate, formatWindow } from './Details.jsx';
+import { CodeEvidenceLink, DetailLink, Evidence, formatDate, formatWindow } from './Details.jsx';
 
 function CitedConflict({ pair, navigate }) {
   return (
@@ -35,9 +35,11 @@ function Answer({ answer, navigate }) {
               <p>{text}</p>
               <div className="claim-citations">
                 {citations.map((citation) => (
-                  <DetailLink key={`${citation.destination}/${citation.key}`}
-                    destination={citation.destination} entityKey={citation.key} navigate={navigate}
-                    className="citation-link"><FileText size={15} aria-hidden="true" />{citation.title}</DetailLink>
+                  <span key={`${citation.destination}/${citation.key}`}>
+                    <DetailLink destination={citation.destination} entityKey={citation.key} navigate={navigate}
+                      className="citation-link"><FileText size={15} aria-hidden="true" />{citation.title}</DetailLink>
+                    <CodeEvidenceLink location={citation.code_location} label="Indexed source at" />
+                  </span>
                 ))}
               </div>
             </li>

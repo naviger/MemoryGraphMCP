@@ -50,8 +50,14 @@ def review_api(monkeypatch, request):
     with patch.dict("os.environ", {"MGMCP_AUTH_REQUIRED": "false"}):
         from app.main import create_application
     adr = ArchitectureADR(key="graph-adr", name="Authentication ADR", memory_key="record")
-    service = Service(key="service", name="Identity service", source_path="app/auth.py")
+    from app.domain.architecture import CodeRevision
 
+    service = Service(
+        key="service", name="Identity service", source_path="app/auth.py", metadata={"line": 8},
+        index_state="current", repository_key="repository",
+        source_revision=CodeRevision(repository_key="repository", commit="d" * 40,
+                                     github_repository="example/identity"),
+    )
     source = SourceFile(key="source", name="auth.py", source_path="app/auth.py")
 
     class Graph:
@@ -449,6 +455,20 @@ def test_ask_graph_uses_as_of_and_returns_record_citations_conflicts_and_gaps(re
     missing = review_api.post(path, json={**body, "question": "unknown"}, headers=headers).json()
     assert not missing["findings"]
     assert missing["gaps"]
+
+
+def test_ask_graph_marks_current_code_in_dated_answer(review_api):
+    response = review_api.post("/api/review/ask", headers=auth("reader", "reader"), json={
+        "question": "Which services for the current authentication strategy?",
+        "as_of": "2026-11-21",
+    })
+    assert response.status_code == 200
+    result = response.json()
+    code = next(finding for finding in result["findings"] if finding["text"].startswith("Current graph link:"))
+    citation = next(item["code_location"] for item in code["citations"] if item["key"] == "service")
+    assert citation["revision"]["repository_key"] == "repository"
+    assert citation["url"] == f"https://github.com/example/identity/blob/{'d' * 40}/app/auth.py#L8"
+    assert any("Relationship validity on the requested date is unknown" in gap for gap in result["gaps"])
 
 def test_ask_graph_counts_only_requested_node_type_and_handles_historical_dates(review_api):
     path = "/api/review/ask"

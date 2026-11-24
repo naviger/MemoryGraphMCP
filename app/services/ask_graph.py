@@ -205,12 +205,13 @@ class AskGraphService:
                         relation = " · ".join(step.replace("_", " ") for step in link.relationships)
                         _add_claim(
                             code_links,
-                            f"{link.name} ({relation}).",
+                            f"Current graph link: {link.name} ({relation}).",
                             [
                                 AnswerCitation(
                                     key=link.key,
                                     title=link.name,
                                     destination=link.destination,
+                                    code_location=link.code_location,
                                 ),
                                 cite,
                             ],
@@ -219,7 +220,7 @@ class AskGraphService:
         if wanted_links:
             gaps.append(
                 "Code and test links reflect the current graph. "
-                "Their historical validity is unknown."
+                "Commit citations identify the indexed source. Relationship validity on the requested date is unknown."
                 if code_links
                 else "I found no matching code or test links from the retrieved records."
             )

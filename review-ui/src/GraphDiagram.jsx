@@ -6,7 +6,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { SimilarRecords } from './SimilarRecords.jsx';
-import { DetailLink } from './Details.jsx';
+import { CodeEvidenceLink, DetailLink } from './Details.jsx';
 import { nodeShape } from './nodeCategories.js';
 
 const RING_GAP = 130;
@@ -223,6 +223,10 @@ function EdgeDetails({ relationship, onClose, navigate }) {
         <div><dt>{symmetric ? 'Node 2' : 'To'}</dt><dd><DetailLink destination="entities" entityKey={to.key} navigate={navigate}>{to.name}</DetailLink> <small>({to.entity_type})</small></dd></div>
         <div><dt>Source</dt><dd>{edge.source}</dd></div>
         <div><dt>Confidence</dt><dd>{edge.confidence}</dd></div>
+        {edge.source_revision && <div><dt>Indexed commit</dt><dd><code>{edge.source_revision.commit}</code></dd></div>}
+        {edge.cited_code?.map((location) => <div key={location.entity_key}>
+          <dt>Linked source</dt><dd><CodeEvidenceLink location={location} /></dd>
+        </div>)}
       </dl>
     </DetailsPanel>
   );

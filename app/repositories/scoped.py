@@ -94,6 +94,9 @@ def _safe_entity(node, entities, documents):
     if getattr(node, "suggestions", None):
         updates["suggestions"] = [link for link in node.suggestions
                                   if link.source_key in entities and link.target_key in entities]
+    if node.repository_key not in entities:
+        updates["repository_key"] = None
+        updates["source_revision"] = None
     # Operational capture metadata can contain identifiers beyond this principal's scope.
     updates["metadata"] = {key: value for key, value in node.metadata.items() if key in {"line", "end_line"}}
     return node.model_copy(update=updates)
@@ -211,6 +214,7 @@ class ScopedGraph(_Scoped):
                 node.model_copy(update={
                     "decision_links": [link for link in node.decision_links if link.key in keys],
                     "memory_key": node.memory_key if node.memory_key in docs else None,
+                    "repository_key": node.repository_key if node.repository_key in keys else None,
                 }) for node in scope.entities
             ]})
         if name == "guidance_scope":
@@ -238,6 +242,12 @@ class ScopedGraph(_Scoped):
             return [path.model_copy(update={
                 "entity": _safe_entity(path.entity, entities, docs),
                 "nodes": [_safe_entity(node, entities, docs) for node in path.nodes],
+                "relationships": [link.model_copy(update={
+                    "source_revision": link.source_revision if link.source_revision
+                        and link.source_revision.repository_key in entities else None,
+                    "cited_code": [location for location in link.cited_code
+                                   if location.revision.repository_key in entities],
+                }) for link in path.relationships],
             }) for path in operation(*args, allowed_entity_keys=sorted(entities))]
         if name in {"find_memory_entities", "guidance_constraints"}:
             result = operation(*args, **kwargs)

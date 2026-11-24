@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, StringConstraints
 
-from app.domain.architecture import ArchitectureEntity, EntityType, RelationshipType
+from app.domain.architecture import ArchitectureEntity, CodeLocation, EntityType, RelationshipType
 from app.domain.models import MemoryKey, MemoryKind, MemoryValidation, MemoryValidity
 
 
@@ -33,6 +33,8 @@ class ReviewEntityLink(BaseModel):
     source_path: str | None = None
     index_state: Literal["current", "stale"] | None = None
     relationships: list[RelationshipType]
+    code_location: CodeLocation | None = None
+    cited_code: list[CodeLocation] = Field(default_factory=list)
 
 
 class ReviewSearchQuery(BaseModel):
@@ -69,6 +71,7 @@ class RecordEmbeddingDiagnostics(SearchEmbeddingDiagnostics):
 class ReviewEntityDetail(BaseModel):
     record: ReviewRecord | None = None
     entity: ArchitectureEntity | None = None
+    code_location: CodeLocation | None = None
     links: list[ReviewEntityLink] = Field(default_factory=list)
     embedding: RecordEmbeddingDiagnostics | None = None
 
@@ -92,6 +95,7 @@ class ProjectEntity(BaseModel):
     source_path: str | None = None
     memory_key: str | None = None
     repository: str | None = None
+    repository_key: MemoryKey | None = None
     role: Literal["source", "persistence"] | None = None
     qualified_name: str | None = None
     parent_key: str | None = None

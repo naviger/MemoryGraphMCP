@@ -113,14 +113,18 @@ class KnowledgeCaptureService:
         changed = set(paths or additions)
         # A bare path from a reflection can match more than one repository. Require explicit
         # repository evidence before linking any ambiguous path.
+        def identity(node):
+            return node.repository_key or node.repository
+
         repositories_by_path: dict[str, set] = {}
         for node in scope.entities:
             if node.source_path in changed:
-                repositories_by_path.setdefault(node.source_path, set()).add(node.repository)
+                repositories_by_path.setdefault(node.source_path, set()).add(identity(node))
         matched = [
             node for node in scope.entities
             if node.source_path in changed and (
-                node.repository == repo.name if repo else len(repositories_by_path[node.source_path]) == 1
+                identity(node) == (repo.key if node.repository_key else repo.name)
+                if repo else len(repositories_by_path[node.source_path]) == 1
             )
         ]
         priority = {"SourceFile": 0, "Service": 1, "Repository": 1, "ApiEndpoint": 1,
@@ -163,7 +167,7 @@ class KnowledgeCaptureService:
                 if node.entity_type == "Repository" and node.role == "persistence":
                     names = set(_COLLECTION.findall(added))
                     for collection in collections:
-                        if collection.name in names and collection.repository == node.repository:
+                        if collection.name in names and identity(collection) == identity(node):
                             suggest(node.key, collection.key, "persists_to", 0.85,
                                     f"{path} accesses collection {collection.name}")
         associated = changed_keys | referenced_adrs

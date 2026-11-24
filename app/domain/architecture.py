@@ -4,8 +4,9 @@ from datetime import datetime
 from hashlib import sha256
 from json import dumps
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, computed_field, model_validator
 
 from app.domain.execution_usage import ExecutionAttempt
 from app.domain.knowledge_capture import CaptureSuggestion, Evidence
@@ -88,15 +89,57 @@ def architecture_key(*parts: str) -> str:
     return sha256(dumps(parts, ensure_ascii=False).encode()).hexdigest()
 
 
+GitCommit = Annotated[str, StringConstraints(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")]
+GitHubRepository = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]+/[A-Za-z0-9_-][A-Za-z0-9_.-]*$", max_length=200)]
+
+
+class CodeRevision(BaseModel):
+    repository_key: MemoryKey
+    commit: GitCommit
+    github_repository: GitHubRepository | None = None
+
+    def url(self, path: str | None = None, line: int | None = None) -> str | None:
+        if self.github_repository is None:
+            return None
+        base = f"https://github.com/{self.github_repository}"
+        if path is None:
+            return f"{base}/commit/{self.commit}"
+        fragment = f"#L{line}" if line else ""
+        return f"{base}/blob/{self.commit}/{quote(path)}{fragment}"
+
+
+class CodeLocation(BaseModel):
+    entity_key: MemoryKey
+    revision: CodeRevision
+    path: str | None = None
+    line: int | None = None
+
+    @computed_field
+    @property
+    def url(self) -> str | None:
+        return self.revision.url(self.path, self.line)
+
+
 class ArchitectureNode(BaseModel):
     key: MemoryKey
     name: EntityName
     description: str = ""
     source_path: str | None = None
     repository: str | None = None
+    repository_key: MemoryKey | None = None
+    source_revision: CodeRevision | None = None
     index_state: Literal["current", "stale"] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+
+    def code_location(self) -> CodeLocation | None:
+        if self.source_revision is None:
+            return None
+        line = self.metadata.get("line")
+        return CodeLocation(
+            entity_key=self.key, revision=self.source_revision, path=self.source_path,
+            line=line if isinstance(line, int) and line > 0 else None,
+        )
 
 class ArchitectureADR(ArchitectureNode):
     entity_type: Literal["ADR"] = "ADR"
@@ -116,6 +159,7 @@ class Repository(ArchitectureNode):
     entity_type: Literal["Repository"] = "Repository"
     role: Literal["source", "persistence"] = "persistence"
     last_indexed_at: AwareDatetime | None = None
+    index_namespace: str | None = None
 
 
 class Module(ArchitectureNode):
@@ -360,9 +404,11 @@ class ArchitectureLink(BaseModel):
     relationship_type: RelationshipType
     confidence: float = Field(default=1, ge=0, le=1)
     source: EntityName
+    source_revision: CodeRevision | None = None
 
 
 class ArchitectureRelationship(ArchitectureLink):
+    cited_code: list[CodeLocation] = Field(default_factory=list)
     created_at: AwareDatetime
     updated_at: AwareDatetime
 
@@ -414,6 +460,9 @@ class ArchitectureNeighborhood(BaseModel):
 
 class ArchitectureIndex(BaseModel):
     repository: EntityName
+    repository_key: MemoryKey
+    namespace: str
+    revision: CodeRevision | None = None
     entities: list[ArchitectureEntity]
     links: list[ArchitectureLink]
 
@@ -424,3 +473,4 @@ class ArchitectureIndexResult(BaseModel):
     files_indexed: int
     entities_indexed: int
     relationships_indexed: int
+    source_revision: CodeRevision | None = None

@@ -36,17 +36,16 @@ function InventoryGroup({ title, items, renderItem, open = false }) {
 }
 
 function buildRepositoryTree(items) {
-  const repos = new Map();
-  function repository(name) {
-    if (!repos.has(name)) repos.set(name, { name, node: null, files: new Map(), other: [] });
-    return repos.get(name);
-  }
+  const roots = items.filter((node) => node.entity_type === 'Repository' && node.role === 'source');
+  const repos = new Map(roots.map((node) =>
+    [node.key, { key: node.key, name: node.name, node, files: new Map(), other: [] }]));
   for (const node of items) {
-    if (node.entity_type === 'Repository' && node.role === 'source') {
-      repository(node.name).node = node;
-      continue;
-    }
-    const repo = repository(node.repository || 'Unassigned repository');
+    if (repos.has(node.key)) continue;
+    const legacyMatches = node.repository_key ? [] : roots.filter((root) => root.name === node.repository);
+    const name = node.repository || 'Unassigned repository';
+    const key = node.repository_key || (legacyMatches.length === 1 ? legacyMatches[0].key : `legacy:${name}`);
+    if (!repos.has(key)) repos.set(key, { key, name, node: null, files: new Map(), other: [] });
+    const repo = repos.get(key);
     if (!node.source_path) {
       repo.other.push(node);
       continue;
@@ -115,7 +114,7 @@ function RepositoryInventory({ items, renderEntity, navigate, searching }) {
     <details className="detail project-inventory-group" open>
       <summary><strong>Repositories and code</strong> <span>{items.length}</span></summary>
       {repositories.length ? repositories.map((repo) => (
-        <RepositoryFiles key={repo.name} repo={repo} renderEntity={renderEntity}
+        <RepositoryFiles key={repo.key} repo={repo} renderEntity={renderEntity}
           navigate={navigate} searching={searching} />
       )) : <p className="muted">No matching items.</p>}
     </details>
