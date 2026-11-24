@@ -77,6 +77,13 @@ def test_checked_in_pilot_manifest_is_small_and_covers_both_case_kinds():
     plans = trial_plan(pilot)
     assert all(bool(case["delivery_guidance"]) == (case["kind"] == "delivery") for case in plans)
     assert all("expected" not in case for case in plans)
+    assert {
+        case["id"]: {f"repo:{excerpt['path']}" for excerpt in case["source_excerpts"]}
+        for case in plans if case["source_excerpts"]
+    } == {
+        "memory-review-schedule": {"repo:README.md"},
+        "memory-future-validation": {"repo:review-ui/src/validationStatus.js"},
+    }
 
 
 def test_delivery_guidance_cannot_appear_in_a_retrieval_case():

@@ -24,7 +24,9 @@ small test-writing task. Each case runs twice, for eight trials total.
    ask it to select supporting IDs. Call `finalize_context_excerpts` with the
    same query and returned context ID. When the case configures
    `source_excerpts`, use `pinned_source_excerpts` to offer separate repository
-   evidence IDs. Resolve selected repository IDs against the same Git commit
+   evidence IDs. The overdue-review case uses the pinned revalidation
+   rules to distinguish review deadlines from applicability dates. Resolve
+   selected repository IDs against the same Git commit
    and record the path and line range. Send graph IDs through the graph
    citation checker. Save the raw selections, verified findings, and flagged gaps.
    Measure finalization separately from model request time.

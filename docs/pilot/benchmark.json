@@ -25,6 +25,13 @@
             "records:memorygraphmcp-adr-evidence-revalidation"
           ]
         }
+      ],
+      "source_excerpts": [
+        {
+          "path": "README.md",
+          "first_line": 203,
+          "last_line": 205
+        }
       ]
     },
     {
