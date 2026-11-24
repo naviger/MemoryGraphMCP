@@ -416,6 +416,17 @@ def test_arango_recovery_and_workspace():
     }
     with pytest.raises(ArchitectureGraphError):
         workspace.repair_draft("beta", repair_task.key, review.key)
+    approval_id = uuid4().hex
+    guided = workspace.fix_findings("alpha", repair_task.key, review.key, approval_id, "writer")
+    assert guided.guided_repair and guided.repair_review_key == review.key
+    assert guided.repair_contract.test_paths == ["tests/test_context_usage.py"]
+    assert "adjacent cases" in guided.repair_prompt
+    assert "Validate the source" in guided.repair_prompt
+    assert (
+        workspace.fix_findings("alpha", repair_task.key, review.key, approval_id, "writer").key
+        == guided.key
+    )
+    workspace.transition(guided, "CANCELLED")
     from app.domain.repair_contract import RepairContract
 
     request = StartExecution(
@@ -444,6 +455,7 @@ def test_arango_recovery_and_workspace():
             summary="Saved new patch",
             usage=ExecutionUsage(input_tokens=90, output_tokens=10),
             verification={"passed": True},
+            regression_proof={"passed": True, "summary": "Reproduced and fixed"},
             artifacts=[
                 AgentArtifact(
                     name="Local implementation patch",
@@ -542,6 +554,7 @@ def test_arango_recovery_and_workspace():
         result=AgentResult(
             summary="Saved directed patch",
             verification=verified,
+            regression_proof={"passed": True, "summary": "Reproduced and fixed"},
             artifacts=[
                 AgentArtifact(
                     name="Local implementation patch",

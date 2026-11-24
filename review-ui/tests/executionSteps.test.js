@@ -44,6 +44,7 @@ test('does not display a review phase that never ran after implementation stoppe
     timeline: [event('RUNNING', 0, 1), event('READY', 0, 2), event('RUNNING', 1, 3), event('REVIEW', 1, 4)],
   })]);
   assert.deepEqual(steps.map((step) => step.phase), ['Implement', 'Plan']);
+  assert.equal(steps[0].state, 'Finished');
 });
 
 test('a revised patch retires actions on the superseded review', async () => {
@@ -60,4 +61,26 @@ test('a revised patch retires actions on the superseded review', async () => {
   assert.deepEqual([...progress.superseded], ['original']);
   assert.equal(progress.latestReview.get('revision'), 'new-review');
   assert.ok(progress.reviewed.has('revision'));
+});
+
+test('a finished repair stays finished when its patch review is blocked', () => {
+  const [review, repair] = executionSteps([
+    run({ key: 'repair', mode: 'IMPLEMENT', state: 'REVIEW', phase: 1,
+      repair_review_key: 'prior', results: [{ completed: false }] }),
+    run({ key: 'review', mode: 'REVIEW', state: 'REVIEW', phase: 1,
+      created_at: stamp(2), results: [{ review_verdict: 'blocking',
+        reviewed_target: { kind: 'implementation patch', execution_id: 'repair' } }] }),
+  ]);
+  assert.equal(repair.state, 'Finished');
+  assert.equal(review.state, 'Changes required');
+});
+
+test('guided repairs show independent review as a separate phase', () => {
+  const [review, repair] = executionSteps([run({
+    mode: 'IMPLEMENT', guided_repair: true, state: 'REVIEW', phase: 2,
+    results: [{ completed: true }, { review_verdict: 'blocking' }],
+  })]);
+  assert.equal(repair.state, 'Finished');
+  assert.equal(review.phase, 'Review');
+  assert.equal(review.state, 'Changes required');
 });

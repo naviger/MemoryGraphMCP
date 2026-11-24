@@ -276,6 +276,7 @@ class Execution(ArchitectureNode):
     patch_execution_key: MemoryKey | None = None
     approved_review_key: MemoryKey | None = None
     approved_patch: dict[str, str] | None = None
+    guided_repair: bool = False
     repair_review_key: MemoryKey | None = None
     repair_patch_sha256: str | None = None
     repair_prompt: str | None = None

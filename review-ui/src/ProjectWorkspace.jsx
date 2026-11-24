@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { reviewRequest } from './api.js';
 import { PreviewLink } from './RecordInspector.jsx';
 import { PHASES, elapsedRuntime, executionSteps, patchProgress, reviewBlocked } from './executionSteps.js';
@@ -151,16 +151,28 @@ function StepDetails({ step, now, navigate, children }) {
       </div>}
       {(!result.applied_commit || result.reviewed_target) && <ReviewResult result={result} navigate={navigate} />}
       {result.verification && <details open={!result.verification.passed}>
-        <summary>{result.verification.passed ? 'Required regression tests passed' : 'Required regression tests failed'}</summary>
+        <summary>{result.verification.passed ? 'Required Docker tests passed' : 'Required Docker tests failed'}</summary>
         <p><code>{result.verification.command}</code></p>
         <pre>{result.verification.output}</pre>
+      </details>}
+      {result.regression_proof && <details open={!result.regression_proof.passed}>
+        <summary>{result.regression_proof.passed ? 'Regression reproduced and fixed' : 'Regression proof incomplete'}</summary>
+        <p>{result.regression_proof.summary}</p>
+        {[
+          ['Blocked patch with the revised tests', result.regression_proof.baseline],
+          ['Revised patch with the same failing tests', result.regression_proof.revision],
+        ].map(([label, check]) => check && <section key={label}>
+          <h5>{label}</h5>
+          <p><code>{check.command}</code></p>
+          <pre>{check.output}</pre>
+        </section>)}
       </details>}
       <p>{result.summary}</p>
       {result.plan && <section><h5>Plan</h5><p className="execution-text">{result.plan}</p></section>}
       {result.pull_request && <p><strong>Pull request</strong> {result.pull_request}</p>}
       {result.lesson && <p>{result.lesson}</p>}
       {[
-        ['Checks', result.tests],
+        ['Checks reported by the agent', result.tests],
         ['Files changed', result.files_modified],
         ['Review findings', result.review_comments.filter((item) => item !== result.summary)],
         ['Artifacts', result.artifacts.map((item) => `${item.name} — ${item.reference}`)],
@@ -191,11 +203,6 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
   const [repair, setRepair] = useState(null);
   const [reviewBudget, setReviewBudget] = useState(null);
   const [applyApproval, setApplyApproval] = useState(null);
-  const repairPrompt = useRef(null);
-  const repairReview = repair?.review;
-  useEffect(() => {
-    if (repairReview) repairPrompt.current?.focus();
-  }, [repairReview]);
   const [requested, setRequested] = useState(() => crypto.randomUUID());
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -218,9 +225,6 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
     result?.review_verdict === 'blocking' && result.reviewed_target?.kind === 'implementation patch' &&
     !progress.superseded.has(result.reviewed_target.execution_id) &&
     progress.latestReview.get(result.reviewed_target.execution_id) === job.key);
-  const needsDirection = (step) => Boolean((jobs || []).find((job) =>
-    job.key === step.result?.reviewed_target?.execution_id)?.repair_review_key);
-
   const selected = steps.find((step) => step.key === selection) || steps[0];
   const workflows = Object.keys(MODES).filter((value) => Object.values(agents).some((allowed) => allowed.includes(value)));
   const selectedMode = workflows.includes(mode) ? mode : workflows[0] || '';
@@ -235,41 +239,12 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
   }
-  async function prepareRepair(job) {
-    setBusy(true); setError('');
-    try {
-      const draft = await send(`${path}/${job.key}/repair-draft`);
-      setRepair({ ...draft, review: job.key, direction: draft.needs_design_review ? draft.suggested_direction : '',
-        criteria: draft.suggested_contract.acceptance_criteria.join('\n'),
-        tests: draft.suggested_contract.test_paths.join('\n'),
-      });
-    } catch (err) { setError(err.message); }
-    finally { setBusy(false); }
-  }
-  const criteria = repair?.criteria.split('\n').map((line) => line.trim()).filter(Boolean) || [];
-  const testPaths = repair?.tests.split('\n').map((line) => line.trim()).filter(Boolean) || [];
-  const previousContract = repair?.previous_contract;
-  const contractChanged = !repair?.needs_design_review || !previousContract ||
-    JSON.stringify(criteria) !== JSON.stringify(previousContract.acceptance_criteria) ||
-    JSON.stringify(testPaths) !== JSON.stringify(previousContract.test_paths);
-  const contractReady = criteria.length > 0 && criteria.length <= 8 && criteria.every((line) => line.length <= 1000) &&
-    testPaths.length <= 8 &&
-    testPaths.every((path) => /^tests\/(?:[A-Za-z0-9_-]+\/)*test_[A-Za-z0-9_-]+\.py$/.test(path)) &&
-    contractChanged;
-
   async function startRepair(event) {
     event.preventDefault();
-    if (!contractReady || !repair?.prompt.trim() || (repair.needs_design_review && !repair.direction.trim())) return;
+    if (!repair || active || busy) return;
     setBusy(true); setError('');
     try {
-      const started = await send(path, {
-        request_id: requested, agent: repair.agent, mode: 'IMPLEMENT',
-        repair_review_key: repair.review, repair_prompt: repair.prompt,
-        repair_direction: repair.direction.trim() || null,
-        repair_contract: {
-          acceptance_criteria: criteria, test_paths: testPaths,
-        },
-      });
+      const started = await send(`${path}/${repair}/fix-findings/${requested}`, {});
       setRequested(crypto.randomUUID());
       setRepair(null);
       setSelection(`${started.key}/0`);
@@ -338,9 +313,10 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
           const mayChange = canWrite && task.status !== 'cancelled';
           const mayCancel = mayChange && current && job.state !== 'CANCEL_REQUESTED' && ACTIVE.includes(job.state);
           const mayRetry = mayChange && current && ['BLOCKED', 'FAILED'].includes(job.state) && (task.status !== 'done' || job.mode === 'APPLY_APPROVED');
-          const mayReview = mayChange && !active && agents.codex?.includes('REVIEW') &&
+          const mayReview = mayChange && !job.guided_repair && !active && agents.codex?.includes('REVIEW') &&
             job.agent === 'codex' && !progress.reviewed.has(job.key) && !progress.superseded.has(job.key) &&
             (!job.repair_contract || result?.verification?.passed) &&
+            (!job.repair_review_key || result?.regression_proof?.passed) &&
             result?.artifacts.some((item) => item.name === 'Local implementation patch');
           const target = result?.reviewed_target;
           const mayApply = mayChange && !active && task.status !== 'cancelled' &&
@@ -348,8 +324,9 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
             result.review_verdict === 'passed' && result.verification?.passed && job.repair_contract &&
             !progress.superseded.has(target.execution_id) && !progress.applications.has(target.execution_id) &&
             progress.latestReview.get(target.execution_id) === job.key;
-          const escalated = step.key === latestBlocker?.key && needsDirection(step);
-          const mayRepair = mayChange && !active && agents.codex?.includes('IMPLEMENT') &&
+          const stopped = step.key === latestBlocker?.key && job.guided_repair;
+          const mayRepair = mayChange && !job.guided_repair && !active && agents.codex?.includes('IMPLEMENT') &&
+            agents.codex?.includes('REVIEW') &&
             result?.review_verdict === 'blocking' && result.reviewed_target?.kind === 'implementation patch' &&
             !progress.superseded.has(result.reviewed_target.execution_id) &&
             progress.latestReview.get(result.reviewed_target.execution_id) === job.key;
@@ -357,9 +334,10 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
             <button type="button" className="execution-step-select" aria-pressed={selected?.key === step.key}
               onClick={() => setSelection(step.key)}>
               <span className="execution-step-heading"><strong>{stepTitle(step)}</strong>
-                <span className={step.attention ? 'execution-badge attention' : 'execution-badge'}>{escalated ? 'Needs design review' : step.state}</span></span>
+                <span className={step.attention ? 'execution-badge attention' : 'execution-badge'}>{step.state}</span></span>
               {(progress.superseded.has(job.key) || progress.superseded.has(result?.reviewed_target?.execution_id)) &&
                 <span className="muted">Superseded by a revised patch</span>}
+              {stopped && <span className="muted">Repair stopped. Review the unresolved finding.</span>}
               <span className="muted">{job.agent} · {job.mode === 'APPLY_APPROVED' ? 'Apply approved patch' : MODES[job.mode]}{step.attempts.length > 0 ?
                 ` · ${step.attempts.length} ${step.attempts.length === 1 ? 'attempt' : 'attempts'}` : ''}</span>
               <StepTimes step={step} now={now} compact />
@@ -374,7 +352,7 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
               {mayApply && <button type="button" className="button primary" disabled={busy}
                 onClick={() => { setSelection(step.key); setApplyApproval(step.key); }}>Apply approved patch</button>}
               {mayRepair && <button type="button" className="button primary" disabled={busy}
-                onClick={() => { setSelection(step.key); prepareRepair(job); }}>{escalated ? 'Review blockers' : 'Revise patch'}</button>}
+                onClick={() => { setSelection(step.key); setRepair(job.key); }}>Fix review findings</button>}
             </div>}
           </li>;
         })}
@@ -399,43 +377,12 @@ function TaskExecution({ task, send, agents, close, navigate, canWrite, draftAva
       <div className="workspace-actions"><button className="button primary" disabled={busy}>Review the same patch</button>
         <button type="button" className="button outlined" onClick={() => setReviewBudget(null)}>Close</button></div>
     </form>}
-    {repair?.review === selected.job.key && <form className="detail workspace-form" onSubmit={startRepair}>
-      <h5>{repair.needs_design_review ? 'Needs design review' : 'Revise this patch'}</h5>
-      {repair.needs_design_review && <>
-        <p>This patch was revised and blocked again. Review both sets of findings and tell the agent what to change about its approach before continuing.</p>
-        {repair.previous_review && <details>
-          <summary>Previous blocking findings</summary>
-          <p className="execution-text">{repair.previous_review.findings}</p>
-        </details>}
-        <label>Design direction<textarea rows={4} maxLength={8000} disabled={busy} required
-          value={repair.direction} onChange={(event) => setRepair({ ...repair, direction: event.target.value })}
-          placeholder="Clarify the expected behavior, narrow the scope, or specify which regression tests to add." /></label>
-      </>}
-      <p><strong>Recommended agent and model</strong> · Codex · {repair.model}</p>
-      <p>{repair.reason} The new patch will return to Review.</p>
-      <p>Source patch SHA-256 <code>{repair.patch_sha256}</code></p>
-      <p><strong>Usage so far</strong> · {number(repair.usage.tokens)} reported tokens
-        {repair.usage.unknown > 0 && ` · ${repair.usage.unknown} attempts without usage`}</p>
-      <label>Acceptance criteria <span className="muted">One observable result per line</span>
-        <textarea value={repair.criteria} rows={4} disabled={busy} required
-          onChange={(event) => setRepair({ ...repair, criteria: event.target.value })} />
-      </label>
-      <p>{testPaths.length ? `Required checks: ${testPaths.join(', ')}` : 'Required check: Python test suite'}</p>
-      <details>
-        <summary>Change required checks</summary>
-        <label>Python test files <span className="muted">Leave blank to run the full Python suite.</span>
-          <textarea value={repair.tests} rows={3} disabled={busy}
-            onChange={(event) => setRepair({ ...repair, tests: event.target.value })} />
-        </label>
-      </details>
-      <p className="muted">Starting approves one model repair attempt. Required checks run before any follow-up review.</p>
-      {!contractChanged && <p role="status">Change the acceptance criteria or tests before continuing.</p>}
-      <label>Repair prompt<textarea ref={repairPrompt} rows={8} maxLength={8000} required disabled={busy}
-        value={repair.prompt} onChange={(event) => setRepair({ ...repair, prompt: event.target.value })} /></label>
+    {repair === selected.job.key && <form className="detail workspace-form" onSubmit={startRepair}>
+      <h5>Approve one repair and independent review</h5>
+      <p>Codex will use the original task, the exact patch, and the recorded findings. It will reproduce the failure, test related cases, and send the revision for an independent review only if the required checks pass. The workflow stops if the review finds an unresolved issue.</p>
       <div className="workspace-actions">
-        <button className="button primary" disabled={busy || active || !contractReady || !repair.prompt.trim() || (repair.needs_design_review && !repair.direction.trim())}>
-          {repair.needs_design_review ? 'Continue with this direction' : 'Generate revised patch'}</button>
-        <button className="button outlined" type="button" disabled={busy} onClick={() => setRepair(null)}>Close</button>
+        <button className="button primary" disabled={busy || active}>Approve repair</button>
+        <button className="button outlined" type="button" disabled={busy} onClick={() => setRepair(null)}>Cancel</button>
       </div>
     </form>}
       </StepDetails>}

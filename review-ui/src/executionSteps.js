@@ -13,7 +13,7 @@ const activeStates = new Set(['READY', 'RUNNING', 'BLOCKED', 'CANCEL_REQUESTED']
 const endedStates = new Set(['BLOCKED', 'COMPLETED', 'PLANNED', 'REVIEW', 'FAILED', 'CANCELLED']);
 
 export function executionSteps(jobs) {
-  const steps = jobs.flatMap((job) => (PHASES[job.mode] || []).flatMap((phase, index) => {
+  const steps = jobs.flatMap((job) => (job.guided_repair ? ['Implement', 'Review'] : PHASES[job.mode] || []).flatMap((phase, index) => {
     const result = job.results[index];
     const current = index === job.phase && !result;
     const future = index > job.phase;
@@ -28,7 +28,7 @@ export function executionSteps(jobs) {
       endedStates.has(lastEvent?.state) || (result && lastEvent?.state === 'READY')
     ) ? lastEvent.timestamp : undefined;
     const state = reviewBlocked(result) ? 'Changes required'
-      : result ? (phase === 'Implement' && !result.completed ? 'Needs review' : 'Finished')
+      : result ? 'Finished'
         : current ? ({
           READY: 'Queued', RUNNING: 'Running', BLOCKED: 'Waiting to retry',
           CANCEL_REQUESTED: 'Cancelling', CANCELLED: 'Cancelled', FAILED: 'Failed',

@@ -232,6 +232,28 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(json.dumps({
     assert b"+repaired in a new clone" in Path(result["artifacts"][0]["reference"]).read_bytes()
     assert sha256(original.read_bytes()).hexdigest() == original_digest
 
+    review_prompt = json.dumps(
+        {
+            **prompt,
+            "guided_repair": True,
+            "repair_patch_sha256": original_digest,
+        }
+    )
+    with pytest.raises(BridgeError, match="earlier phase"):
+        bridge.run("2" * 64, "review", review_prompt)
+    cli.write_text("""#!/usr/bin/env python3
+import json, pathlib, sys
+assert "Check the underlying requirement" in sys.stdin.read()
+assert pathlib.Path("fixture.txt").read_text() == "repaired in a new clone"
+assert sys.argv[sys.argv.index("--sandbox") + 1] == "read-only"
+pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text(json.dumps({
+    "summary": "Independent review passed.", "tests": [], "approved": True,
+}))
+""")
+    reviewed = bridge.run("3" * 64, "review", review_prompt)
+    assert reviewed["reviewed_target"]["execution_id"] == "3" * 64
+    assert reviewed["reviewed_target"]["patch_sha256"] == result["artifacts"][0]["sha256"]
+
 
 def test_required_regression_failure_skips_the_model_reviewer(bridge, monkeypatch):
     implementation = bridge.run(
@@ -388,3 +410,53 @@ def test_initial_implementation_selects_and_runs_required_checks(bridge, monkeyp
     review = bridge.run(identity, "review", json.dumps({**context, "repair_contract": contract}))
     assert review["verification"]["passed"]
     assert checks == [contract, contract]
+
+
+@pytest.mark.parametrize("expected", ["revised", "blocked", "neither"])
+def test_regression_proof_runs_same_test_on_blocked_patch_and_revision(
+    bridge, monkeypatch, expected
+):
+    import subprocess
+    import sys
+
+    directory = bridge.state / ("d" * 64)
+    directory.mkdir()
+    checkout = bridge.prepare_repo(directory)
+    (checkout / "fixture.txt").write_text("blocked")
+    git(checkout, "add", ".")
+    captured = directory / "repair-input.patch"
+    captured.write_bytes(git(checkout, "diff", "--cached", "--binary"))
+    blocked_tree = git(checkout, "write-tree").decode().strip()
+    (checkout / "fixture.txt").write_text("revised")
+    (checkout / "tests").mkdir()
+    (checkout / "tests/test_regression.py").write_text(
+        "from pathlib import Path\n"
+        "def test_regression():\n"
+        f"    assert Path('fixture.txt').read_text() == {expected!r}\n"
+    )
+    git(checkout, "add", ".")
+
+    def pytest_check(repo, paths):
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", *paths],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return {
+            "passed": result.returncode == 0,
+            "exit_code": result.returncode,
+            "output": result.stdout,
+            "command": "pytest",
+        }
+
+    monkeypatch.setattr(bridge, "pytest_check", pytest_check)
+    proof = bridge.prove_repair(checkout, directory, captured, blocked_tree)
+    assert proof["passed"] is (expected == "revised")
+    if expected != "blocked":
+        assert proof["reproduced_tests"] == ["tests/test_regression.py::test_regression"]
+        assert proof["revision"]["passed"] is (expected == "revised")
+    else:
+        assert proof["baseline"]["passed"]
+        assert "revision" not in proof

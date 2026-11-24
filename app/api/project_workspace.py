@@ -102,6 +102,8 @@ def build_workspace_router(prefix, workspace, executor, capture):
     @router.post("/{project}/workspace/tasks/{task}/executions")
     async def start(project: MemoryKey, task: MemoryKey, command: StartExecution, request: Request):
         actor = authorize(project, request, write=True)
+        if command.guided_repair:
+            raise HTTPException(422, "Use the repair approval action")
         await executor.refresh()
         if command.mode not in executor.modes().get(command.agent, []):
             raise HTTPException(422, "This agent does not support the selected mode")
@@ -116,6 +118,22 @@ def build_workspace_router(prefix, workspace, executor, capture):
         if not await executor.can_apply_approved():
             raise HTTPException(409, "A Codex bridge with approved patch support is required")
         return await invoke(workspace.apply_approved, project, task, execution, actor)
+
+    @router.post(
+        "/{project}/workspace/tasks/{task}/executions/{execution}/fix-findings/{request_id}"
+    )
+    async def fix_findings(
+        project: MemoryKey,
+        task: MemoryKey,
+        execution: MemoryKey,
+        request_id: MemoryKey,
+        request: Request,
+    ):
+        actor = authorize(project, request, write=True)
+        await executor.refresh()
+        if not {"IMPLEMENT", "REVIEW"} <= set(executor.modes().get("codex", [])):
+            raise HTTPException(409, "Codex Implement and Review must both be enabled")
+        return await invoke(workspace.fix_findings, project, task, execution, request_id, actor)
 
     @router.get("/{project}/workspace/tasks/{task}/executions/{execution}/repair-draft")
     async def repair_draft(
