@@ -1,3 +1,4 @@
+import { ContextHelp } from './ContextHelp.jsx';
 import { useEffect, useState } from 'react';
 import { reviewRequest } from './api.js';
 
@@ -138,7 +139,7 @@ export function EffectivenessPage({ projectKey, projects, token, onUnauthorized 
   }, [submitted, token, onUnauthorized]);
 
   return <>
-    <header className="page-heading"><div><h1>Engineering effectiveness</h1>
+    <header className="page-heading"><div><div className="heading-with-help"><h1>Engineering effectiveness</h1><ContextHelp topic="effectiveness" /></div>
       <p>Compare delivery outcomes, architectural coverage, and estimated cost avoidance.</p></div></header>
     <form className="detail effectiveness-filters" onSubmit={(event) => {
       event.preventDefault();

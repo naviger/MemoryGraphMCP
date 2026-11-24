@@ -1,3 +1,5 @@
+import { projectHelpTopics } from './helpTopics.js';
+import { ContextHelp } from './ContextHelp.jsx';
 import ProjectWorkspace, { CaptureStatus } from './ProjectWorkspace.jsx';
 import ProjectGuidance from './ProjectGuidance.jsx';
 import TrackerOverview from './TrackerOverview.jsx';
@@ -313,6 +315,8 @@ export function ProjectsPage({ projectKey, token, navigate, onUnauthorized, requ
   return (
     <InspectorView token={token} navigate={navigate} onUnauthorized={onUnauthorized}>
       <section className="project-page">
+        <header className="page-heading"><div><div className="heading-with-help"><h1>Project Overview</h1><ContextHelp topic={projectHelpTopics[tab]} /></div>
+          <p>Browse graph entities and memory documents associated with a project.</p></div></header>
         <header className="page-heading"><div><h1>Project Overview</h1>
           <p>Manage project work and explore its architectural memory.</p></div></header>
         {!projectKey && <p className="muted">Choose a project in the top bar to browse its inventory.</p>}

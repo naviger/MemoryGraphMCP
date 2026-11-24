@@ -1,3 +1,4 @@
+import { ContextHelp } from './ContextHelp.jsx';
 import { useEffect, useState } from 'react';
 import { reviewRequest } from './api.js';
 
@@ -30,7 +31,7 @@ export function TokenUsagePage({ projectKey, token, onUnauthorized }) {
 
   return <>
     <header className="page-heading">
-      <div><h1>Token usage</h1><p>Compare context size, estimated savings, and reported retrieval outcomes.</p></div>
+      <div><div className="heading-with-help"><h1>Token usage</h1><ContextHelp topic="token-usage" /></div><p>Compare context size, estimated savings, and reported retrieval outcomes.</p></div>
       <div className="toolbar">
         <label>Scope <select value={actualScope} onChange={(event) => setScope(event.target.value)}>
           <option value="session">Current session</option>

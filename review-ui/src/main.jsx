@@ -12,6 +12,7 @@ import { HomePage } from './HomePage.jsx';
 import { ProjectsPage } from './ProjectsPage.jsx';
 import { SidebarAccount } from './SidebarAccount.jsx';
 import { TokenUsagePage } from './TokenUsagePage.jsx';
+import { ContextHelp, HelpNavigation } from './ContextHelp.jsx';
 import { HelpPage } from './HelpPage.jsx';
 import ProjectGuidance from './ProjectGuidance.jsx';
 import { GraphPage } from './GraphPage.jsx';
@@ -115,7 +116,8 @@ function QueueList({ section, rows, selectedKey, select, offset, setOffset, hasM
 
 function detailLocation() {
   if (/^\/search\/?$/.test(window.location.pathname)) return { destination: 'search' };
-  if (/^\/help\/?$/.test(window.location.pathname)) return { destination: 'help' };
+  const help = window.location.pathname.match(/^\/help(?:\/([a-z0-9-]+))?\/?$/);
+  if (help) return { destination: 'help', key: help[1] };
   if (window.location.pathname.replace(/\/$/, '') === '/agent-settings') return { destination: 'agent-settings' };
   if (/^\/global-guidance\/?$/.test(window.location.pathname)) return { destination: 'global-guidance' };
   if (/^\/token-usage\/?$/.test(window.location.pathname)) return { destination: 'token-usage' };
@@ -386,7 +388,7 @@ function App() {
   const selected = rows.find((row) => keyFor(row) === selection[section]) ?? rows[0];
   const signedIn = Boolean(session?.subject);
   return (
-    <>
+    <HelpNavigation.Provider value={{ navigate, projectKey, page: window.location.pathname }}>
       <header className="topbar">
         <div className="brand"><span className="brand-icon"><Network size={21} aria-hidden="true" /></span>
           <span>MemoryGraph<span className="brand-suffix">MCP</span></span>
@@ -492,13 +494,14 @@ function App() {
                 returnTo={route?.destination === 'graph' ? window.history.state?.returnTo : null} />
             </div>
           )}
-          {session && route?.destination === 'help' && <HelpPage token={token} onUnauthorized={expireSession} />}
+          {route?.destination === 'help' && <HelpPage topicKey={route.key} projectKey={projectKey}
+            navigate={navigate} token={token} signedIn={Boolean(session)} onUnauthorized={expireSession} />}
           {session && route?.destination === 'agent-settings' && (session.role === 'admin'
             ? <AgentSettings token={token} onUnauthorized={expireSession} />
             : <p role="alert">Administrator access is required.</p>)}
           {session && route?.destination === 'global-guidance' && <>
             <header className="page-heading"><div>
-              <h1>Global Guidance</h1>
+              <div className="heading-with-help"><h1>Global Guidance</h1><ContextHelp topic="guidance" /></div>
               <p>Publish instructions that apply across all projects.</p>
             </div></header>
             {session.role === 'admin'
@@ -511,7 +514,7 @@ function App() {
             <p role="status">Loading projects…</p>}
           {session && route?.destination === 'token-usage' && <TokenUsagePage projectKey={projectKey}
             token={token} onUnauthorized={expireSession} />}
-          {session && ['ask', 'search', 'graph', 'projects', 'help', 'global-guidance', 'agent-settings', 'token-usage', 'effectiveness'].includes(route?.destination)
+          {(route?.destination === 'help' || session && ['ask', 'search', 'graph', 'projects', 'global-guidance', 'agent-settings', 'token-usage', 'effectiveness'].includes(route?.destination))
             ? null : session && !isQueueRoute ? (
             <EntityDetailPage key={`${route.destination}/${route.key}`}
               route={route} token={token} navigate={navigate} onUnauthorized={expireSession}
@@ -520,7 +523,8 @@ function App() {
           <>
           <header className="page-heading">
             <div>
-              <h1>{queueSection ? SECTIONS[section].label : 'Home'}</h1>
+              <div className="heading-with-help"><h1>{queueSection ? SECTIONS[section].label : 'Home'}</h1>
+                <ContextHelp topic={queueSection ? 'review' : session ? 'home' : 'account'} /></div>
               <p>{queueSection ? SECTIONS[section].description : 'Review open issues across projects or open a project overview.'}</p>
             </div>
             {session && queueSection && <div className="toolbar">
@@ -573,7 +577,7 @@ function App() {
           )}
         </main>
       </div>
-    </>
+    </HelpNavigation.Provider>
   );
 }
 
